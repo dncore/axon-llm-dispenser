@@ -73,22 +73,37 @@ body {
 .version { color: var(--muted); font-size: 12px; }
 
 .main {
-  max-width: 860px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 20px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.col {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .card {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 18px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
-.card h2 { margin: 0 0 14px; font-size: 15px; }
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 
@@ -215,5 +230,54 @@ body {
 /* Claude 角色映射 */
 .claude-role-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; flex-shrink: 0; }
 .claude-role-label { width: 200px; font-size: 12px; flex-shrink: 0; color: var(--muted); }
-.claude-role-select { flex: 1; min-width: 0; }
-.claude-preview { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ok); white-space: nowrap; }
+.claude-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ok); font-weight: 600; white-space: nowrap; width: 52px; text-align: right; }
+
+/* 自定义下拉 */
+.cselect { position: relative; flex: 1; min-width: 0; }
+.cselect-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cselect-btn:hover { border-color: var(--accent); }
+.cselect-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cselect-arrow { color: var(--muted); font-size: 10px; }
+.cselect-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 210;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cselect-popup.open { display: flex; }
+.cselect-filter { padding: 8px 10px; border: none; border-bottom: 1px solid var(--border); font: inherit; font-size: 13px; outline: none; }
+.cselect-list { max-height: 230px; overflow-y: auto; }
+.cselect-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cselect-item:hover { background: #eff6ff; }
+.cselect-item.active { color: var(--accent); font-weight: 600; }

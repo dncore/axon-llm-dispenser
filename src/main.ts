@@ -3,7 +3,7 @@
 import "./styles.css";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
-import { formatClaudeModel } from "./core/claude";
+import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 
 const APP_VERSION = "0.1.0";
@@ -74,12 +74,57 @@ function showToast(msg: string, kind: "info" | "error"): void {
 function build(): void {
   const root = $("app");
 
+  const connCard = h("section", { class: "card" }, [
+    h("h2", {}, ["连接设置"]),
+    h("div", { class: "grid2" }, [
+      field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
+      field("显示名", "input-display", "配置界面展示名", "Axon"),
+    ]),
+    field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
+    field("API Key", "input-key", "网关凭据", "", "password"),
+    field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
+    h("div", { class: "row" }, [
+      h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
+      h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
+      h("span", { id: "conn-status", class: "hint" }, []),
+    ]),
+  ]);
+
+  const modelsCard = h("section", { class: "card" }, [
+    h("h2", {}, ["模型目录"]),
+    h("div", { class: "row" }, [
+      h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
+      h("span", { id: "model-count", class: "hint" }, []),
+    ]),
+    h("label", { class: "row toggle" }, [
+      h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
+      h("span", {}, ["过滤 Doubao 系模型(拉取与生成配置均不含 doubao)"]),
+    ]),
+    h("textarea", { id: "models", class: "models", placeholder: "每行一个模型 ID;可手动增删。" }, []),
+  ]);
+
+  const toolsCard = h("section", { class: "card" }, [
+    h("h2", {}, ["工具接入"]),
+    toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
+    toolCard("codex", "Codex", ["配置", "状态", "还原"]),
+    toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
+    toolCard("pi", "pi agent", ["配置", "状态", "还原"]),
+    toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
+  ]);
+
+  const outputCard = h("section", { class: "card" }, [
+    h("h2", {}, ["输出"]),
+    h("div", { id: "output", class: "output" }, [
+      h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
+    ]),
+  ]);
+
   root.append(
     h("div", { id: "toast-container", class: "toast-container" }, []),
     h("header", { class: "header" }, [
       h("div", { class: "brand" }, [
         h("h1", {}, ["axon-llm-dispenser"]),
-        h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / DeepSeek Harness"]),
+        h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / dsh / Claude / pi"]),
       ]),
       h("div", { class: "header-actions" }, [
         h("span", { class: "version" }, [`v${APP_VERSION}`]),
@@ -88,50 +133,8 @@ function build(): void {
     ]),
 
     h("main", { class: "main" }, [
-      h("section", { class: "card" }, [
-        h("h2", {}, ["连接设置"]),
-        h("div", { class: "grid2" }, [
-          field("Provider 名", "input-provider", "用于各工具中的路由名(默认 axon)", "axon"),
-          field("显示名", "input-display", "配置界面展示名", "Axon"),
-        ]),
-        field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
-        field("API Key", "input-key", "网关凭据", "", "password"),
-        field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
-        h("div", { class: "row" }, [
-          h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
-          h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
-          h("span", { id: "conn-status", class: "hint" }, []),
-        ]),
-      ]),
-
-      h("section", { class: "card" }, [
-        h("h2", {}, ["模型目录"]),
-        h("div", { class: "row" }, [
-          h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
-          h("span", { id: "model-count", class: "hint" }, []),
-        ]),
-        h("label", { class: "row toggle" }, [
-          h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
-          h("span", {}, ["过滤 Doubao 系模型(默认开启,拉取与生成配置均不含 doubao)"]),
-        ]),
-        h("textarea", { id: "models", class: "models", placeholder: "每行一个模型 ID;可手动增删。点击「拉取模型」自动填充。" }, []),
-      ]),
-
-      h("section", { class: "card" }, [
-        h("h2", {}, ["工具接入"]),
-        toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-        toolCard("codex", "Codex", ["配置", "状态", "还原"]),
-        toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
-        toolCard("pi", "pi agent", ["配置", "状态", "还原"]),
-        toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
-      ]),
-
-      h("section", { class: "card" }, [
-        h("h2", {}, ["输出"]),
-        h("div", { id: "output", class: "output" }, [
-          h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
-        ]),
-      ]),
+      h("div", { class: "col" }, [connCard, modelsCard]),
+      h("div", { class: "col" }, [toolsCard, outputCard]),
     ]),
 
     h("footer", { class: "footer" }, [
@@ -145,6 +148,49 @@ function field(label: string, id: string, placeholder: string, value: string, ty
     h("span", { class: "field-label" }, [label]),
     h("input", { id, class: "input", type, placeholder, value }),
   ]);
+}
+
+/** 自定义下拉选择器(替代原生 select,匹配应用视觉)。 */
+function customSelect(options: string[], initial: string, onChange: (v: string) => void): { el: El; value: () => string } {
+  let current = options.includes(initial) ? initial : options[0] ?? "";
+  const valueSpan = h("span", { class: "cselect-value" }, [current]);
+  const btn = h("button", { class: "cselect-btn", type: "button" }, [valueSpan, h("span", { class: "cselect-arrow" }, ["▾"])]);
+  const filter = h("input", { class: "cselect-filter", type: "text", placeholder: "搜索模型…" });
+  const list = h("div", { class: "cselect-list" }, []);
+  const popup = h("div", { class: "cselect-popup" }, [filter, list]);
+  const wrap = h("div", { class: "cselect" }, [btn, popup]);
+
+  const close = (): void => popup.classList.remove("open");
+  const render = (): void => {
+    list.replaceChildren();
+    const q = filter.value.toLowerCase();
+    for (const o of options) {
+      if (q && !o.toLowerCase().includes(q)) continue;
+      const item = h("button", { class: "cselect-item", type: "button" }, [o]);
+      if (o === current) item.classList.add("active");
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        current = o;
+        valueSpan.textContent = o;
+        close();
+        onChange(o);
+      });
+      list.append(item);
+    }
+  };
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = popup.classList.toggle("open");
+    if (isOpen) {
+      filter.value = "";
+      render();
+      filter.focus();
+    }
+  });
+  filter.addEventListener("input", render);
+  filter.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", close);
+  return { el: wrap, value: () => current };
 }
 
 function toolCard(id: string, name: string, actions: string[]): El {
@@ -199,7 +245,6 @@ async function ensureModels(): Promise<string[] | null> {
       notify("请先填写 Base URL", "error");
       return null;
     }
-    notify("模型列表为空,正在自动拉取 /models…", "info");
     try {
       ids = await flows.testConnection(config.baseUrl, config.apiKey);
       ($("models") as HTMLTextAreaElement).value = ids.join("\n");
@@ -255,7 +300,6 @@ function openClaudeConfigModal(): void {
         notify("请先填写 Base URL", "error");
         return;
       }
-      notify("模型列表为空,正在自动拉取 /models…", "info");
       try {
         ids = await flows.testConnection(config.baseUrl, config.apiKey);
         ($("models") as HTMLTextAreaElement).value = ids.join("\n");
@@ -293,7 +337,7 @@ function openClaudeConfigModal(): void {
       { key: "fable", label: "Fable DEFAULT_FABLE" },
       { key: "subagent", label: "子代理 SUBAGENT_MODEL" },
     ];
-    const selects: Record<string, HTMLSelectElement> = {};
+    const selects: Record<string, { value: () => string }> = {};
 
     const overlay = h("div", { class: "modal-overlay" }, []);
     const modal = h("div", { class: "modal" }, [
@@ -302,19 +346,18 @@ function openClaudeConfigModal(): void {
     ]);
     const list = h("div", { class: "modal-list" }, []);
     for (const r of roleDefs) {
-      const sel = h("select", { class: "input claude-role-select" }, ids.map((id) => h("option", { value: id }, [id])));
-      sel.value = pickDefault(r.key);
-      selects[r.key] = sel;
       const preview = h("span", { class: "claude-preview" }, []);
-      const updatePreview = (): void => {
-        const cw = buildResolvedModels([sel.value])[0]?.contextWindow ?? 0;
-        preview.textContent = `→ ${formatClaudeModel(sel.value, cw)}`;
+      const updatePreview = (v: string): void => {
+        const cw = buildResolvedModels([v])[0]?.contextWindow ?? 0;
+        const suffix = claudeModelSuffix(cw);
+        preview.textContent = suffix ? `[${suffix}]` : "";
       };
-      sel.addEventListener("change", updatePreview);
-      updatePreview();
+      const sel = customSelect(ids, pickDefault(r.key), updatePreview);
+      selects[r.key] = sel;
+      updatePreview(sel.value());
       list.append(h("div", { class: "claude-role-row" }, [
         h("span", { class: "claude-role-label" }, [r.label]),
-        sel,
+        sel.el,
         preview,
       ]));
     }
@@ -326,12 +369,12 @@ function openClaudeConfigModal(): void {
       overlay.remove();
       void run("Claude 配置", async () => {
         const r = await flows.configureClaude(config, {
-          main: selects.main.value,
-          haiku: selects.haiku.value,
-          sonnet: selects.sonnet.value,
-          opus: selects.opus.value,
-          fable: selects.fable.value,
-          subagent: selects.subagent.value,
+          main: selects.main.value(),
+          haiku: selects.haiku.value(),
+          sonnet: selects.sonnet.value(),
+          opus: selects.opus.value(),
+          fable: selects.fable.value(),
+          subagent: selects.subagent.value(),
         });
         log(r.lines);
       });

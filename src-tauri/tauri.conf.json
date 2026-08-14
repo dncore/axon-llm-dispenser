@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "axon-llm-dispenser",
-        "width": 880,
-        "height": 740,
-        "minWidth": 720,
-        "minHeight": 600,
+        "width": 1080,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 680,
         "resizable": true
       }
     ],
@@ -28,7 +28,7 @@
     "active": true,
     "targets": "all",
     "category": "DeveloperTool",
-    "shortDescription": "把自有的 OpenAI 兼容网关接入 Codex / Reasonix / DeepSeek Harness",
+    "shortDescription": "\u628a\u81ea\u6709\u7684 OpenAI \u517c\u5bb9\u7f51\u5173\u63a5\u5165 Codex / Reasonix / DeepSeek Harness",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
