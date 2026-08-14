@@ -336,8 +336,14 @@ async function ensureModels(): Promise<string[] | null> {
   return ids;
 }
 
+/** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
+function clearOverlays(): void {
+  document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
+}
+
 /** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。 */
 function confirmDialog(message: string, onOk: () => void): void {
+  clearOverlays();
   const overlay = h("div", { class: "modal-overlay" }, []);
   const modal = h("div", { class: "modal modal-sm" }, [
     h("p", { class: "confirm-text" }, [message]),
@@ -356,11 +362,13 @@ function confirmDialog(message: string, onOk: () => void): void {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) close();
   });
+  overlay.append(modal);
   document.body.append(overlay);
 }
 
 /** Claude 模型映射弹窗:为每个角色选模型,按上下文映射表自动加 [1m]/[200k] 后缀。 */
 function openClaudeConfigModal(): void {
+  clearOverlays();
   void run("Claude 模型选择", async () => {
     readFields();
     if (!validateProvider()) return;
@@ -460,6 +468,7 @@ function openClaudeConfigModal(): void {
 
 /** 还原弹窗:列出所选工具的全部备份,用户点选恢复。 */
 function openRestoreModal(tool: string): void {
+  clearOverlays();
   void run(`还原(${tool})`, async () => {
     const targets = await flows.getRestoreTargets(tool);
     const backups: { label: string; name: string; path: string; time: string; size: string }[] = [];
@@ -720,6 +729,12 @@ async function boot(): Promise<void> {
   });
   // 关闭 webview 右键默认菜单(Reload/返回等)
   document.addEventListener("contextmenu", (e) => e.preventDefault());
+  // ESC 关闭最上层弹窗
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") clearOverlays();
+  });
+  // 全局 JS 错误显示为 toast(暴露隐藏错误)
+  window.addEventListener("error", (ev) => notify(`页面错误: ${ev.message}`, "error"));
   // 弹窗打开时锁定主页面滚动(body.modal-open → overflow:hidden)
   const syncModalLock = (): void => {
     document.body.classList.toggle("modal-open", document.querySelectorAll(".modal-overlay").length > 0);
