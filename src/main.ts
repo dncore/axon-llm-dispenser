@@ -341,6 +341,32 @@ async function ensureModels(): Promise<string[] | null> {
   return ids;
 }
 
+let tipEl: El | null = null;
+
+/** JS tooltip:fixed 定位逃逸弹窗 overflow:hidden,自动贴边。 */
+function showTip(target: El, text: string): void {
+  hideTip();
+  const el = h("div", { class: "tip-popup" }, [text]);
+  document.body.append(el);
+  const r = target.getBoundingClientRect();
+  const er = el.getBoundingClientRect();
+  // 默认显示在图标上方,视口顶部放不下时放下方
+  let top = r.top - er.height - 6;
+  if (top < 8) top = r.bottom + 6;
+  el.style.top = `${top}px`;
+  el.style.left = `${r.left + r.width / 2}px`;
+  el.style.transform = "translateX(-50%)";
+  const fr = el.getBoundingClientRect();
+  if (fr.left < 8) el.style.left = "8px";
+  else if (fr.right > window.innerWidth - 8) el.style.left = `${window.innerWidth - fr.width - 8}px`;
+  tipEl = el;
+}
+
+function hideTip(): void {
+  tipEl?.remove();
+  tipEl = null;
+}
+
 /** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
 function clearOverlays(): void {
   document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
@@ -438,11 +464,11 @@ function openClaudeConfigModal(): void {
       const sel = customSelect(ids, pickDefault(r.key), updatePreview);
       selects[r.key] = sel;
       updatePreview(sel.value());
+      const tip = h("span", { class: "claude-tip" }, ["?"]);
+      tip.addEventListener("mouseenter", () => showTip(tip, r.desc));
+      tip.addEventListener("mouseleave", hideTip);
       list.append(h("div", { class: "claude-role-row" }, [
-        h("span", { class: "claude-role-label" }, [
-          r.env,
-          h("span", { class: "claude-tip", "data-tip": r.desc }, ["?"]),
-        ]),
+        h("span", { class: "claude-role-label" }, [r.env, tip]),
         sel.el,
         preview,
       ]));

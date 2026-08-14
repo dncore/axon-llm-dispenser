@@ -289,25 +289,21 @@ body {
   flex-shrink: 0;
   font-family: inherit;
 }
-.claude-tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 6px);
-  transform: translateX(-50%);
+/* JS tooltip:fixed 定位,逃逸弹窗 overflow:hidden */
+.tip-popup {
+  position: fixed;
+  z-index: 700;
   background: #1f2937;
   color: #f9fafb;
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 11px;
   white-space: nowrap;
-  opacity: 0;
+  max-width: 340px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   pointer-events: none;
-  transition: opacity 0.15s;
-  z-index: 600;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-.claude-tip:hover::after { opacity: 1; }
 .claude-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ok); font-weight: 600; white-space: nowrap; width: 52px; text-align: right; }
 
 /* 自定义下拉 */
