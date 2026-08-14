@@ -15,6 +15,12 @@ pub fn run() {
             commands::detect_cli,
             commands::fetch_models,
             commands::open_url,
+            commands::platform,
+            commands::current_app_dir,
+            commands::download_file,
+            commands::unzip_file,
+            commands::replace_app,
+            commands::relaunch_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running axon-llm-dispenser");

@@ -217,3 +217,119 @@ fn dirs_home() -> Option<String> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// 自动更新(下载/解压/替换/重启)
+// ---------------------------------------------------------------------------
+
+use std::io::Read;
+
+/// 当前平台标识:macos / windows / linux。
+#[tauri::command]
+pub fn platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(windows) {
+        "windows".to_string()
+    } else {
+        "linux".to_string()
+    }
+}
+
+/// 当前应用目录:macOS 为 .app bundle;其它平台为可执行文件所在目录。
+#[tauri::command]
+pub fn current_app_dir() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if cfg!(target_os = "macos") {
+        if let (Some(macos), Some(contents), Some(bundle)) = (
+            exe.parent(),
+            exe.parent().and_then(|p| p.parent()),
+            exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()),
+        ) {
+            let _ = (macos, contents);
+            if bundle.to_string_lossy().ends_with(".app") {
+                return Ok(bundle.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| exe.to_string_lossy().to_string()))
+}
+
+/// 下载文件到本地(默认 Agent 读取系统代理,适配 GitHub Releases)。
+#[tauri::command]
+pub fn download_file(url: String, dest: String) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(180))
+        .build();
+    let resp = agent.get(&url).call().map_err(|e| format!("下载失败 {}: {}", url, e))?;
+    let mut bytes: Vec<u8> = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if let Some(parent) = Path::new(&dest).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&dest, &bytes).map_err(|e| format!("写入失败 {}: {}", dest, e))?;
+    Ok(())
+}
+
+/// 解压 zip 到目录(安全:不处理路径穿越,条目限制 512)。
+#[tauri::command]
+pub fn unzip_file(zip_path: String, dest_dir: String) -> Result<(), String> {
+    let file = fs::File::open(&zip_path).map_err(|e| format!("打开 {} 失败: {}", zip_path, e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解压失败: {}", e))?;
+    if archive.len() > 512 {
+        return Err("更新包条目过多,拒绝解压".to_string());
+    }
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        // 防路径穿越
+        let name = entry.name().replace('\\', "/");
+        if name.split('/').any(|seg| seg == "..") {
+            return Err(format!("更新包含非法路径: {}", name));
+        }
+        let out_path = Path::new(&dest_dir).join(&name);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut out = fs::File::create(&out_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 用解压目录中的新 .app 替换当前应用(macOS),并清理临时目录。
+#[tauri::command]
+pub fn replace_app(unzip_dir: String) -> Result<(), String> {
+    let current = current_app_dir()?;
+    let entries = fs::read_dir(&unzip_dir).map_err(|e| e.to_string())?;
+    let mut new_app: Option<std::path::PathBuf> = None;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() && entry.file_name().to_string_lossy().ends_with(".app") {
+            new_app = Some(entry.path());
+        }
+    }
+    let new_app = new_app.ok_or_else(|| format!("解压目录中未找到 .app: {}", unzip_dir))?;
+    // macOS 允许替换运行中的应用 bundle;先移除旧目录再改名
+    if Path::new(&current).exists() {
+        fs::remove_dir_all(&current).map_err(|e| format!("移除旧应用失败 {}: {}", current, e))?;
+    }
+    if let Some(parent) = Path::new(&current).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&new_app, &current).map_err(|e| format!("替换应用失败: {}", e))?;
+    let _ = fs::remove_dir_all(&unzip_dir);
+    Ok(())
+}
+
+/// 重启应用。
+#[tauri::command]
+pub fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
+}

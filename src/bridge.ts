@@ -80,6 +80,25 @@ export function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
+export function platform(): Promise<string> {
+  return invoke<string>("platform");
+}
+export function currentAppDir(): Promise<string> {
+  return invoke<string>("current_app_dir");
+}
+export function downloadFile(url: string, dest: string): Promise<void> {
+  return invoke("download_file", { url, dest });
+}
+export function unzipFile(zipPath: string, destDir: string): Promise<void> {
+  return invoke("unzip_file", { zipPath, destDir });
+}
+export function replaceApp(unzipDir: string): Promise<void> {
+  return invoke("replace_app", { unzipDir });
+}
+export function relaunchApp(): Promise<void> {
+  return invoke("relaunch_app");
+}
+
 // ---------------------------------------------------------------------------
 // 路径
 // ---------------------------------------------------------------------------

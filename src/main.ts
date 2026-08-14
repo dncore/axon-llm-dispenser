@@ -373,14 +373,14 @@ function clearOverlays(): void {
 }
 
 /** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。 */
-function confirmDialog(message: string, onOk: () => void): void {
+function confirmDialog(message: string, onOk: () => void, okLabel = "确认", cancelLabel = "取消"): void {
   clearOverlays();
   const overlay = h("div", { class: "modal-overlay" }, []);
   const modal = h("div", { class: "modal modal-sm" }, [
     h("p", { class: "confirm-text" }, [message]),
     h("div", { class: "modal-footer" }, [
-      h("button", { class: "btn btn-ghost" }, ["取消"]),
-      h("button", { class: "btn" }, ["确认"]),
+      h("button", { class: "btn btn-ghost" }, [cancelLabel]),
+      h("button", { class: "btn" }, [okLabel]),
     ]),
   ]);
   const [cancel, ok] = modal.querySelectorAll("button");
@@ -740,14 +740,42 @@ function bind(): void {
     run("检查更新", async () => {
       const resp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
       if (!resp.ok) return notify("暂未找到发布版本(或仓库尚未公开)", "error");
-      const data = (await resp.json()) as { tag_name?: string; html_url?: string };
+      const data = (await resp.json()) as {
+        tag_name?: string;
+        html_url?: string;
+        assets?: Array<{ name: string; browser_download_url: string }>;
+      };
       const latest = data.tag_name?.replace(/^v/, "") ?? "";
-      if (latest && latest !== APP_VERSION) {
-        notify(`发现新版本 v${latest},当前 v${APP_VERSION}`);
-        if (data.html_url) await bridge.openUrl(data.html_url);
-      } else {
+      if (!latest || latest === APP_VERSION) {
         notify(`已是最新版本 v${APP_VERSION}`, "info");
+        return;
       }
+      const plat = await bridge.platform();
+      const suffix = plat === "macos" ? "macos" : "windows";
+      const asset = data.assets?.find((a) => a.name.includes(`-${suffix}-`));
+      if (!asset) {
+        notify("未找到当前平台的更新包,请前往 Release 页下载", "info");
+        if (data.html_url) await bridge.openUrl(data.html_url);
+        return;
+      }
+      // 弹窗询问是否更新
+      const direct = plat === "macos"; // macOS 可自动替换;Windows 便携 exe 打开下载页
+      confirmDialog(
+        `发现新版本 v${latest}(当前 v${APP_VERSION})\n${direct ? "是否立即下载并更新?(下载完成后自动重启)" : "请下载最新安装包手动替换(运行中的程序无法自替换)"}`,
+        () => {
+          if (!direct) {
+            void bridge.openUrl(asset.browser_download_url);
+            return;
+          }
+          void run("更新", async () => {
+            notify(`正在下载 v${latest}…(约 2MB)`, "info");
+            await flows.performUpdate(asset.browser_download_url);
+            // 若未重启,提示
+            notify("更新完成,应用即将重启", "info");
+          });
+        },
+        "更新",
+      );
     }),
   );
 }
