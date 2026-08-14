@@ -142,7 +142,7 @@ pub async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<serde
         .map_err(|e| format!("请求任务失败: {}", e))?
 }
 
-fn fetch_models_blocking(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+fn fetch_models_blocking(base_url: String, api_key: String) -> Result<Vec<serde_json::Value>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let agent = ureq::AgentBuilder::new()
         .try_proxy_from_env(false) // 强制不走环境/系统代理,直连网关
