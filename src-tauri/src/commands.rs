@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 用户主目录。
 #[tauri::command]
@@ -256,26 +256,53 @@ pub fn current_app_dir() -> Result<String, String> {
 }
 
 /// 下载文件(异步,不阻塞 UI;默认 Agent 读取系统代理,适配 GitHub Releases)。
+/// 流式写入并定时发送 download-progress 事件 {received, total, done} 供前端显示进度。
 #[tauri::command]
-pub async fn download_file(url: String, dest: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || download_file_blocking(url, dest))
+pub async fn download_file(app: tauri::AppHandle, url: String, dest: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || download_file_blocking(app, url, dest))
         .await
         .map_err(|e| format!("下载任务失败: {}", e))?
 }
 
-fn download_file_blocking(url: String, dest: String) -> Result<(), String> {
+fn download_file_blocking(app: tauri::AppHandle, url: String, dest: String) -> Result<(), String> {
+    use std::io::{Read, Write};
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(180))
         .build();
     let resp = agent.get(&url).call().map_err(|e| format!("下载失败 {}: {}", url, e))?;
-    let mut bytes: Vec<u8> = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+    let total: u64 = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut reader = resp.into_reader();
     if let Some(parent) = Path::new(&dest).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&dest, &bytes).map_err(|e| format!("写入失败 {}: {}", dest, e))?;
+    let mut out = fs::File::create(&dest).map_err(|e| format!("创建文件失败 {}: {}", dest, e))?;
+    let mut buf = [0u8; 16384];
+    let mut received: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        received += n as u64;
+        if last_emit.elapsed().as_millis() >= 100 {
+            let _ = app.emit(
+                "download-progress",
+                serde_json::json!({ "received": received, "total": total }),
+            );
+            last_emit = std::time::Instant::now();
+        }
+    }
+    let _ = app.emit(
+        "download-progress",
+        serde_json::json!({ "received": received, "total": total, "done": true }),
+    );
     Ok(())
 }
 

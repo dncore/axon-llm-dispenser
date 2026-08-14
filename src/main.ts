@@ -1,6 +1,7 @@
 // axon-llm-dispenser 前端入口:连接设置 + 工具接入 + 鉴权 + 状态。
 
 import "./styles.css";
+import { listen } from "@tauri-apps/api/event";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
 import { claudeModelSuffix } from "./core/claude";
@@ -367,7 +368,49 @@ function hideTip(): void {
   tipEl = null;
 }
 
-/** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
+let updateUi: { bar: El; pct: El; label: El } | null = null;
+let updateUnlisten: (() => void) | null = null;
+
+/** 打开更新进度弹窗并订阅 download-progress 事件。 */
+async function startUpdateProgress(): Promise<void> {
+  clearOverlays();
+  const overlay = h("div", { class: "modal-overlay" }, []);
+  const bar = h("div", { class: "progress-bar" }, []);
+  const pct = h("span", { class: "progress-pct" }, ["0%"]);
+  const label = h("div", { class: "progress-label" }, ["正在下载更新…"]);
+  const modal = h("div", { class: "modal modal-sm progress-modal" }, [
+    h("h3", {}, ["更新进度"]),
+    label,
+    h("div", { class: "progress-track" }, [bar]),
+    pct,
+    h("div", { class: "progress-hint" }, ["更新期间请勿关闭应用"]),
+  ]);
+  overlay.append(modal);
+  document.body.append(overlay);
+  updateUi = { bar, pct, label };
+  // 事件系统不可用时(如异常环境)仍显示进度弹窗,只是无实时进度
+  try {
+    updateUnlisten = await listen<{ received: number; total: number; done?: boolean }>("download-progress", (e) => {
+      const p = e.payload;
+      if (!updateUi) return;
+      const pctVal = p.total > 0 ? Math.min(100, Math.round((p.received / p.total) * 100)) : 0;
+      updateUi.bar.style.width = `${pctVal}%`;
+      updateUi.pct.textContent = `${pctVal}%`;
+      if (p.done) updateUi.label.textContent = "下载完成,正在解压替换…";
+    });
+  } catch {
+    // 忽略:无事件订阅时进度条停留在 0%
+  }
+}
+
+function closeUpdateProgress(): void {
+  updateUnlisten?.();
+  updateUnlisten = null;
+  updateUi = null;
+  clearOverlays();
+}
+
+/** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 *//** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
 function clearOverlays(): void {
   document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
 }
@@ -763,8 +806,13 @@ function bind(): void {
             return;
           }
           void run("更新", async () => {
-            notify(`正在下载 v${latest}(约 2MB),请稍候…`, "info");
-            await flows.performUpdate(asset.url);
+            try {
+              await startUpdateProgress();
+              await flows.performUpdate(asset.url);
+            } catch (e) {
+              closeUpdateProgress();
+              throw e;
+            }
           });
         },
         "更新",
