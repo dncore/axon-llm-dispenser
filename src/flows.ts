@@ -19,7 +19,7 @@ function pickDefaultModel(modelIds: string[], configured?: string): string {
   return modelIds[0] ?? "";
 }
 
-export async function testConnection(baseUrl: string, apiKey: string): Promise<string[]> {
+export async function testConnection(baseUrl: string, apiKey: string): Promise<bridge.ModelInfo[]> {
   return await bridge.fetchModels(baseUrl, apiKey);
 }
 

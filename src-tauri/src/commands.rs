@@ -132,11 +132,11 @@ pub fn detect_cli(name: String) -> Option<String> {
     None
 }
 
-/// GET {base_url}/models,带 Bearer 鉴权,返回模型 id 列表(去重排序)。
+/// GET {base_url}/models,带 Bearer 鉴权,返回 [{id, ownedBy}] 列表(去重排序)。
 /// async 命令:阻塞 HTTP 放到后台线程,避免卡住 UI;显式关闭环境代理检测,
 /// 防止内网网关被本机 http_proxy 代理劫持导致连接被重置。
 #[tauri::command]
-pub async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+pub async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<serde_json::Value>, String> {
     tauri::async_runtime::spawn_blocking(move || fetch_models_blocking(base_url, api_key))
         .await
         .map_err(|e| format!("请求任务失败: {}", e))?
@@ -169,14 +169,18 @@ fn fetch_models_blocking(base_url: String, api_key: String) -> Result<Vec<String
         return Err("响应中未找到 models 列表(data 数组或顶层数组)".to_string());
     };
 
-    let mut ids: Vec<String> = rows
-        .iter()
-        .filter_map(|row| row.get("id").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .collect();
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let Some(id) = row.get("id").and_then(|v| v.as_str()) else { continue };
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let owned_by = row.get("owned_by").and_then(|v| v.as_str()).map(|s| s.to_string());
+        out.push(serde_json::json!({"id": id, "ownedBy": owned_by}));
+    }
+    out.sort_by(|a, b| a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or("")));
+    Ok(out)
 }
 
 /// 打开浏览器(检查更新跳转)。

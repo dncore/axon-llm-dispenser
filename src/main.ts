@@ -27,6 +27,9 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, 
 
 const $ = (id: string): El => document.getElementById(id)!;
 
+type ModelRow = { id: string; ownedBy?: string };
+let modelRows: ModelRow[] = [];
+
 let config: bridge.AppConfig = {
   provider: "axon",
   displayName: "Axon",
@@ -90,17 +93,21 @@ function build(): void {
     ]),
   ]);
 
-  const modelsCard = h("section", { class: "card" }, [
+  const modelsCard = h("section", { class: "card models-sidebar" }, [
     h("h2", {}, ["模型目录"]),
     h("div", { class: "row" }, [
       h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
       h("span", { id: "model-count", class: "hint" }, []),
     ]),
+    h("div", { class: "row" }, [
+      h("input", { id: "input-add-model", class: "input", type: "text", placeholder: "手动添加模型 ID" }),
+      h("button", { id: "btn-add-model", class: "btn btn-ghost" }, ["添加"]),
+    ]),
     h("label", { class: "row toggle" }, [
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
       h("span", {}, ["过滤 Doubao 系模型(拉取与生成配置均不含 doubao)"]),
     ]),
-    h("textarea", { id: "models", class: "models", placeholder: "每行一个模型 ID;可手动增删。" }, []),
+    h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["点击「拉取模型」获取模型列表"])]),
   ]);
 
   const toolsCard = h("section", { class: "card" }, [
@@ -133,7 +140,8 @@ function build(): void {
     ]),
 
     h("main", { class: "main" }, [
-      h("div", { class: "col" }, [connCard, modelsCard]),
+      modelsCard,
+      h("div", { class: "col" }, [connCard]),
       h("div", { class: "col" }, [toolsCard, outputCard]),
     ]),
 
@@ -215,10 +223,36 @@ function readFields(): void {
 }
 
 function readModelIds(): string[] {
-  return ($("models") as HTMLTextAreaElement).value
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  return modelRows.map((r) => r.id);
+}
+
+/** 渲染侧边模型列表。 */
+function renderModelsList(): void {
+  const list = document.getElementById("models-list");
+  if (!list) return;
+  list.replaceChildren();
+  for (const r of modelRows) {
+    const row = h("div", { class: "model-row" }, [
+      h("span", { class: "model-row-id" }, [r.id]),
+      r.ownedBy ? h("span", { class: "model-row-owner" }, [r.ownedBy]) : h("span", { class: "model-row-owner" }, ["手动"]),
+      h("button", { class: "model-row-del", type: "button", title: "移除" }, ["×"]),
+    ]);
+    (row.querySelector(".model-row-del") as El).addEventListener("click", () => {
+      modelRows = modelRows.filter((m) => m.id !== r.id);
+      renderModelsList();
+      const c = document.getElementById("model-count");
+      if (c) c.textContent = `${modelRows.length} 个模型`;
+    });
+    list.append(row);
+  }
+  const c = document.getElementById("model-count");
+  if (c) c.textContent = `${modelRows.length} 个模型`;
+}
+
+/** 设置模型列表(替换式),并渲染。 */
+function setModelRows(rows: ModelRow[]): void {
+  modelRows = rows;
+  renderModelsList();
 }
 
 function validateProvider(): boolean {
@@ -246,9 +280,9 @@ async function ensureModels(): Promise<string[] | null> {
       return null;
     }
     try {
-      ids = await flows.testConnection(config.baseUrl, config.apiKey);
-      ($("models") as HTMLTextAreaElement).value = ids.join("\n");
-      $("model-count").textContent = `${ids.length} 个模型`;
+      const info = await flows.testConnection(config.baseUrl, config.apiKey);
+      setModelRows(info);
+      ids = readModelIds();
     } catch (e) {
       notify(`自动拉取模型失败: ${e}`, "error");
       return null;
@@ -301,9 +335,9 @@ function openClaudeConfigModal(): void {
         return;
       }
       try {
-        ids = await flows.testConnection(config.baseUrl, config.apiKey);
-        ($("models") as HTMLTextAreaElement).value = ids.join("\n");
-        $("model-count").textContent = `${ids.length} 个模型`;
+        const info = await flows.testConnection(config.baseUrl, config.apiKey);
+        setModelRows(info);
+        ids = readModelIds();
       } catch (e) {
         notify(`自动拉取模型失败: ${e}`, "error");
         return;
@@ -493,20 +527,36 @@ function bind(): void {
       }
       const s = $("conn-status");
       s.textContent = "连接中…";
-      const ids = await flows.testConnection(config.baseUrl, config.apiKey);
-      let shown = ids;
+      const info = await flows.testConnection(config.baseUrl, config.apiKey);
+      let shown = info;
       if (config.excludeDoubao) {
-        shown = flows.filterDoubao(ids, true);
-        if (shown.length !== ids.length) notify(`已过滤 ${ids.length - shown.length} 个 Doubao 模型`, "info");
+        shown = info.filter((m) => !flows.isDoubaoModel(m.id));
+        if (shown.length !== info.length) notify(`已过滤 ${info.length - shown.length} 个 Doubao 模型`, "info");
       }
-      ($("models") as HTMLTextAreaElement).value = shown.join("\n");
-      $("model-count").textContent = `${shown.length} 个模型`;
+      setModelRows(shown);
       s.textContent = "连接成功";
-      notify(`连接成功,拉取到 ${ids.length} 个模型(展示 ${shown.length})`, "info");
+      notify(`连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`, "info");
     }),
   );
 
   $("btn-fetch").addEventListener("click", () => $("btn-test").click());
+
+  $("btn-add-model").addEventListener("click", () => {
+    const input = $("input-add-model") as HTMLInputElement;
+    const id = input.value.trim();
+    if (!id) return;
+    if (modelRows.some((m) => m.id === id)) {
+      notify("该模型已在列表中", "info");
+      return;
+    }
+    modelRows.push({ id });
+    input.value = "";
+    renderModelsList();
+    notify(`已添加 ${id}`, "info");
+  });
+  ($("input-add-model") as HTMLInputElement).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") ($("btn-add-model") as HTMLButtonElement).click();
+  });
 
   $("btn-codex-配置").addEventListener("click", () =>
     run("Codex 配置", async () => {

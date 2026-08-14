@@ -70,8 +70,10 @@ export function detectCli(name: string): Promise<string | null> {
   return invoke<string | null>("detect_cli", { name });
 }
 
-export function fetchModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  return invoke<string[]>("fetch_models", { baseUrl, apiKey });
+export type ModelInfo = { id: string; ownedBy?: string };
+
+export function fetchModels(baseUrl: string, apiKey: string): Promise<ModelInfo[]> {
+  return invoke<ModelInfo[]>("fetch_models", { baseUrl, apiKey });
 }
 
 export function openUrl(url: string): Promise<void> {
