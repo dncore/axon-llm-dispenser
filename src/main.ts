@@ -368,8 +368,13 @@ function hideTip(): void {
   tipEl = null;
 }
 
-let updateUi: { bar: El; pct: El; label: El } | null = null;
+let updateUi: { bar: El; pct: El; label: El; size: El } | null = null;
 let updateUnlisten: (() => void) | null = null;
+let updateSpeed = { last: 0, time: 0 };
+
+function fmtMB(n: number): string {
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+}
 
 /** 打开更新进度弹窗并订阅 download-progress 事件。 */
 async function startUpdateProgress(): Promise<void> {
@@ -377,17 +382,19 @@ async function startUpdateProgress(): Promise<void> {
   const overlay = h("div", { class: "modal-overlay" }, []);
   const bar = h("div", { class: "progress-bar" }, []);
   const pct = h("span", { class: "progress-pct" }, ["0%"]);
+  const size = h("span", { class: "progress-size" }, ["0 / 0"]);
   const label = h("div", { class: "progress-label" }, ["正在下载更新…"]);
   const modal = h("div", { class: "modal modal-sm progress-modal" }, [
     h("h3", {}, ["更新进度"]),
     label,
     h("div", { class: "progress-track" }, [bar]),
-    pct,
+    h("div", { class: "progress-stats" }, [pct, size]),
     h("div", { class: "progress-hint" }, ["更新期间请勿关闭应用"]),
   ]);
   overlay.append(modal);
   document.body.append(overlay);
-  updateUi = { bar, pct, label };
+  updateUi = { bar, pct, label, size };
+  updateSpeed = { last: 0, time: Date.now() };
   // 事件系统不可用时(如异常环境)仍显示进度弹窗,只是无实时进度
   try {
     updateUnlisten = await listen<{ received: number; total: number; done?: boolean }>("download-progress", (e) => {
@@ -396,6 +403,15 @@ async function startUpdateProgress(): Promise<void> {
       const pctVal = p.total > 0 ? Math.min(100, Math.round((p.received / p.total) * 100)) : 0;
       updateUi.bar.style.width = `${pctVal}%`;
       updateUi.pct.textContent = `${pctVal}%`;
+      updateUi.size.textContent = `${fmtMB(p.received)} / ${p.total > 0 ? fmtMB(p.total) : "?"}`;
+      // 实时速度:根据两次事件的时间与字节差计算
+      const now = Date.now();
+      const dt = (now - updateSpeed.time) / 1000;
+      if (dt > 0 && p.received > updateSpeed.last) {
+        const speed = ((p.received - updateSpeed.last) / dt) / (1024 * 1024);
+        updateUi.size.textContent += ` · ${speed.toFixed(1)} MB/s`;
+      }
+      updateSpeed = { last: p.received, time: now };
       if (p.done) updateUi.label.textContent = "下载完成,正在解压替换…";
     });
   } catch {

@@ -224,7 +224,70 @@ fn dirs_home() -> Option<String> {
 
 use std::io::Read;
 
-/// 当前平台标识:macos / windows / linux。
+/// 解析可用代理:优先环境变量,其次 macOS 系统代理(scutil --proxy)。
+/// 应用经 `open` 启动时不继承 shell 环境变量,必须读系统代理才能访问 GitHub。
+fn resolve_proxy() -> Option<ureq::Proxy> {
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.trim().is_empty() {
+                if let Ok(p) = ureq::Proxy::new(&v) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("scutil").args(["--proxy"]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut host: Option<String> = None;
+        let mut port: Option<String> = None;
+        let mut enabled = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with("HTTPSEnable") || line.starts_with("HTTPEnable") {
+                if line.contains(": 1") {
+                    enabled = true;
+                }
+            }
+            if let Some(v) = line.strip_prefix("HTTPSProxy :") {
+                host = Some(v.trim().trim_matches('"').to_string());
+            }
+            if let Some(v) = line.strip_prefix("HTTPSPort :") {
+                port = Some(v.trim().to_string());
+            }
+            if host.is_none() {
+                if let Some(v) = line.strip_prefix("HTTPProxy :") {
+                    host = Some(v.trim().trim_matches('"').to_string());
+                }
+            }
+            if port.is_none() {
+                if let Some(v) = line.strip_prefix("HTTPPort :") {
+                    port = Some(v.trim().to_string());
+                }
+            }
+        }
+        if enabled {
+            if let (Some(h), Some(p)) = (host, port) {
+                if let Ok(proxy) = ureq::Proxy::new(format!("http://{}:{}", h, p)) {
+                    return Some(proxy);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 构建带代理的 ureq agent。
+fn build_agent(timeout_secs: u64) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(timeout_secs));
+    if let Some(proxy) = resolve_proxy() {
+        builder = builder.proxy(proxy);
+    }
+    builder.build()
+}
+
+/// 当前平台标识:macos / windows / linux。/// 当前平台标识:macos / windows / linux。
 #[tauri::command]
 pub fn platform() -> String {
     if cfg!(target_os = "macos") {
@@ -266,9 +329,7 @@ pub async fn download_file(app: tauri::AppHandle, url: String, dest: String) -> 
 
 fn download_file_blocking(app: tauri::AppHandle, url: String, dest: String) -> Result<(), String> {
     use std::io::{Read, Write};
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(180))
-        .build();
+    let agent = build_agent(180);
     let resp = agent.get(&url).call().map_err(|e| format!("下载失败 {}: {}", url, e))?;
     let total: u64 = resp
         .header("content-length")
@@ -289,7 +350,7 @@ fn download_file_blocking(app: tauri::AppHandle, url: String, dest: String) -> R
         }
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         received += n as u64;
-        if last_emit.elapsed().as_millis() >= 100 {
+        if last_emit.elapsed().as_millis() >= 50 {
             let _ = app.emit(
                 "download-progress",
                 serde_json::json!({ "received": received, "total": total }),
@@ -375,9 +436,7 @@ pub fn relaunch_app(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn github_latest(owner: String, repo: String) -> Result<serde_json::Value, String> {
     let url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .build();
+    let agent = build_agent(30);
     let resp = agent
         .get(&url)
         .set("Accept", "application/vnd.github+json")
