@@ -33,6 +33,7 @@ jobs:
         run: npm install
 
       - name: Set version from tag
+        shell: bash
         run: |
           # 让应用版本跟随 tag:构建前覆盖 tauri.conf.json 的 version
           VERSION="${GITHUB_REF_NAME#v}"
