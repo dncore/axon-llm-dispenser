@@ -255,9 +255,15 @@ pub fn current_app_dir() -> Result<String, String> {
     Ok(exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| exe.to_string_lossy().to_string()))
 }
 
-/// 下载文件到本地(默认 Agent 读取系统代理,适配 GitHub Releases)。
+/// 下载文件(异步,不阻塞 UI;默认 Agent 读取系统代理,适配 GitHub Releases)。
 #[tauri::command]
-pub fn download_file(url: String, dest: String) -> Result<(), String> {
+pub async fn download_file(url: String, dest: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || download_file_blocking(url, dest))
+        .await
+        .map_err(|e| format!("下载任务失败: {}", e))?
+}
+
+fn download_file_blocking(url: String, dest: String) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(180))
         .build();
@@ -273,9 +279,15 @@ pub fn download_file(url: String, dest: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 解压 zip 到目录(安全:不处理路径穿越,条目限制 512)。
+/// 解压 zip 到目录(异步,不阻塞 UI;安全:防路径穿越,条目限制 512)。
 #[tauri::command]
-pub fn unzip_file(zip_path: String, dest_dir: String) -> Result<(), String> {
+pub async fn unzip_file(zip_path: String, dest_dir: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || unzip_file_blocking(zip_path, dest_dir))
+        .await
+        .map_err(|e| format!("解压任务失败: {}", e))?
+}
+
+fn unzip_file_blocking(zip_path: String, dest_dir: String) -> Result<(), String> {
     let file = fs::File::open(&zip_path).map_err(|e| format!("打开 {} 失败: {}", zip_path, e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解压失败: {}", e))?;
     if archive.len() > 512 {
@@ -332,4 +344,36 @@ pub fn replace_app(unzip_dir: String) -> Result<(), String> {
 #[tauri::command]
 pub fn relaunch_app(app: tauri::AppHandle) {
     app.restart();
+}
+
+/// 查询 GitHub 最新 Release(系统代理),返回 {tag, htmlUrl, assets:[{name,url}]}。
+#[tauri::command]
+pub fn github_latest(owner: String, repo: String) -> Result<serde_json::Value, String> {
+    let url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build();
+    let resp = agent
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "axon-llm-dispenser")
+        .call()
+        .map_err(|e| format!("查询更新失败: {}", e))?;
+    let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+    let tag = json.get("tag_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let html_url = json.get("html_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let assets: Vec<serde_json::Value> = json
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let name = a.get("name")?.as_str()?;
+                    let url = a.get("browser_download_url")?.as_str()?;
+                    Some(serde_json::json!({ "name": name, "url": url }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({ "tag": tag, "htmlUrl": html_url, "assets": assets }))
 }

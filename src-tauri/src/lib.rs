@@ -17,6 +17,7 @@ pub fn run() {
             commands::open_url,
             commands::platform,
             commands::current_app_dir,
+            commands::github_latest,
             commands::download_file,
             commands::unzip_file,
             commands::replace_app,

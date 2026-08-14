@@ -80,6 +80,13 @@ export function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
+export type GithubRelease = { tag: string; htmlUrl: string; assets: Array<{ name: string; url: string }> };
+
+export function githubLatest(ownerRepo: string): Promise<GithubRelease> {
+  const [owner, repo] = ownerRepo.split("/");
+  return invoke<GithubRelease>("github_latest", { owner, repo });
+}
+
 export function platform(): Promise<string> {
   return invoke<string>("platform");
 }

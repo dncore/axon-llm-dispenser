@@ -738,24 +738,19 @@ function bind(): void {
 
   $("btn-update").addEventListener("click", () =>
     run("检查更新", async () => {
-      const resp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
-      if (!resp.ok) return notify("暂未找到发布版本(或仓库尚未公开)", "error");
-      const data = (await resp.json()) as {
-        tag_name?: string;
-        html_url?: string;
-        assets?: Array<{ name: string; browser_download_url: string }>;
-      };
-      const latest = data.tag_name?.replace(/^v/, "") ?? "";
+      // 通过 Rust ureq 查询(与下载同网络路径,走系统代理),避免 webview fetch 失败
+      const data = await bridge.githubLatest(GITHUB_REPO);
+      const latest = data.tag.replace(/^v/, "") ?? "";
       if (!latest || latest === APP_VERSION) {
         notify(`已是最新版本 v${APP_VERSION}`, "info");
         return;
       }
       const plat = await bridge.platform();
       const suffix = plat === "macos" ? "macos" : "windows";
-      const asset = data.assets?.find((a) => a.name.includes(`-${suffix}-`));
+      const asset = data.assets.find((a) => a.name.includes(`-${suffix}-`));
       if (!asset) {
         notify("未找到当前平台的更新包,请前往 Release 页下载", "info");
-        if (data.html_url) await bridge.openUrl(data.html_url);
+        if (data.htmlUrl) await bridge.openUrl(data.htmlUrl);
         return;
       }
       // 弹窗询问是否更新
@@ -764,14 +759,12 @@ function bind(): void {
         `发现新版本 v${latest}(当前 v${APP_VERSION})\n${direct ? "是否立即下载并更新?(下载完成后自动重启)" : "请下载最新安装包手动替换(运行中的程序无法自替换)"}`,
         () => {
           if (!direct) {
-            void bridge.openUrl(asset.browser_download_url);
+            void bridge.openUrl(asset.url);
             return;
           }
           void run("更新", async () => {
-            notify(`正在下载 v${latest}…(约 2MB)`, "info");
-            await flows.performUpdate(asset.browser_download_url);
-            // 若未重启,提示
-            notify("更新完成,应用即将重启", "info");
+            notify(`正在下载 v${latest}(约 2MB),请稍候…`, "info");
+            await flows.performUpdate(asset.url);
           });
         },
         "更新",
