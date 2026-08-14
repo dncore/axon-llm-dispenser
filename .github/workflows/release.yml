@@ -45,6 +45,30 @@ jobs:
           APP="src-tauri/target/release/bundle/macos/axon-llm-dispenser.app"
           codesign --force --deep --sign - "$APP"
           ditto -c -k --keepParent "$APP" "axon-llm-dispenser-macos-${{ github.ref_name }}.zip"
+          echo "ZIP_NAME=axon-llm-dispenser-macos-${{ github.ref_name }}.zip" >> "$GITHUB_ENV"
+          echo "SHA256=$(shasum -a 256 "axon-llm-dispenser-macos-${{ github.ref_name }}.zip" | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Sync Homebrew cask (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          echo "macos zip: $ZIP_NAME  sha256: $SHA256"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "${{ secrets.TAP_PUSH_TOKEN }}" ]; then
+            echo "⚠️ TAP_PUSH_TOKEN 未配置,跳过自动同步 cask 到 tap 仓库(sha256 已打印,可手动更新)"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -rf /tmp/taptap && git clone https://x-access-token:${{ secrets.TAP_PUSH_TOKEN }}@github.com/dncore/homebrew-axon-llm-dispenser.git /tmp/taptap
+          cd /tmp/taptap
+          sed "s/__VERSION__/$VERSION/; s/__SHA256__/$SHA256/" "$GITHUB_WORKSPACE/homebrew/axon-llm-dispenser.rb.template" > Casks/axon-llm-dispenser.rb
+          git add Casks/axon-llm-dispenser.rb
+          if git diff --cached --quiet; then
+            echo "cask 无变化,跳过推送"
+          else
+            git commit -m "Update axon-llm-dispenser cask v$VERSION"
+            git push origin master
+          fi
 
       - name: Build (Windows)
         if: matrix.target == 'windows'
