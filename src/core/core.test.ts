@@ -101,7 +101,7 @@ describe("patchDshProvider", () => {
   });
 });
 
-import { deriveAnthropicUrl, patchClaudeSettings, parseClaudeStatus } from "./claude";
+import { deriveAnthropicUrl, formatClaudeModel, patchClaudeSettings, parseClaudeStatus } from "./claude";
 import { patchPiModelsJson, patchPiSettings, parsePiStatus } from "./pi";
 
 describe("claude", () => {
@@ -112,19 +112,24 @@ describe("claude", () => {
   });
 
   it("合并 env 到 settings.json,保留其它键", () => {
-    const r = patchClaudeSettings('{"permissions":{"allow":["Bash(ls *)"]}}', {
+    const r = patchClaudeSettings('{"permissions":{"allow":["Bash(ls *)"]},"env":{"ANTHROPIC_SMALL_FAST_MODEL":"old"}}', {
       anthropicBaseUrl: "http://host/api/anthropic",
       apiKey: "sk-x",
-      model: "m1",
-      contextWindow: 256000,
+      mainModel: "m1[1m]",
+      roles: { haiku: "m2[200k]", sonnet: "m3", opus: "m4", fable: "m5", subagent: "m6" },
     });
     const doc = JSON.parse(r.text) as { permissions: unknown; env: Record<string, string> };
     expect(doc.permissions).toEqual({ allow: ["Bash(ls *)"] });
     expect(doc.env.ANTHROPIC_BASE_URL).toBe("http://host/api/anthropic");
     expect(doc.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-x");
-    expect(doc.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("m1");
-    expect(doc.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("m1");
-    expect(doc.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("256000");
+    expect(doc.env.ANTHROPIC_MODEL).toBe("m1[1m]");
+    expect(doc.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("m2[200k]");
+    expect(doc.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("m3");
+    expect(doc.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("m5");
+    expect(doc.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("m6");
+    // 弃用变量被删除;后缀足够时不再写全局 MAX_CONTEXT_TOKENS
+    expect("ANTHROPIC_SMALL_FAST_MODEL" in doc.env).toBe(false);
+    expect(doc.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
   });
 
   it("状态解析", () => {
@@ -132,6 +137,27 @@ describe("claude", () => {
     expect(s.baseUrl).toBe("http://h");
     expect(s.authTokenSet).toBe(true);
     expect(s.model).toBe("m");
+  });
+});
+
+describe("claude 后缀映射", () => {
+  it("按真实上下文窗口加官方后缀", () => {
+    expect(formatClaudeModel("deepseek-v4-flash", 1000000)).toBe("deepseek-v4-flash[1m]");
+    expect(formatClaudeModel("qwen3.8-max", 983616)).toBe("qwen3.8-max[1m]");
+    expect(formatClaudeModel("glm-5", 200000)).toBe("glm-5[200k]");
+    expect(formatClaudeModel("small-model", 128000)).toBe("small-model");
+  });
+
+  it("主模型 <200k 无后缀时设置 MAX_CONTEXT_TOKENS 兜底", () => {
+    const r = patchClaudeSettings("", {
+      anthropicBaseUrl: "http://h",
+      apiKey: "k",
+      mainModel: "small",
+      roles: { haiku: "h", sonnet: "s", opus: "o", fable: "f", subagent: "sa" },
+      maxContextTokens: 128000,
+    });
+    const doc = JSON.parse(r.text) as { env: Record<string, string> };
+    expect(doc.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("128000");
   });
 });
 

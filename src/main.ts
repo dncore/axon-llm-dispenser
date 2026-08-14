@@ -3,6 +3,8 @@
 import "./styles.css";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
+import { formatClaudeModel } from "./core/claude";
+import { buildResolvedModels } from "./core/models";
 
 const APP_VERSION = "0.1.0";
 const GITHUB_REPO = "dncore/axon-llm-dispenser";
@@ -242,6 +244,100 @@ function confirmDialog(message: string, onOk: () => void): void {
   document.body.append(overlay);
 }
 
+/** Claude 模型映射弹窗:为每个角色选模型,按上下文映射表自动加 [1m]/[200k] 后缀。 */
+function openClaudeConfigModal(): void {
+  void run("Claude 模型选择", async () => {
+    readFields();
+    if (!validateProvider()) return;
+    let ids = readModelIds();
+    if (ids.length === 0) {
+      if (!config.baseUrl) {
+        notify("请先填写 Base URL", "error");
+        return;
+      }
+      notify("模型列表为空,正在自动拉取 /models…", "info");
+      try {
+        ids = await flows.testConnection(config.baseUrl, config.apiKey);
+        ($("models") as HTMLTextAreaElement).value = ids.join("\n");
+        $("model-count").textContent = `${ids.length} 个模型`;
+      } catch (e) {
+        notify(`自动拉取模型失败: ${e}`, "error");
+        return;
+      }
+    }
+    if (config.excludeDoubao) ids = flows.filterDoubao(ids, true);
+    if (ids.length === 0) {
+      notify("模型列表为空(已过滤 Doubao),无法配置 Claude", "error");
+      return;
+    }
+    ids.sort((a, b) => a.localeCompare(b));
+
+    const def = config.defaultModel && ids.includes(config.defaultModel)
+      ? config.defaultModel
+      : ids.includes("deepseek-v4-flash")
+        ? "deepseek-v4-flash"
+        : ids[0];
+
+    const roleDefs: { key: "main" | "haiku" | "sonnet" | "opus" | "fable" | "subagent"; label: string }[] = [
+      { key: "main", label: "主模型 ANTHROPIC_MODEL" },
+      { key: "haiku", label: "Haiku 快速 DEFAULT_HAIKU" },
+      { key: "sonnet", label: "Sonnet DEFAULT_SONNET" },
+      { key: "opus", label: "Opus DEFAULT_OPUS" },
+      { key: "fable", label: "Fable DEFAULT_FABLE" },
+      { key: "subagent", label: "子代理 SUBAGENT_MODEL" },
+    ];
+    const selects: Record<string, HTMLSelectElement> = {};
+
+    const overlay = h("div", { class: "modal-overlay" }, []);
+    const modal = h("div", { class: "modal" }, [
+      h("h3", {}, ["Claude 模型映射"]),
+      h("div", { class: "modal-sub" }, ["为每个角色选择模型;按上下文映射表自动加 [1m]/[200k] 后缀"]),
+    ]);
+    const list = h("div", { class: "modal-list" }, []);
+    for (const r of roleDefs) {
+      const sel = h("select", { class: "input claude-role-select" }, ids.map((id) => h("option", { value: id }, [id])));
+      sel.value = def;
+      selects[r.key] = sel;
+      const preview = h("span", { class: "claude-preview" }, []);
+      const updatePreview = (): void => {
+        const cw = buildResolvedModels([sel.value])[0]?.contextWindow ?? 0;
+        preview.textContent = `→ ${formatClaudeModel(sel.value, cw)}`;
+      };
+      sel.addEventListener("change", updatePreview);
+      updatePreview();
+      list.append(h("div", { class: "claude-role-row" }, [
+        h("span", { class: "claude-role-label" }, [r.label]),
+        sel,
+        preview,
+      ]));
+    }
+    modal.append(list);
+    const ok = h("button", { class: "btn" }, ["生成配置"]);
+    const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
+    cancel.addEventListener("click", () => overlay.remove());
+    ok.addEventListener("click", () => {
+      overlay.remove();
+      void run("Claude 配置", async () => {
+        const r = await flows.configureClaude(config, {
+          main: selects.main.value,
+          haiku: selects.haiku.value,
+          sonnet: selects.sonnet.value,
+          opus: selects.opus.value,
+          fable: selects.fable.value,
+          subagent: selects.subagent.value,
+        });
+        log(r.lines);
+      });
+    });
+    modal.append(h("div", { class: "modal-footer" }, [cancel, ok]));
+    overlay.append(modal);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.body.append(overlay);
+  });
+}
+
 /** 还原弹窗:列出所选工具的全部备份,用户点选恢复。 */
 function openRestoreModal(tool: string): void {
   void run(`还原(${tool})`, async () => {
@@ -439,16 +535,7 @@ function bind(): void {
 
   $("btn-dsh-还原").addEventListener("click", () => openRestoreModal("dsh"));
 
-  $("btn-claude-配置").addEventListener("click", () =>
-    run("Claude 配置", async () => {
-      readFields();
-      if (!validateProvider()) return;
-      const ids = await ensureModels();
-      if (!ids) return;
-      const r = await flows.configureClaude(config, ids);
-      log(r.lines);
-    }),
-  );
+  $("btn-claude-配置").addEventListener("click", () => openClaudeConfigModal());
 
   $("btn-claude-状态").addEventListener("click", () =>
     run("Claude 状态", async () => {

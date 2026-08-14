@@ -240,21 +240,41 @@ export async function dshStatus(cfg: bridge.AppConfig): Promise<string[]> {
 // Claude Code
 // ---------------------------------------------------------------------------
 
-import { deriveAnthropicUrl, patchClaudeSettings, parseClaudeStatus } from "./core/claude";
+import { deriveAnthropicUrl, formatClaudeModel, patchClaudeSettings, parseClaudeStatus } from "./core/claude";
 import { patchPiModelsJson, patchPiSettings, parsePiStatus } from "./core/pi";
 
-export async function configureClaude(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+export type ClaudeRoleSelection = {
+  main: string;
+  haiku: string;
+  sonnet: string;
+  opus: string;
+  fable: string;
+  subagent: string;
+};
+
+export async function configureClaude(cfg: bridge.AppConfig, roles: ClaudeRoleSelection): Promise<FlowResult> {
   const home = await bridge.homeDir();
   const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
-  const model = pickDefaultModel(modelIds, cfg.defaultModel);
-  // 解析模型真实上下文窗口(已知/推断),写入 CLAUDE_CODE_MAX_CONTEXT_TOKENS 消除未知模型告警
-  const contextWindow = buildResolvedModels(model ? [model] : [])[0]?.contextWindow;
+  // 每个角色的模型按真实上下文窗口加官方后缀([1m]/[200k])
+  const fmt = (id: string): string => {
+    const cw = buildResolvedModels(id ? [id] : [])[0]?.contextWindow ?? 0;
+    return formatClaudeModel(id, cw);
+  };
+  const mainCw = buildResolvedModels([roles.main])[0]?.contextWindow ?? 0;
   const anthropicBaseUrl = cfg.anthropicBaseUrl || deriveAnthropicUrl(cfg.baseUrl);
   const patched = patchClaudeSettings(await bridge.readFileOrEmpty(settingsPath), {
     anthropicBaseUrl,
     apiKey: cfg.apiKey,
-    model,
-    contextWindow,
+    mainModel: fmt(roles.main),
+    roles: {
+      haiku: fmt(roles.haiku),
+      sonnet: fmt(roles.sonnet),
+      opus: fmt(roles.opus),
+      fable: fmt(roles.fable),
+      subagent: fmt(roles.subagent),
+    },
+    // 主模型 <200k 无后缀时用全局兜底;否则后缀已足够,不设以免冲突
+    maxContextTokens: mainCw > 0 && mainCw < 200_000 ? mainCw : undefined,
   });
   const written = await bridge.writeWithBackup(settingsPath, patched.text);
   const lines = [
