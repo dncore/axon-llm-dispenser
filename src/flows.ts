@@ -59,7 +59,9 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
   });
 
   const written = await bridge.writeWithBackup(configPath, patched.text);
-  const modelsJson = renderCodexModelsJson(resolved, cfg.provider);
+  // 保留现有 models.json 里非当前 provider 的条目(兼容用户已有模型)
+  const existingModels = await bridge.readFileOrEmpty(modelsPath);
+  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels);
   const modelsWritten = await bridge.writeWithBackup(modelsPath, modelsJson);
 
   const lines = [

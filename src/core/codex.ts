@@ -102,8 +102,24 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
 }
 
 /** 生成 codex models.json 内容(所有模型 visibility=list)。 */
-export function renderCodexModelsJson(models: ResolvedModel[], providerName: string): string {
-  const entries = models.map((m, i) => buildCodexEntry(m, providerName, 20 + i));
+/**
+ * 生成 codex models.json(所有模型 visibility=list)。
+ * 传入现有内容时,保留其中不属于当前 provider 的条目(兼容用户已有模型目录,如官方 gpt 等)。
+ */
+export function renderCodexModelsJson(models: ResolvedModel[], providerName: string, existingJson?: string): string {
+  const newIds = new Set(models.map((m) => m.id));
+  const kept: unknown[] = [];
+  if (existingJson && existingJson.trim()) {
+    try {
+      const data = JSON.parse(existingJson) as { models?: Array<{ slug?: string }> };
+      for (const m of data.models ?? []) {
+        if (m.slug && !newIds.has(m.slug)) kept.push(m);
+      }
+    } catch {
+      // 现有目录损坏/非法,忽略
+    }
+  }
+  const entries = [...kept, ...models.map((m, i) => buildCodexEntry(m, providerName, 20 + i))];
   return JSON.stringify({ models: entries }, null, 2) + "\n";
 }
 

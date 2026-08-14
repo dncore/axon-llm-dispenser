@@ -206,3 +206,25 @@ describe("doubao 过滤", () => {
     expect(filterDoubao(ids, false)).toEqual(ids);
   });
 });
+
+describe("codex models.json 保留现有条目", () => {
+  it("合并现有非当前 provider 条目", () => {
+    const existing = JSON.stringify({
+      models: [
+        { slug: "gpt-5", display_name: "GPT-5" },
+        { slug: "deepseek-v4-flash", display_name: "old-axon-entry" },
+      ],
+    });
+    const json = renderCodexModelsJson(
+      [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: true, input: ["text"], contextWindow: 1000000, maxTokens: 384000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: {} }],
+      "axon",
+      existing,
+    );
+    const doc = JSON.parse(json) as { models: Array<{ slug: string }> };
+    const slugs = doc.models.map((m) => m.slug);
+    // gpt-5 保留;deepseek-v4-flash 属于当前 provider 被新条目替换
+    expect(slugs).toContain("gpt-5");
+    expect(slugs.filter((s) => s === "deepseek-v4-flash")).toHaveLength(1);
+    expect(doc.models.find((m) => m.slug === "gpt-5")).toMatchObject({ display_name: "GPT-5" });
+  });
+});

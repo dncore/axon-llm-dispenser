@@ -622,7 +622,7 @@ function bind(): void {
 
 
   $("btn-codex-配置").addEventListener("click", () =>
-    confirmDialog("将覆盖 Codex 现有配置(config.toml / models.json),原文件会自动备份(.bak-*),确认?", () => {
+    confirmDialog("将更新 Codex 的接入配置:写入 config.toml / models.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
       void run("Codex 配置", async () => {
         readFields();
         if (!validateProvider()) return;
@@ -643,7 +643,7 @@ function bind(): void {
   $("btn-codex-还原").addEventListener("click", () => openRestoreModal("codex"));
 
   $("btn-reasonix-配置").addEventListener("click", () =>
-    confirmDialog("将覆盖 Reasonix 现有配置(config.toml / .env),原文件会自动备份(.bak-*),确认?", () => {
+    confirmDialog("将更新 Reasonix 的接入配置:写入 config.toml / .env 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
       void run("Reasonix 配置", async () => {
         readFields();
         if (!validateProvider()) return;
@@ -683,7 +683,7 @@ function bind(): void {
   );
 
   $("btn-dsh-配置").addEventListener("click", () =>
-    confirmDialog("将覆盖 dsh 现有配置(settings.yaml / .credentials.yaml),原文件会自动备份(.bak-*),确认?", () => {
+    confirmDialog("将更新 dsh 的接入配置:写入 settings.yaml / .credentials.yaml 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
       void run("dsh 配置", async () => {
         readFields();
         if (!validateProvider()) return;
@@ -715,7 +715,7 @@ function bind(): void {
   $("btn-claude-还原").addEventListener("click", () => openRestoreModal("claude"));
 
   $("btn-pi-配置").addEventListener("click", () =>
-    confirmDialog("将覆盖 pi 现有配置(models.json / settings.json),原文件会自动备份(.bak-*),确认?", () => {
+    confirmDialog("将更新 pi 的接入配置:写入 models.json / settings.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
       void run("pi 配置", async () => {
         readFields();
         if (!validateProvider()) return;
