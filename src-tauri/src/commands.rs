@@ -271,9 +271,7 @@ fn download_file_blocking(app: tauri::AppHandle, url: String, dest: String) -> R
         .build();
     let resp = agent.get(&url).call().map_err(|e| format!("下载失败 {}: {}", url, e))?;
     let total: u64 = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
+        .header("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let mut reader = resp.into_reader();
