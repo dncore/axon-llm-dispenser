@@ -49,7 +49,7 @@ export function detectCli(name: string): Promise<string | null> {
 }
 
 export function fetchModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  return invoke<string[]>("fetch_models", { base_url: baseUrl, api_key: apiKey });
+  return invoke<string[]>("fetch_models", { baseUrl, apiKey });
 }
 
 export function openUrl(url: string): Promise<void> {
