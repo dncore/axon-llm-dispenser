@@ -97,10 +97,19 @@ pub fn detect_cli(name: String) -> Option<String> {
 }
 
 /// GET {base_url}/models,带 Bearer 鉴权,返回模型 id 列表(去重排序)。
+/// async 命令:阻塞 HTTP 放到后台线程,避免卡住 UI;显式关闭环境代理检测,
+/// 防止内网网关被本机 http_proxy 代理劫持导致连接被重置。
 #[tauri::command]
-pub fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+pub async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_models_blocking(base_url, api_key))
+        .await
+        .map_err(|e| format!("请求任务失败: {}", e))?
+}
+
+fn fetch_models_blocking(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let agent = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false) // 强制不走环境/系统代理,直连网关
         .timeout(Duration::from_secs(15))
         .build();
     let mut req = agent.get(&url);
