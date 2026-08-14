@@ -97,11 +97,11 @@ function build(): void {
 
       h("section", { class: "card" }, [
         h("h2", {}, ["工具接入"]),
-        toolCard("codex", "Codex", ["配置", "状态", "还原"]),
-        toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
-        toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
         toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
+        toolCard("codex", "Codex", ["配置", "状态", "还原"]),
+        toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
         toolCard("pi", "pi agent", ["配置", "状态", "还原"]),
+        toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
       ]),
 
       h("section", { class: "card" }, [
