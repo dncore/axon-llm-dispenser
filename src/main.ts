@@ -49,6 +49,20 @@ function log(lines: string[], kind: "info" | "error" = "info"): void {
 
 function notify(msg: string, kind: "info" | "error" = "info"): void {
   log([msg], kind);
+  showToast(msg, kind);
+}
+
+/** 顶部 banner toast:成功(绿)/失败(红),自动消失。 */
+function showToast(msg: string, kind: "info" | "error"): void {
+  const container = document.getElementById("toast-container");
+  if (!container) return;
+  const toast = h("div", { class: `toast ${kind === "error" ? "toast-error" : "toast-success"}` }, [msg]);
+  container.append(toast);
+  requestAnimationFrame(() => toast.classList.add("show"));
+  window.setTimeout(() => {
+    toast.classList.remove("show");
+    window.setTimeout(() => toast.remove(), 250);
+  }, 3600);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +73,7 @@ function build(): void {
   const root = $("app");
 
   root.append(
+    h("div", { id: "toast-container", class: "toast-container" }, []),
     h("header", { class: "header" }, [
       h("div", { class: "brand" }, [
         h("h1", {}, ["axon-llm-dispenser"]),
@@ -175,12 +190,23 @@ function validateProvider(): boolean {
 }
 
 async function ensureModels(): Promise<string[] | null> {
-  const raw = readModelIds();
-  if (raw.length === 0) {
-    notify("模型列表为空,请先「拉取模型」或手动输入", "error");
-    return null;
+  let ids = readModelIds();
+  if (ids.length === 0) {
+    // 未拉取模型时自动拉取,再开始配置
+    if (!config.baseUrl) {
+      notify("请先填写 Base URL", "error");
+      return null;
+    }
+    notify("模型列表为空,正在自动拉取 /models…", "info");
+    try {
+      ids = await flows.testConnection(config.baseUrl, config.apiKey);
+      ($("models") as HTMLTextAreaElement).value = ids.join("\n");
+      $("model-count").textContent = `${ids.length} 个模型`;
+    } catch (e) {
+      notify(`自动拉取模型失败: ${e}`, "error");
+      return null;
+    }
   }
-  let ids = raw;
   if (config.excludeDoubao) {
     const before = ids.length;
     ids = flows.filterDoubao(ids, true);
@@ -466,6 +492,11 @@ async function boot(): Promise<void> {
   window.addEventListener("unhandledrejection", (ev) => {
     notify(`未处理的错误: ${ev.reason}`, "error");
   });
+  // 弹窗打开时锁定主页面滚动(body.modal-open → overflow:hidden)
+  const syncModalLock = (): void => {
+    document.body.classList.toggle("modal-open", document.querySelectorAll(".modal-overlay").length > 0);
+  };
+  new MutationObserver(syncModalLock).observe(document.body, { childList: true });
   build();
   bind();
   try {
