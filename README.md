@@ -19,6 +19,17 @@
 - **Reasonix 鉴权**：生成固定 Token（`[serve]` 段）、关闭鉴权、查看状态。
 - **检查更新**：查询 GitHub Releases，发现新版本跳转浏览器下载。
 
+## Reasonix 鉴权说明
+
+Reasonix 与 Codex / dsh 不同：它自带一个**可共享的 Web 服务**（`reasonix serve`，默认监听 `127.0.0.1:8787`）。当你把它暴露给局域网/公网的其他人使用时，**必须先开启鉴权**，否则任何人都能免费用你的网关 Key。
+
+| 按钮 | 作用 | 使用场景 |
+|------|------|----------|
+| **生成 Token** | 写入固定鉴权 Token 到 `[serve]` 段（`auth_mode = "token"`），重启不变 | 要分享 Reasonix 给同事/团队时；分享链接 `http://<你的IP>:8787/#token=<token>`，没 token 的人进不去 |
+| **关闭鉴权** | 改回 `auth_mode = "none"` 并移除 token | 不再共享，回到本机自用 |
+
+> ⚠️ `reasonix serve` 默认 `auth_mode = "none"` 只适合本机；**绑定非 localhost 地址（`0.0.0.0` / tunnel / 反向代理）前必须先开鉴权**，否则等于把网关 Key 裸奔暴露。重新生成 Token 会覆盖旧 Token，旧 Token 立即失效。
+
 ## 下载
 
 从 [Releases](../../releases) 下载对应平台压缩包，解压即用：

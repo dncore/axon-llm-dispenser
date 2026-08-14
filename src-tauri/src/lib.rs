@@ -4,6 +4,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::home_dir,
+            commands::path_join,
             commands::config_dir,
             commands::read_file,
             commands::write_file,

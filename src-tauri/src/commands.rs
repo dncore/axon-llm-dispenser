@@ -13,6 +13,18 @@ pub fn home_dir() -> Result<String, String> {
     dirs_home().ok_or_else(|| "无法解析用户主目录".to_string())
 }
 
+/// 跨平台路径拼接(替代 tauri-plugin-path 的 join,避免 ACL 限制)。
+#[tauri::command]
+pub fn path_join(parts: Vec<String>) -> Result<String, String> {
+    let mut p = std::path::PathBuf::new();
+    for part in parts {
+        if !part.is_empty() {
+            p.push(part);
+        }
+    }
+    Ok(p.to_string_lossy().to_string())
+}
+
 /// 应用自身配置目录(跨平台标准目录:macOS `~/Library/Application Support/<id>`,
 /// Windows `%APPDATA%/<id>`,Linux `~/.config/<id>`)。
 #[tauri::command]
