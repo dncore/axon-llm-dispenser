@@ -16,6 +16,7 @@ pub fn run() {
             commands::read_dir,
             commands::mkdir,
             commands::detect_cli,
+            commands::detect_cli_in,
             commands::fetch_models,
             commands::open_url,
             commands::app_version,

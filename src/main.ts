@@ -3,6 +3,7 @@
 import "./styles.css";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
+import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 
@@ -78,17 +79,19 @@ function build(): void {
 
   const connCard = h("section", { class: "card" }, [
     h("h2", {}, ["连接设置"]),
-    h("div", { class: "grid2" }, [
-      field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
-      field("显示名", "input-display", "配置界面展示名", "Axon"),
-    ]),
-    field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
-    field("API Key", "input-key", "网关凭据", "", "password"),
-    field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
-    h("div", { class: "row" }, [
-      h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
-      h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
-      h("span", { id: "conn-status", class: "hint" }, []),
+    h("div", { class: "card-body" }, [
+      h("div", { class: "grid2" }, [
+        field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
+        field("显示名", "input-display", "配置界面展示名", "Axon"),
+      ]),
+      field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
+      field("API Key", "input-key", "网关凭据", "", "password"),
+      field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
+      h("div", { class: "row" }, [
+        h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
+        h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
+        h("span", { id: "conn-status", class: "hint" }, []),
+      ]),
     ]),
   ]);
 
@@ -109,19 +112,21 @@ function build(): void {
 
   const toolsCard = h("section", { class: "card" }, [
     h("h2", {}, ["工具接入"]),
-    toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-    toolCard("codex", "Codex", ["配置", "状态", "还原"]),
-    toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
-    toolCard("pi", "pi agent", ["配置", "状态", "还原"]),
-    toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
+    h("div", { class: "card-body" }, [
+      toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
+      toolCard("codex", "Codex", ["配置", "状态", "还原"]),
+      toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
+      toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
+      toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
+    ]),
   ]);
 
   root.append(
     h("div", { id: "toast-container", class: "toast-container" }, []),
     h("header", { class: "header" }, [
       h("div", { class: "brand" }, [
-        h("h1", {}, ["axon-llm-dispenser"]),
-        h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / dsh / Claude / pi"]),
+        h("h1", {}, ["Axon"]),
+        h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / dsh / Claude / Pi"]),
       ]),
       h("div", { class: "header-actions" }, [
         h("span", { id: "app-version", class: "version" }, ["v…"]),
@@ -158,8 +163,6 @@ function field(label: string, id: string, placeholder: string, value: string, ty
 const ICONS: Record<string, string> = {
   config:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-  generate:
-    '<path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
   restore:
     '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
@@ -235,7 +238,7 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
 }
 
 const ACTION_ICONS: Record<string, string> = {
-  "配置": "generate",
+  "配置": "play",
   "状态": "info",
   "还原": "restore",
   "生成 Token": "key",
@@ -254,9 +257,35 @@ function toolCard(id: string, name: string, actions: string[]): El {
     h("button", { class: "btn btn-small btn-icon-only", id: `btn-${id}-${a}`, title: ACTION_TITLES[a] ?? a }, [icon(ACTION_ICONS[a] ?? "config")]),
   );
   return h("div", { class: "tool" }, [
-    h("span", { class: "tool-name" }, [name]),
+    h("div", { class: "tool-left" }, [
+      h("span", { id: `agent-dot-${id}`, class: "agent-dot checking", title: "检测安装中…" }, []),
+      h("span", { class: "tool-name" }, [name]),
+    ]),
     h("div", { class: "tool-actions" }, buttons),
   ]);
+}
+
+/** 启动后异步检测各 agent CLI 安装情况(不阻塞渲染,只更新工具卡片的安装徽标)。 */
+async function detectAgents(): Promise<void> {
+  for (const [tool, info] of Object.entries(AGENT_CLIS)) {
+    const dot = document.getElementById(`agent-dot-${tool}`);
+    if (!dot) continue;
+    try {
+      const p = await flows.detectAgentCli(tool);
+      dot.classList.remove("checking");
+      if (p) {
+        dot.classList.add("installed");
+        dot.title = `已检测到 ${info.bin}: ${p}`;
+      } else {
+        dot.classList.add("missing");
+        dot.title = `未检测到 ${info.bin}(已检查 PATH 与常见安装目录)${info.note ? `;${info.note}` : ""}`;
+      }
+    } catch {
+      dot.classList.remove("checking");
+      dot.classList.add("missing");
+      dot.title = "安装检测失败";
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +561,8 @@ function openClaudeConfigModal(): void {
 /** 还原弹窗:列出所选工具的全部备份,支持应用(▶)/重命名(✎)/删除(🗑)/查看编辑。 */
 function openRestoreModal(tool: string): void {
   clearOverlays();
-  void run(`还原(${tool})`, async () => {
+  const toolName = tool === "pi" ? "Pi" : tool; // pi 显示名首字母大写
+  void run(`还原(${toolName})`, async () => {
     const targets = await flows.getRestoreTargets(tool);
     const collect = async (): Promise<BackupRow[]> => {
       const out: BackupRow[] = [];
@@ -559,7 +589,7 @@ function openRestoreModal(tool: string): void {
 
     const overlay = h("div", { class: "modal-overlay" }, []);
     const modal = h("div", { class: "modal" }, [
-      h("h3", {}, [`还原 - ${tool}`]),
+      h("h3", {}, [`还原 - ${toolName}`]),
       h("div", { class: "modal-sub" }, [`共 ${rows.length} 个备份。点击条目查看/编辑配置;▶ 应用、✎ 重命名、🗑 删除`]),
     ]);
     const list = h("div", { class: "modal-list" }, []);
@@ -580,7 +610,7 @@ function openRestoreModal(tool: string): void {
           const r = await flows.restoreBackup(b.targetPath, b.path);
           showResult(b.label, r.backup);
           notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
-          if (tool === "pi") notify("还原后重启 pi 生效", "info");
+          if (tool === "pi") notify("还原后重启 Pi 生效", "info");
         });
       });
     };
@@ -897,8 +927,8 @@ function bind(): void {
   $("btn-claude-还原").addEventListener("click", () => openRestoreModal("claude"));
 
   $("btn-pi-配置").addEventListener("click", () =>
-    confirmDialog("将更新 pi 的接入配置:写入 models.json / settings.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
-      void run("pi 配置", async () => {
+    confirmDialog("将更新 Pi 的接入配置:写入 models.json / settings.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
+      void run("Pi 配置", async () => {
         readFields();
         if (!validateProvider()) return;
         const ids = await ensureModels();
@@ -910,7 +940,7 @@ function bind(): void {
   );
 
   $("btn-pi-状态").addEventListener("click", () =>
-    run("pi 状态", async () => {
+    run("Pi 状态", async () => {
       readFields();
       log(await flows.piStatus(config));
     }),
@@ -946,6 +976,8 @@ async function boot(): Promise<void> {
   new MutationObserver(syncModalLock).observe(document.body, { childList: true });
   build();
   bind();
+  // 启动后异步检测各 agent CLI 安装情况(徽标)
+  void detectAgents();
   // 版本号跟随应用版本(发版时由 CI 写入 tauri.conf.json,显示即 tag 版本)
   try {
     const vEl = document.getElementById("app-version");

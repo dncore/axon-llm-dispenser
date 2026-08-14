@@ -1,6 +1,7 @@
 // 高层编排:把 core/ 纯逻辑 + bridge/ I/O 组合成用户可触发的流程。
 
 import * as bridge from "./bridge";
+import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, type ResolvedModel } from "./core/models";
 import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
@@ -21,6 +22,13 @@ function pickDefaultModel(modelIds: string[], configured?: string): string {
 
 export async function testConnection(baseUrl: string, apiKey: string): Promise<bridge.ModelInfo[]> {
   return await bridge.fetchModels(baseUrl, apiKey);
+}
+
+/** 检测 agent CLI 安装位置:先 PATH,再各官方安装方式的常见目录。 */
+export async function detectAgentCli(tool: string): Promise<string | null> {
+  const info = AGENT_CLIS[tool];
+  if (!info) return await bridge.detectCli(tool);
+  return await bridge.detectCliIn(info.bin, info.dirs);
 }
 
 function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
@@ -82,7 +90,7 @@ export async function codexStatus(): Promise<string[]> {
     configExists: await bridge.exists(configPath),
     authJsonExists: await bridge.exists(authPath),
   });
-  const cli = await bridge.detectCli("codex");
+  const cli = await detectAgentCli("codex");
   return [
     `Codex home: ${home}`,
     `config.toml: ${s.configExists ? "存在" : "缺失"}`,
@@ -165,7 +173,7 @@ export async function reasonixStatus(cfg: bridge.AppConfig): Promise<string[]> {
   const configPath = await bridge.joinPath(home, "config.toml");
   const envPath = await bridge.joinPath(home, ".env");
   const s = parseReasonixStatus(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(envPath), cfg.provider);
-  const cli = await bridge.detectCli("reasonix");
+  const cli = await detectAgentCli("reasonix");
   return [
     `Reasonix home: ${home}`,
     `config.toml: ${s.configExists ? "存在" : "缺失"}`,
@@ -224,7 +232,7 @@ export async function dshStatus(cfg: bridge.AppConfig): Promise<string[]> {
   const credPath = await bridge.joinPath(home, ".credentials.yaml");
   const apiKeyEnv = deriveKeyRef(cfg.provider);
   const s = parseDshStatus(await bridge.readFileOrEmpty(settingsPath), await bridge.readFileOrEmpty(credPath), cfg.provider, apiKeyEnv);
-  const cli = await bridge.detectCli("dsh");
+  const cli = await detectAgentCli("dsh");
   return [
     `dsh home: ${home}`,
     `settings.yaml: ${s.settingsExists ? "存在" : "缺失"}`,
@@ -311,7 +319,7 @@ export async function claudeStatus(): Promise<string[]> {
   const home = await bridge.homeDir();
   const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
   const s = parseClaudeStatus(await bridge.readFileOrEmpty(settingsPath));
-  const cli = await bridge.detectCli("claude");
+  const cli = await detectAgentCli("claude");
   return [
     `Claude 配置: ${settingsPath}`,
     `settings.json: ${s.settingsExists ? "存在" : "缺失"}`,
@@ -350,7 +358,7 @@ export async function configurePi(cfg: bridge.AppConfig, modelIds: string[]): Pr
     `  ${p1.changes.join(", ") || "无变化"}`,
     `settings.json: ${w2.path}`,
     `  ${p2.changes.join(", ") || "无变化"}`,
-    `默认模型: ${cfg.provider}/${defaultModel}(pi 内用 /model 切换,重启 pi 生效)`,
+    `默认模型: ${cfg.provider}/${defaultModel}(Pi 内用 /model 切换,重启 Pi 生效)`,
   ];
   if (w1.backup) lines.push(`备份: ${w1.backup}`);
   return { changes: allChanges, lines };
@@ -363,7 +371,7 @@ export async function piStatus(cfg: bridge.AppConfig): Promise<string[]> {
   const settingsPath = await bridge.joinPath(piDir, "settings.json");
   const s = parsePiStatus(await bridge.readFileOrEmpty(modelsPath), await bridge.readFileOrEmpty(settingsPath), cfg.provider);
   return [
-    `pi 配置: ${piDir}`,
+    `Pi 配置: ${piDir}`,
     `models.json: ${s.modelsExists ? "存在" : "缺失"}`,
     `provider ${cfg.provider}: ${s.providerConfigured ? `已配置(${s.providerModels} 个模型, baseURL=${s.providerBaseUrl})` : "未配置"}`,
     `settings.json: ${s.settingsExists ? "存在" : "缺失"}`,
@@ -401,8 +409,8 @@ export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> 
       return [{ id: "claude-settings", label: "Claude settings.json", path: await bridge.joinPath(claudeH, "settings.json") }];
     case "pi":
       return [
-        { id: "pi-models", label: "pi models.json", path: await bridge.joinPath(piH, "models.json") },
-        { id: "pi-settings", label: "pi settings.json", path: await bridge.joinPath(piH, "settings.json") },
+        { id: "pi-models", label: "Pi models.json", path: await bridge.joinPath(piH, "models.json") },
+        { id: "pi-settings", label: "Pi settings.json", path: await bridge.joinPath(piH, "settings.json") },
       ];
     default:
       return [];

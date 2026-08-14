@@ -113,7 +113,17 @@ pub fn validate_config(path: String, content: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_config;
+    use super::{expand_home, has_glob, validate_config};
+
+    #[test]
+    fn expand_home_and_glob_detection() {
+        let p = expand_home("~/foo/bar");
+        assert!(!p.starts_with('~'), "tilde should be expanded: {p}");
+        assert!(p.ends_with("/foo/bar"));
+        assert!(expand_home("/opt/x") == "/opt/x");
+        assert!(has_glob("~/nvm/*/bin") && has_glob("a?b") && has_glob("x[0-9]"));
+        assert!(!has_glob("/usr/local/bin"));
+    }
 
     #[test]
     fn backup_paths_validate_by_original_extension() {
@@ -194,6 +204,60 @@ pub fn detect_cli(name: String) -> Option<String> {
         }
     }
     None
+}
+
+/// 检测 CLI:先查 PATH,再查候选目录(支持 `~` 前缀与 glob 通配,
+/// 如 `~/.nvm/versions/node/*/bin`),覆盖 npm/版本管理器/Homebrew/官方安装器。
+#[tauri::command]
+pub fn detect_cli_in(name: String, dirs: Vec<String>) -> Option<String> {
+    if let Some(p) = detect_cli(name.clone()) {
+        return Some(p);
+    }
+    let exts: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat", ""]
+    } else {
+        &[""]
+    };
+    for dir in dirs {
+        let dir = expand_home(&dir);
+        if has_glob(&dir) {
+            if let Ok(paths) = glob::glob(&dir) {
+                for p in paths.flatten() {
+                    if !p.is_dir() {
+                        continue;
+                    }
+                    for ext in exts {
+                        let full = p.join(format!("{}{}", name, ext));
+                        if full.is_file() {
+                            return Some(full.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        } else {
+            for ext in exts {
+                let full = Path::new(&dir).join(format!("{}{}", name, ext));
+                if full.is_file() {
+                    return Some(full.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 展开路径开头的 ~ 为用户主目录(其余部分原样返回)。
+fn expand_home(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs_home() {
+            return format!("{}/{}", home, rest);
+        }
+    }
+    p.to_string()
+}
+
+fn has_glob(s: &str) -> bool {
+    s.contains(['*', '?', '['])
 }
 
 /// GET {base_url}/models,带 Bearer 鉴权,返回 [{id, ownedBy}] 列表(去重排序)。

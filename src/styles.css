@@ -90,7 +90,7 @@ body {
   padding: 20px;
   display: flex;
   gap: 16px;
-  align-items: flex-start;
+  align-items: stretch; /* 三卡片等高:都撑满 main 内容区高度 */
 }
 
 .col {
@@ -99,6 +99,21 @@ body {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+}
+
+/* 列内卡片撑满列高,内容超出在 card-body 内滚动 */
+.col > .card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.card-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .card {
@@ -115,6 +130,7 @@ body {
   font-weight: 600;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
+  min-height: 36px; /* 标题栏统一高度(容纳模型目录标题行内的按钮) */
 }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
@@ -134,7 +150,6 @@ body {
 .models-sidebar {
   width: 300px;
   flex-shrink: 0;
-  align-self: stretch; /* 高度撑满 main 内容区:视窗高度 - header - footer - 上下间距 */
   display: flex;
   flex-direction: column;
 }
@@ -199,6 +214,20 @@ body {
 .tool:last-child { border-bottom: none; }
 .tool-name { font-weight: 500; }
 .tool-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* 工具接入:agent 安装检测徽标(绿=已检测到,灰=未检测到,蓝脉冲=检测中) */
+.tool-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.agent-dot.checking { background: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.agent-dot.installed { background: var(--ok); }
+.agent-dot.missing { background: #cbd5e1; }
+@keyframes agent-pulse { 50% { opacity: 0.3; } }
 
 .output {
   flex: 1;

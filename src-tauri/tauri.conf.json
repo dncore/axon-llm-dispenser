@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "axon-llm-dispenser",
+  "productName": "Axon",
   "version": "0.3.1",
   "identifier": "com.axonllm.dispenser",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "axon-llm-dispenser",
+        "title": "Axon",
         "width": 1280,
         "height": 800,
         "minWidth": 1280,

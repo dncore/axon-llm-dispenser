@@ -83,6 +83,11 @@ export function detectCli(name: string): Promise<string | null> {
   return invoke<string | null>("detect_cli", { name });
 }
 
+/** 检测 CLI:先 PATH,再候选目录(支持 ~ 前缀与 glob 通配)。 */
+export function detectCliIn(name: string, dirs: string[]): Promise<string | null> {
+  return invoke<string | null>("detect_cli_in", { name, dirs });
+}
+
 export type ModelInfo = { id: string; ownedBy?: string };
 
 export function fetchModels(baseUrl: string, apiKey: string): Promise<ModelInfo[]> {
