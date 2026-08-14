@@ -172,113 +172,118 @@ async function ensureModels(): Promise<string[] | null> {
   return ids;
 }
 
-function bind(): void {
-  $("btn-save").addEventListener("click", async () => {
-    readFields();
-    if (!config.baseUrl && !config.apiKey) {
-      notify("Base URL 与 API Key 为空,未保存", "error");
-      return;
-    }
-    const path = await bridge.saveAppConfig(config);
-    notify(`配置已保存: ${path}`);
-  });
+/** 统一包装异步操作:任何异常都在输出面板可见,不再静默失败。 */
+async function run(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    notify(`${label}: ${e}`, "error");
+  }
+}
 
-  $("btn-test").addEventListener("click", async () => {
-    readFields();
-    if (!config.baseUrl) return notify("请先填写 Base URL", "error");
-    const s = $("conn-status");
-    s.textContent = "连接中…";
-    try {
+function bind(): void {
+  $("btn-save").addEventListener("click", () =>
+    run("保存配置", async () => {
+      readFields();
+      if (!config.baseUrl && !config.apiKey) {
+        notify("Base URL 与 API Key 为空,未保存", "error");
+        return;
+      }
+      const path = await bridge.saveAppConfig(config);
+      notify(`配置已保存: ${path}`);
+    }),
+  );
+
+  $("btn-test").addEventListener("click", () =>
+    run("测试连接", async () => {
+      readFields();
+      if (!config.baseUrl) {
+        notify("请先填写 Base URL", "error");
+        return;
+      }
+      const s = $("conn-status");
+      s.textContent = "连接中…";
       const ids = await flows.testConnection(config.baseUrl, config.apiKey);
       ($("models") as HTMLTextAreaElement).value = ids.join("\n");
       $("model-count").textContent = `${ids.length} 个模型`;
       s.textContent = "连接成功";
       notify(`连接成功,拉取到 ${ids.length} 个模型`, "info");
-    } catch (e) {
-      s.textContent = "连接失败";
-      notify(`连接失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
   $("btn-fetch").addEventListener("click", () => $("btn-test").click());
 
-  $("btn-codex-配置").addEventListener("click", async () => {
-    readFields();
-    if (!validateProvider()) return;
-    const ids = await ensureModels();
-    if (!ids) return;
-    try {
+  $("btn-codex-配置").addEventListener("click", () =>
+    run("Codex 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
       const r = await flows.configureCodex(config, ids);
       log(r.lines);
-    } catch (e) {
-      notify(`Codex 配置失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
-  $("btn-codex-状态").addEventListener("click", async () => {
-    log(await flows.codexStatus());
-  });
+  $("btn-codex-状态").addEventListener("click", () =>
+    run("Codex 状态", async () => {
+      log(await flows.codexStatus());
+    }),
+  );
 
-  $("btn-reasonix-配置").addEventListener("click", async () => {
-    readFields();
-    if (!validateProvider()) return;
-    const ids = await ensureModels();
-    if (!ids) return;
-    try {
+  $("btn-reasonix-配置").addEventListener("click", () =>
+    run("Reasonix 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
       const r = await flows.configureReasonix(config, ids);
       log(r.lines);
-    } catch (e) {
-      notify(`Reasonix 配置失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
-  $("btn-reasonix-状态").addEventListener("click", async () => {
-    readFields();
-    log(await flows.reasonixStatus(config));
-  });
+  $("btn-reasonix-状态").addEventListener("click", () =>
+    run("Reasonix 状态", async () => {
+      readFields();
+      log(await flows.reasonixStatus(config));
+    }),
+  );
 
-  $("btn-reasonix-生成 Token").addEventListener("click", async () => {
-    const ok = confirm("将生成新的固定鉴权 Token 并写入 Reasonix [serve] 段(覆盖旧 Token,原文件自动备份),确认?");
-    if (!ok) return;
-    try {
+  $("btn-reasonix-生成 Token").addEventListener("click", () =>
+    run("生成 Token", async () => {
+      if (!confirm("将生成新的固定鉴权 Token 并写入 Reasonix [serve] 段(覆盖旧 Token,原文件自动备份),确认?")) return;
       const r = await flows.generateReasonixAuth();
       log(r.lines);
-    } catch (e) {
-      notify(`生成 Token 失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
-  $("btn-reasonix-关闭鉴权").addEventListener("click", async () => {
-    const ok = confirm("将 Reasonix 鉴权改回 auth_mode=none 并移除 token,确认?");
-    if (!ok) return;
-    try {
+  $("btn-reasonix-关闭鉴权").addEventListener("click", () =>
+    run("关闭鉴权", async () => {
+      if (!confirm("将 Reasonix 鉴权改回 auth_mode=none 并移除 token,确认?")) return;
       const r = await flows.disableReasonixAuth();
       log(r.lines);
-    } catch (e) {
-      notify(`关闭鉴权失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
-  $("btn-dsh-配置").addEventListener("click", async () => {
-    readFields();
-    if (!validateProvider()) return;
-    const ids = await ensureModels();
-    if (!ids) return;
-    try {
+  $("btn-dsh-配置").addEventListener("click", () =>
+    run("dsh 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
       const r = await flows.configureDsh(config, ids);
       log(r.lines);
-    } catch (e) {
-      notify(`dsh 配置失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 
-  $("btn-dsh-状态").addEventListener("click", async () => {
-    readFields();
-    log(await flows.dshStatus(config));
-  });
+  $("btn-dsh-状态").addEventListener("click", () =>
+    run("dsh 状态", async () => {
+      readFields();
+      log(await flows.dshStatus(config));
+    }),
+  );
 
-  $("btn-update").addEventListener("click", async () => {
-    try {
+  $("btn-update").addEventListener("click", () =>
+    run("检查更新", async () => {
       const resp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
       if (!resp.ok) return notify("暂未找到发布版本(或仓库尚未公开)", "error");
       const data = (await resp.json()) as { tag_name?: string; html_url?: string };
@@ -289,10 +294,8 @@ function bind(): void {
       } else {
         notify(`已是最新版本 v${APP_VERSION}`, "info");
       }
-    } catch (e) {
-      notify(`检查更新失败: ${e}`, "error");
-    }
-  });
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +303,10 @@ function bind(): void {
 // ---------------------------------------------------------------------------
 
 async function boot(): Promise<void> {
+  // 全局兜底:任何未捕获的异步错误都在输出面板可见
+  window.addEventListener("unhandledrejection", (ev) => {
+    notify(`未处理的错误: ${ev.reason}`, "error");
+  });
   build();
   bind();
   try {

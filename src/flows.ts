@@ -42,7 +42,7 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
   const modelsPath = await bridge.joinPath(home, "models.json");
   const resolved = buildResolvedModels(modelIds);
 
-  const cfgText = await bridge.readFile(configPath);
+  const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchCodexConfigToml(cfgText, {
     providerName: cfg.provider,
     baseUrl: cfg.baseUrl,
@@ -69,7 +69,7 @@ export async function codexStatus(): Promise<string[]> {
   const configPath = await bridge.joinPath(home, "config.toml");
   const modelsPath = await bridge.joinPath(home, "models.json");
   const authPath = await bridge.joinPath(home, "auth.json");
-  const s = parseCodexStatus(await bridge.readFile(configPath), await bridge.readFile(modelsPath), {
+  const s = parseCodexStatus(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(modelsPath), {
     configExists: await bridge.exists(configPath),
     authJsonExists: await bridge.exists(authPath),
   });
@@ -100,7 +100,7 @@ export async function configureReasonix(cfg: bridge.AppConfig, modelIds: string[
   const modelContexts: Record<string, number> = {};
   for (const m of resolved) modelContexts[m.id] = m.contextWindow;
 
-  const cfgText = await bridge.readFile(configPath);
+  const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchReasonixProvider(cfgText, {
     providerName: cfg.provider,
     baseUrl: cfg.baseUrl,
@@ -111,7 +111,7 @@ export async function configureReasonix(cfg: bridge.AppConfig, modelIds: string[
   });
 
   const written = await bridge.writeWithBackup(configPath, patched.text);
-  const envText = await bridge.readFile(envPath);
+  const envText = await bridge.readFileOrEmpty(envPath);
   const envPatched = bridge.upsertEnvKey(envText, apiKeyEnv, cfg.apiKey);
   const envWritten = await bridge.writeSecret(envPath, envPatched.text);
 
@@ -128,7 +128,7 @@ export async function generateReasonixAuth(): Promise<FlowResult> {
   const home = await bridge.reasonixHome();
   const configPath = await bridge.joinPath(home, "config.toml");
   const token = generateToken();
-  const cfgText = await bridge.readFile(configPath);
+  const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchReasonixServeAuth(cfgText, "token", token);
   const written = await bridge.writeWithBackup(configPath, patched.text);
   const lines = [
@@ -144,7 +144,7 @@ export async function generateReasonixAuth(): Promise<FlowResult> {
 export async function disableReasonixAuth(): Promise<FlowResult> {
   const home = await bridge.reasonixHome();
   const configPath = await bridge.joinPath(home, "config.toml");
-  const cfgText = await bridge.readFile(configPath);
+  const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchReasonixServeAuth(cfgText, "none");
   if (patched.changes.length === 0) return { changes: [], lines: ["鉴权已处于关闭状态,无需修改"] };
   const written = await bridge.writeWithBackup(configPath, patched.text);
@@ -155,7 +155,7 @@ export async function reasonixStatus(cfg: bridge.AppConfig): Promise<string[]> {
   const home = await bridge.reasonixHome();
   const configPath = await bridge.joinPath(home, "config.toml");
   const envPath = await bridge.joinPath(home, ".env");
-  const s = parseReasonixStatus(await bridge.readFile(configPath), await bridge.readFile(envPath), cfg.provider);
+  const s = parseReasonixStatus(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(envPath), cfg.provider);
   const cli = await bridge.detectCli("reasonix");
   return [
     `Reasonix home: ${home}`,
@@ -182,7 +182,7 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const entries = toDshEntries(resolved);
   const defaultModel = cfg.defaultModel || resolved[0]?.id || "";
 
-  const settingsText = await bridge.readFile(settingsPath);
+  const settingsText = await bridge.readFileOrEmpty(settingsPath);
   const p1 = patchDshProvider(settingsText, {
     providerName: cfg.provider,
     displayName: cfg.displayName || cfg.provider,
@@ -194,7 +194,7 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const allChanges = [...p1.changes, ...p2.changes];
 
   const written = await bridge.writeWithBackup(settingsPath, p2.text);
-  const credText = await bridge.readFile(credPath);
+  const credText = await bridge.readFileOrEmpty(credPath);
   const credPatched = upsertDshCredentialYaml(credText, apiKeyEnv, cfg.apiKey);
   const credWritten = await bridge.writeSecret(credPath, credPatched.text);
 
@@ -214,7 +214,7 @@ export async function dshStatus(cfg: bridge.AppConfig): Promise<string[]> {
   const settingsPath = await bridge.joinPath(home, "settings.yaml");
   const credPath = await bridge.joinPath(home, ".credentials.yaml");
   const apiKeyEnv = deriveKeyRef(cfg.provider);
-  const s = parseDshStatus(await bridge.readFile(settingsPath), await bridge.readFile(credPath), cfg.provider, apiKeyEnv);
+  const s = parseDshStatus(await bridge.readFileOrEmpty(settingsPath), await bridge.readFileOrEmpty(credPath), cfg.provider, apiKeyEnv);
   const cli = await bridge.detectCli("dsh");
   return [
     `dsh home: ${home}`,

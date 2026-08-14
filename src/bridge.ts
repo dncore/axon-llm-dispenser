@@ -1,7 +1,8 @@
 // Tauri 桥接层:把 core/ 纯逻辑需要的 I/O 映射到 Rust 命令,并封装应用自身配置。
+// 注意:路径操作(join/home_dir/config_dir)一律走自定义命令,不用 tauri-plugin-path,
+// 避免 ACL 权限配置问题。
 
 import { invoke } from "@tauri-apps/api/core";
-import { appConfigDir, homeDir, join } from "@tauri-apps/api/path";
 import { timestamp } from "./core/util";
 
 export type AppConfig = {
@@ -26,6 +27,15 @@ const DEFAULT_CONFIG: AppConfig = {
 
 export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
+}
+
+/** 读文件,不存在/失败时返回空串(用于可选配置文件)。 */
+export async function readFileOrEmpty(path: string): Promise<string> {
+  try {
+    return await readFile(path);
+  } catch {
+    return "";
+  }
 }
 
 export function writeFile(path: string, content: string, mode?: number): Promise<void> {
@@ -60,28 +70,36 @@ export function openUrl(url: string): Promise<void> {
 // 路径
 // ---------------------------------------------------------------------------
 
+export function homeDir(): Promise<string> {
+  return invoke<string>("home_dir");
+}
+
+export function appConfigDir(): Promise<string> {
+  return invoke<string>("config_dir");
+}
+
+export async function joinPath(...parts: string[]): Promise<string> {
+  return invoke<string>("path_join", { parts });
+}
+
 export async function home(): Promise<string> {
   return await homeDir();
 }
 
-export async function joinPath(...parts: string[]): Promise<string> {
-  return await join(...parts);
-}
-
 export async function appConfigFile(): Promise<string> {
-  return await join(await appConfigDir(), "config.json");
+  return await joinPath(await appConfigDir(), "config.json");
 }
 
 export async function codexHome(): Promise<string> {
-  return await join(await homeDir(), ".codex");
+  return await joinPath(await homeDir(), ".codex");
 }
 
 export async function reasonixHome(): Promise<string> {
-  return await join(await homeDir(), ".reasonix");
+  return await joinPath(await homeDir(), ".reasonix");
 }
 
 export async function dshHome(): Promise<string> {
-  return await join(await homeDir(), ".dsh");
+  return await joinPath(await homeDir(), ".dsh");
 }
 
 // ---------------------------------------------------------------------------
