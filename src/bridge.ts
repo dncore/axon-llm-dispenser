@@ -80,6 +80,10 @@ export function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
 export function homeDir(): Promise<string> {
   return invoke<string>("home_dir");
 }

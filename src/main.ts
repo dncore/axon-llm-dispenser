@@ -3,7 +3,6 @@
 import "./styles.css";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
-import { getVersion } from "@tauri-apps/api/app";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 
@@ -762,7 +761,7 @@ async function boot(): Promise<void> {
   // 版本号跟随应用版本(发版时由 CI 写入 tauri.conf.json,显示即 tag 版本)
   try {
     const vEl = document.getElementById("app-version");
-    if (vEl) vEl.textContent = `v${await getVersion()}`;
+    if (vEl) vEl.textContent = `v${await bridge.appVersion()}`;
   } catch {
     // 忽略:版本获取失败时保留占位
   }

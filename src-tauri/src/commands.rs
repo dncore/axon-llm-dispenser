@@ -217,3 +217,9 @@ fn dirs_home() -> Option<String> {
     }
     None
 }
+
+/// 返回应用版本号(读 package_info.version,绕过 ACL 限制)。
+#[tauri::command]
+pub fn app_version(app: tauri::AppHandle) -> Result<String, String> {
+    Ok(app.package_info().version.to_string())
+}
