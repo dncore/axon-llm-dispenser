@@ -17,7 +17,7 @@ export type AppConfig = {
   excludeDoubao: boolean;
 };
 
-const DEFAULT_CONFIG: AppConfig = {
+export const DEFAULT_CONFIG: AppConfig = {
   provider: "axon",
   displayName: "Axon",
   baseUrl: "",

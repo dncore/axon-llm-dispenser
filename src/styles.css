@@ -13,6 +13,11 @@
 
 * { box-sizing: border-box; }
 
+/* 界面文本默认不可选中(按钮/提示/toast/弹窗);
+   可编辑与可复制内容(输入框/日志/模型列表)保留选中 */
+#app, .tip-popup, .modal-overlay { user-select: none; }
+input, textarea, .output, .models-list { user-select: text; }
+
 body.modal-open {
   overflow: hidden;
 }
@@ -82,6 +87,39 @@ body {
 .brand h1 { margin: 0; font-size: 18px; }
 .subtitle { color: var(--muted); font-size: 12px; }
 
+/* 新手引导条:固定悬浮在 header 下方,不占文档流高度 */
+.guide-banner {
+  position: fixed;
+  top: 70px; /* 悬浮位置(用户微调) */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: #1e40af;
+  font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+.guide-text { white-space: nowrap; } /* 不换行,按内容撑满容器 */
+.guide-text { text-align: center; }
+.guide-close {
+  border: none;
+  background: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.guide-close:hover { color: #1e40af; background: #dbeafe; }
+
 /* 版本号:底部面板标题栏右侧的圆角徽章 */
 .version {
   color: var(--muted);
@@ -136,6 +174,21 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
+/* 卡片蒙层锁定:网关连接成功前置灰、不可交互 */
+.card-lockable { position: relative; }
+.card-lockable.locked > :not(.card-overlay) { filter: grayscale(0.6) opacity(0.65); }
+.card-overlay {
+  display: none;
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius);
+  background: rgba(241, 245, 249, 0.5);
+  z-index: 5;
+  align-items: center;
+  justify-content: center;
+}
+.card-lockable.locked .card-overlay { display: flex; }
+
 .card h2 {
   margin: 0 0 12px;
   font-size: 14px;
@@ -146,6 +199,7 @@ body {
 }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.grid2 > * { min-width: 0; } /* 允许网格子项收缩,否则输入框内在宽度会把卡片撑破 */
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .field-label { font-size: 12px; color: var(--muted); }
@@ -218,10 +272,26 @@ body {
 .row { display: flex; align-items: center; gap: 10px; }
 .hint { color: var(--muted); font-size: 12px; }
 
-/* 模型目录/工具接入:标题行左右分布(右侧放计数+按钮或帮助图标) */
+/* 模型目录/工具接入/连接设置:标题行左右分布(右侧放计数+按钮/帮助图标/状态点) */
 .card h2.models-title,
-.card h2.tools-title { display: flex; align-items: center; justify-content: space-between; }
+.card h2.tools-title,
+.card h2.conn-title { display: flex; align-items: center; justify-content: space-between; }
+
+/* 连接状态点:灰=未测试,蓝脉冲=连接中,绿=成功,红=失败 */
+.conn-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  flex-shrink: 0;
+}
+.conn-status-dot.status-checking { background: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.conn-status-dot.status-ok { background: var(--ok); }
+.conn-status-dot.status-error { background: var(--danger); }
 .fetch-right { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+
+/* 点击后的系统焦点环去掉(视觉像蓝边框),键盘导航焦点环保留 */
+button:focus:not(:focus-visible) { outline: none; }
 
 .btn {
   padding: 8px 16px;
@@ -239,6 +309,10 @@ body {
 .btn-icon { width: 15px; height: 15px; display: block; }
 .btn-ghost { background: transparent; color: var(--accent); }
 .btn-ghost:hover { background: #eff6ff; }
+.btn-danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+.btn-danger:hover { background: #fef2f2; }
+.btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger-solid:hover { background: #b91c1c; border-color: #b91c1c; }
 
 .tool {
   display: flex;
@@ -395,22 +469,45 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
 .backup-action-btn:hover { background: #e2e8f0; color: var(--text); }
 .backup-action-btn.danger:hover { color: var(--danger); background: #fee2e2; }
 .backup-action-btn .btn-icon { width: 13px; height: 13px; }
-.backup-editor {
+.editor-wrap {
   flex: 1;
   min-height: 260px;
-  width: 100%;
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafbfc;
+}
+.editor-wrap:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+.editor-gutter {
+  flex-shrink: 0;
+  width: 40px;
+  overflow: hidden;
+  padding: 10px 6px 10px 0;
+  text-align: right;
+  color: #9aa3af;
+  background: #f1f5f9;
+  border-right: 1px solid var(--border);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  user-select: none;
+}
+.backup-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 260px;
   resize: none;
   font-family: ui-monospace, monospace;
   font-size: 12px;
   line-height: 1.5;
   padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fafbfc;
+  border: none;
+  background: transparent;
   white-space: pre;
   overflow: auto;
 }
-.backup-editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .modal-label { font-weight: 600; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
 .modal-name { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .modal-meta { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }

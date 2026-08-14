@@ -78,7 +78,10 @@ function build(): void {
   const root = $("app");
 
   const connCard = h("section", { class: "card" }, [
-    h("h2", {}, ["连接设置"]),
+    h("h2", { class: "conn-title" }, [
+      "连接设置",
+      h("span", { id: "conn-status", class: "conn-status-dot status-idle", title: "未测试连接" }, []),
+    ]),
     h("div", { class: "card-body" }, [
       h("div", { class: "grid2" }, [
         field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
@@ -90,12 +93,12 @@ function build(): void {
       h("div", { class: "row" }, [
         h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
         h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
-        h("span", { id: "conn-status", class: "hint" }, []),
+        h("button", { id: "btn-del-config", class: "btn btn-danger", type: "button" }, ["删除配置"]),
       ]),
     ]),
   ]);
 
-  const modelsCard = h("section", { class: "card models-sidebar" }, [
+  const modelsCard = h("section", { class: "card models-sidebar card-lockable" }, [
     h("h2", { class: "models-title" }, [
       "模型列表",
       h("div", { class: "fetch-right" }, [
@@ -107,10 +110,11 @@ function build(): void {
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
       h("span", {}, ["过滤 Doubao 系模型"]),
     ]),
-    h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["点击「拉取模型」获取模型列表"])]),
+    h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["填写网关后点 ↻ 拉取模型列表"])]),
+    h("div", { class: "card-overlay" }, []),
   ]);
 
-  const toolsCard = h("section", { class: "card" }, [
+  const toolsCard = h("section", { class: "card card-lockable" }, [
     h("h2", { class: "tools-title" }, ["工具接入", helpTipIcon()]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
@@ -120,6 +124,7 @@ function build(): void {
       toolCard("omp", "Oh My Pi", ["配置", "状态", "还原"]),
       toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
     ]),
+    h("div", { class: "card-overlay" }, []),
   ]);
 
   root.append(
@@ -137,6 +142,11 @@ function build(): void {
       ]),
     ]),
 
+    h("div", { id: "guide-banner", class: "guide-banner" }, [
+      h("span", { class: "guide-text" }, []),
+      h("button", { id: "guide-close", class: "guide-close", type: "button", title: "关闭引导" }, ["×"]),
+    ]),
+
     h("main", { class: "main" }, [
       modelsCard,
       h("div", { class: "col" }, [connCard]),
@@ -148,7 +158,7 @@ function build(): void {
         h("button", { id: "btn-expand-log", class: "btn-expand", type: "button", title: "展开日志面板" }, [icon("chevron-up")]),
       ]),
       h("div", { id: "output", class: "output" }, [
-        h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
+        h("div", { class: "log-empty" }, ["操作过程与结果会显示在这里"]),
       ]),
     ]),
   );
@@ -357,6 +367,41 @@ async function detectAgents(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 新手引导条:未完成接入流程时显示,完成后自动消失;× 可关闭(本次会话)
+// ---------------------------------------------------------------------------
+
+let guideDismissed = false;
+
+// ---------------------------------------------------------------------------
+// 卡片蒙层锁定:「模型列表」「工具接入」在网关连接成功前置灰不可交互
+// ---------------------------------------------------------------------------
+
+let gatewayConnected = false;
+
+/** 按连接状态锁定/解锁卡片蒙层。 */
+function syncCardLock(): void {
+  const locked = !gatewayConnected;
+  document.querySelectorAll(".card-lockable").forEach((el) => el.classList.toggle("locked", locked));
+}
+
+/** 按当前状态更新引导条:只依据是否配置了 Base URL 与 API Key,未配置则显示。 */
+function syncOnboarding(): void {
+  const banner = document.getElementById("guide-banner");
+  readFields();
+  const gatewayReady = Boolean(config.baseUrl && config.apiKey);
+  if (banner) {
+    if (guideDismissed || gatewayReady) {
+      banner.style.display = "none";
+    } else {
+      const text = banner.querySelector(".guide-text") as El;
+      text.textContent = "开始使用:在「连接设置」填写 Base URL 与 API Key → 点「测试连接」拉取模型 → 点任意 Agent 的 ▶ 一键接入";
+      banner.style.display = "flex";
+    }
+  }
+  syncCardLock();
+}
+
 /** 检测单个 agent 的网关配置一致性并更新方形徽标(绿=一致,橙=不一致,灰=未配置)。 */
 async function detectAgentConfigOne(tool: string): Promise<void> {
   const dot = document.getElementById(`agent-cfg-dot-${tool}`);
@@ -385,6 +430,7 @@ async function detectAgentConfigOne(tool: string): Promise<void> {
     dot.classList.add("missing");
     dot.title = "配置检测失败(点击重新检测)";
   }
+  syncOnboarding();
 }
 
 /** 启动后异步检测各 agent 的配置一致性(方形徽标)。 */
@@ -409,6 +455,34 @@ function readFields(): void {
   config.excludeDoubao = ($("chk-exclude-doubao") as HTMLInputElement).checked;
 }
 
+/** 把配置填进表单(启动加载与「删除配置」重置共用)。 */
+function fillForm(cfg: bridge.AppConfig): void {
+  ($("input-provider") as HTMLInputElement).value = cfg.provider;
+  ($("input-display") as HTMLInputElement).value = cfg.displayName;
+  ($("input-base") as HTMLInputElement).value = cfg.baseUrl;
+  ($("input-key") as HTMLInputElement).value = cfg.apiKey;
+  ($("input-anthropic") as HTMLInputElement).value = cfg.anthropicBaseUrl;
+  ($("chk-exclude-doubao") as HTMLInputElement).checked = cfg.excludeDoubao;
+}
+
+/** 表单恢复刚安装时的初始状态(含 API Key 眼睛与模型列表)。 */
+function resetForm(): void {
+  config = { ...bridge.DEFAULT_CONFIG };
+  fillForm(config);
+  const keyInput = $("input-key") as HTMLInputElement;
+  keyInput.type = "password";
+  const eye = keyInput.closest(".input-wrap")?.querySelector(".input-eye");
+  if (eye) {
+    eye.replaceChildren(icon("eye"));
+    eye.setAttribute("title", "显示 API Key");
+    eye.classList.remove("active");
+  }
+  setConnStatus("idle");
+  setModelRows([]);
+  gatewayConnected = false;
+  syncCardLock();
+}
+
 function readModelIds(): string[] {
   return modelRows.map((r) => r.id);
 }
@@ -418,6 +492,9 @@ function renderModelsList(): void {
   const list = document.getElementById("models-list");
   if (!list) return;
   list.replaceChildren();
+  if (modelRows.length === 0) {
+    list.append(h("div", { class: "log-empty" }, ["填写网关后点 ↻ 拉取模型列表"]));
+  }
   for (const r of modelRows) {
     const row = h("div", { class: "model-row" }, [
       h("span", { class: "model-row-id" }, [r.id]),
@@ -442,10 +519,17 @@ function setModelRows(rows: ModelRow[]): void {
   renderModelsList();
 }
 
-/** 拉取模型并渲染到侧栏;失败时重置状态并抛出,由调用方 run() 统一报错。 */
+/** 连接状态点(标题行右侧):灰=未测试,蓝脉冲=连接中,绿=成功,红=失败。 */
+function setConnStatus(state: "idle" | "checking" | "ok" | "error", tip?: string): void {
+  const dot = $("conn-status");
+  dot.classList.remove("status-idle", "status-checking", "status-ok", "status-error");
+  dot.classList.add(`status-${state}`);
+  dot.title = tip ?? { idle: "未测试连接", checking: "连接中…", ok: "连接成功", error: "连接失败" }[state];
+}
+
+/** 拉取模型并渲染到侧栏;失败时置红并抛出,由调用方 run() 统一报错。 */
 async function fetchAndRenderModels(): Promise<void> {
-  const s = $("conn-status");
-  s.textContent = "连接中…";
+  setConnStatus("checking");
   try {
     const info = await flows.testConnection(config.baseUrl, config.apiKey);
     let shown = info;
@@ -453,10 +537,14 @@ async function fetchAndRenderModels(): Promise<void> {
       shown = info.filter((m) => !flows.isDoubaoModel(m.id));
     }
     setModelRows(shown);
-    s.textContent = "连接成功";
+    setConnStatus("ok", `连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`);
     notify(`连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`, "info");
+    gatewayConnected = true;
+    syncCardLock(); // 连接成功:解锁模型列表/工具接入卡片
   } catch (e) {
-    s.textContent = "";
+    setConnStatus("error", `连接失败: ${e}`);
+    gatewayConnected = false;
+    syncCardLock(); // 连接失败:重新锁定
     throw e;
   }
 }
@@ -536,14 +624,15 @@ function clearOverlays(): void {
 }
 
 /** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。
- * 不清除已有弹窗:允许叠加在还原弹窗等上层做二次确认(ESC 只关最上层)。 */
-function confirmDialog(message: string, onOk: () => void, okLabel = "确认", cancelLabel = "取消"): void {
+ * 不清除已有弹窗:允许叠加在还原弹窗等上层做二次确认(ESC 只关最上层)。
+ * okClass 用于危险操作的红色确认按钮(如 btn-danger-solid)。 */
+function confirmDialog(message: string, onOk: () => void, okLabel = "确认", cancelLabel = "取消", okClass = ""): void {
   const overlay = h("div", { class: "modal-overlay" }, []);
   const modal = h("div", { class: "modal modal-sm" }, [
     h("p", { class: "confirm-text" }, [message]),
     h("div", { class: "modal-footer" }, [
       h("button", { class: "btn btn-ghost" }, [cancelLabel]),
-      h("button", { class: "btn" }, [okLabel]),
+      h("button", { class: `btn ${okClass}`.trim() }, [okLabel]),
     ]),
   ]);
   const [cancel, ok] = modal.querySelectorAll("button");
@@ -746,7 +835,7 @@ function openRestoreModal(tool: string): void {
               notify(`已删除 ${b.name}`, "info");
               await refresh();
             });
-          }),
+          }, "删除", "取消", "btn-danger-solid"),
         );
         list.append(h("div", { class: "modal-row" }, [main, h("div", { class: "backup-actions" }, [play, rename, del])]));
       }
@@ -770,10 +859,23 @@ type BackupRow = { label: string; targetPath: string; base: string; name: string
 function openBackupEditor(b: BackupRow, onDone: () => void): void {
   const overlay = h("div", { class: "modal-overlay" }, []);
   const ta = h("textarea", { class: "backup-editor", spellcheck: "false" }, []);
+  const gutter = h("div", { class: "editor-gutter" }, []);
+  // 行号侧栏:与 textarea 字体/行高/内边距一致,输入时重算行数,滚动时同步偏移
+  const syncGutter = (): void => {
+    const lines = ta.value.split("\n").length;
+    let nums = "";
+    for (let i = 1; i <= lines; i++) nums += `${i}\n`;
+    gutter.textContent = nums;
+    gutter.scrollTop = ta.scrollTop;
+  };
+  ta.addEventListener("input", syncGutter);
+  ta.addEventListener("scroll", () => {
+    gutter.scrollTop = ta.scrollTop;
+  });
   const modal = h("div", { class: "modal" }, [
     h("h3", {}, [`查看/编辑 - ${b.name}`]),
     h("div", { class: "modal-sub" }, [`${b.label} · 保存写回备份文件,应用还原到当前配置(均校验格式)`]),
-    ta,
+    h("div", { class: "editor-wrap" }, [gutter, ta]),
   ]);
   const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
   const save = h("button", { class: "btn" }, ["保存"]);
@@ -808,6 +910,7 @@ function openBackupEditor(b: BackupRow, onDone: () => void): void {
   document.body.append(overlay);
   void run("读取备份", async () => {
     ta.value = await bridge.readFile(b.path);
+    syncGutter();
   });
 }
 
@@ -892,6 +995,13 @@ function initFooterMin(): void {
 }
 
 function bind(): void {
+  // 新手引导条关闭按钮(本次会话内隐藏)
+  $("guide-close").addEventListener("click", () => {
+    guideDismissed = true;
+    const banner = document.getElementById("guide-banner");
+    if (banner) banner.style.display = "none";
+  });
+
   // 底部日志面板:拖拽调高、把手上的 chevron 按钮单击展开/收起、窗口缩放时重新夹紧
   initFooterMin();
   window.addEventListener("resize", () => setFooterHeight($("footer").offsetHeight));
@@ -926,7 +1036,22 @@ function bind(): void {
       }
       const path = await bridge.saveAppConfig(config);
       notify(`配置已保存: ${path}`);
+      syncOnboarding();
+      void detectAgentConfigs(); // 网关变化后重检各 agent 配置一致性(同步引导条)
     }),
+  );
+
+  $("btn-del-config").addEventListener("click", () =>
+    confirmDialog("将删除保存的网关配置(config.json),表单恢复刚安装时的初始状态;各 Agent 已写入的配置不受影响。", () => {
+      void run("删除配置", async () => {
+        const path = await bridge.appConfigFile();
+        if (await bridge.exists(path)) await bridge.deleteFile(path);
+        resetForm();
+        notify("已删除应用配置,表单已恢复初始状态", "info");
+        void detectAgentConfigs();
+        syncOnboarding();
+      });
+    }, "删除", "取消", "btn-danger-solid"),
   );
 
   $("btn-test").addEventListener("click", () =>
@@ -937,6 +1062,10 @@ function bind(): void {
         return;
       }
       await fetchAndRenderModels();
+      // 连接成功即自动保存配置,无需再手动点「保存配置」
+      const path = await bridge.saveAppConfig(config);
+      notify(`配置已保存: ${path}`, "info");
+      syncOnboarding();
     }),
   );
 
@@ -1113,6 +1242,7 @@ async function boot(): Promise<void> {
   new MutationObserver(syncModalLock).observe(document.body, { childList: true });
   build();
   bind();
+  syncCardLock(); // 初始锁定模型列表/工具接入(避免加载配置前可交互)
   // 启动后异步检测各 agent CLI 安装情况(徽标)
   void detectAgents();
   // 版本号跟随应用版本(发版时由 CI 写入 tauri.conf.json,显示即 tag 版本)
@@ -1124,12 +1254,7 @@ async function boot(): Promise<void> {
   }
   try {
     config = await bridge.loadAppConfig();
-    ($("input-provider") as HTMLInputElement).value = config.provider;
-    ($("input-display") as HTMLInputElement).value = config.displayName;
-    ($("input-base") as HTMLInputElement).value = config.baseUrl;
-    ($("input-key") as HTMLInputElement).value = config.apiKey;
-    ($("input-anthropic") as HTMLInputElement).value = config.anthropicBaseUrl;
-    ($("chk-exclude-doubao") as HTMLInputElement).checked = config.excludeDoubao;
+    fillForm(config);
   } catch {
     // 使用默认配置
   }
@@ -1139,6 +1264,7 @@ async function boot(): Promise<void> {
   }
   // 启动后异步检测各 agent 的配置一致性(方形徽标)
   void detectAgentConfigs();
+  syncOnboarding();
 }
 
 void boot();
