@@ -32,6 +32,21 @@ jobs:
       - name: Install frontend deps
         run: npm install
 
+      - name: Set version from tag
+        run: |
+          # 让应用版本跟随 tag:构建前覆盖 tauri.conf.json 的 version
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -n "$VERSION" ]; then
+            node -e "
+              const fs=require('fs');
+              const p='src-tauri/tauri.conf.json';
+              const c=JSON.parse(fs.readFileSync(p));
+              c.version='$VERSION';
+              fs.writeFileSync(p, JSON.stringify(c, null, 2)+'\n');
+            "
+            echo "tauri version set to $VERSION"
+          fi
+
       - name: Build (macOS)
         if: matrix.target == 'macos'
         run: npx tauri build --bundles app

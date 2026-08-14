@@ -3,10 +3,10 @@
 import "./styles.css";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
+import { getVersion } from "@tauri-apps/api/app";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 
-const APP_VERSION = "0.1.0";
 
 type El = HTMLElement;
 
@@ -129,7 +129,7 @@ function build(): void {
         h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / dsh / Claude / pi"]),
       ]),
       h("div", { class: "header-actions" }, [
-        h("span", { class: "version" }, [`v${APP_VERSION}`]),
+        h("span", { id: "app-version", class: "version" }, ["v…"]),
       ]),
     ]),
 
@@ -759,6 +759,13 @@ async function boot(): Promise<void> {
   new MutationObserver(syncModalLock).observe(document.body, { childList: true });
   build();
   bind();
+  // 版本号跟随应用版本(发版时由 CI 写入 tauri.conf.json,显示即 tag 版本)
+  try {
+    const vEl = document.getElementById("app-version");
+    if (vEl) vEl.textContent = `v${await getVersion()}`;
+  } catch {
+    // 忽略:版本获取失败时保留占位
+  }
   try {
     config = await bridge.loadAppConfig();
     ($("input-provider") as HTMLInputElement).value = config.provider;
