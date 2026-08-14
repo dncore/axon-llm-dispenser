@@ -101,7 +101,7 @@ function build(): void {
     ]),
     h("label", { class: "row toggle" }, [
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
-      h("span", {}, ["过滤 Doubao 系模型(拉取与生成配置均不含 doubao)"]),
+      h("span", {}, ["过滤 Doubao 系模型"]),
     ]),
     h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["点击「拉取模型」获取模型列表"])]),
   ]);

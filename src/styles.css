@@ -130,6 +130,8 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable; /* 预留滚动条空间,避免与内容(删除按钮)重叠 */
+  padding-right: 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
