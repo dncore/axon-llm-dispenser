@@ -53,13 +53,18 @@ jobs:
         run: |
           echo "macos zip: $ZIP_NAME  sha256: $SHA256"
           VERSION="${GITHUB_REF_NAME#v}"
-          if [ -z "${{ secrets.TAP_PUSH_TOKEN }}" ]; then
-            echo "⚠️ TAP_PUSH_TOKEN 未配置,跳过自动同步 cask 到 tap 仓库(sha256 已打印,可手动更新)"
+          if [ -z "${{ secrets.TAP_SSH_KEY }}" ]; then
+            echo "⚠️ TAP_SSH_KEY 未配置,跳过自动同步 cask 到 tap 仓库(sha256 已打印,可手动更新)"
             exit 0
           fi
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TAP_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rm -rf /tmp/taptap && git clone https://x-access-token:${{ secrets.TAP_PUSH_TOKEN }}@github.com/dncore/homebrew-axon-llm-dispenser.git /tmp/taptap
+          rm -rf /tmp/taptap && git clone git@github.com:dncore/homebrew-axon-llm-dispenser.git /tmp/taptap
           cd /tmp/taptap
           sed "s/__VERSION__/$VERSION/; s/__SHA256__/$SHA256/" "$GITHUB_WORKSPACE/homebrew/axon-llm-dispenser.rb.template" > Casks/axon-llm-dispenser.rb
           git add Casks/axon-llm-dispenser.rb
