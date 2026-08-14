@@ -193,6 +193,29 @@ async function ensureModels(): Promise<string[] | null> {
   return ids;
 }
 
+/** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。 */
+function confirmDialog(message: string, onOk: () => void): void {
+  const overlay = h("div", { class: "modal-overlay" }, []);
+  const modal = h("div", { class: "modal modal-sm" }, [
+    h("p", { class: "confirm-text" }, [message]),
+    h("div", { class: "modal-footer" }, [
+      h("button", { class: "btn btn-ghost" }, ["取消"]),
+      h("button", { class: "btn" }, ["确认"]),
+    ]),
+  ]);
+  const [cancel, ok] = modal.querySelectorAll("button");
+  const close = (): void => overlay.remove();
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", () => {
+    close();
+    onOk();
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  document.body.append(overlay);
+}
+
 /** 还原弹窗:列出所选工具的全部备份,用户点选恢复。 */
 function openRestoreModal(tool: string): void {
   void run(`还原(${tool})`, async () => {
@@ -227,16 +250,19 @@ function openRestoreModal(tool: string): void {
         h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
       ]);
       row.addEventListener("click", () => {
-        overlay.remove();
-        const ok = confirm(`用 ${b.name} 还原「${b.label}」?\n当前文件会先备份为 .bak-pre-restore-*,确认?`);
-        if (!ok) return;
-        void run("还原", async () => {
-          const r = await flows.restoreBackup(
-            targets.find((t) => t.label === b.label)?.path ?? "",
-            b.path,
-          );
-          notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
-          if (tool === "pi") notify("还原后重启 pi 生效", "info");
+        const targetPath = targets.find((t) => t.label === b.label)?.path ?? "";
+        confirmDialog(`用「${b.name}」还原「${b.label}」?\n当前文件会先备份为 .bak-pre-restore-*,确认还原?`, () => {
+          void run("还原", async () => {
+            const r = await flows.restoreBackup(targetPath, b.path);
+            list.replaceChildren(
+              h("div", { class: "modal-result" }, [
+                `✓ 已还原「${b.label}」`,
+                h("div", { class: "hint" }, [r.backup ? `当前文件已备份: ${bridge.basenamePath(r.backup)}` : ""]),
+              ]),
+            );
+            notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
+            if (tool === "pi") notify("还原后重启 pi 生效", "info");
+          });
         });
       });
       list.append(row);
@@ -339,18 +365,20 @@ function bind(): void {
   $("btn-reasonix-还原").addEventListener("click", () => openRestoreModal("reasonix"));
 
   $("btn-reasonix-生成 Token").addEventListener("click", () =>
-    run("生成 Token", async () => {
-      if (!confirm("将生成新的固定鉴权 Token 并写入 Reasonix [serve] 段(覆盖旧 Token,原文件自动备份),确认?")) return;
-      const r = await flows.generateReasonixAuth();
-      log(r.lines);
+    confirmDialog("将生成新的固定鉴权 Token 并写入 Reasonix [serve] 段(覆盖旧 Token,原文件自动备份),确认?", () => {
+      void run("生成 Token", async () => {
+        const r = await flows.generateReasonixAuth();
+        log(r.lines);
+      });
     }),
   );
 
   $("btn-reasonix-关闭鉴权").addEventListener("click", () =>
-    run("关闭鉴权", async () => {
-      if (!confirm("将 Reasonix 鉴权改回 auth_mode=none 并移除 token,确认?")) return;
-      const r = await flows.disableReasonixAuth();
-      log(r.lines);
+    confirmDialog("将 Reasonix 鉴权改回 auth_mode=none 并移除 token,确认?", () => {
+      void run("关闭鉴权", async () => {
+        const r = await flows.disableReasonixAuth();
+        log(r.lines);
+      });
     }),
   );
 

@@ -139,12 +139,13 @@ body {
   background: #fff;
   border-radius: 12px;
   padding: 18px;
-  width: min(560px, 90vw);
+  width: min(720px, 92vw);
   max-height: 75vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
 }
+.modal-sm { width: min(440px, 90vw); }
 .modal h3 { margin: 0 0 6px; font-size: 16px; }
 .modal-sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
 .modal-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
@@ -162,6 +163,8 @@ body {
 }
 .modal-row:hover { border-color: var(--accent); background: #eff6ff; }
 .modal-label { font-weight: 600; font-size: 12px; white-space: nowrap; }
-.modal-name { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-name { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .modal-meta { color: var(--muted); font-size: 11px; white-space: nowrap; }
-.modal-footer { margin-top: 14px; text-align: right; }
+.modal-footer { margin-top: 14px; text-align: right; display: flex; gap: 8px; justify-content: flex-end; }
+.confirm-text { margin: 0 0 14px; line-height: 1.6; white-space: pre-line; }
+.modal-result { padding: 22px 12px; text-align: center; color: var(--ok); font-weight: 600; }
