@@ -425,15 +425,29 @@ export async function listBackups(targetPath: string): Promise<BackupInfo[]> {
 
 /** 用备份覆盖目标:当前文件先备份为 .bak-pre-restore-<ts>。 */
 export async function restoreBackup(targetPath: string, backupPath: string): Promise<{ path: string; backup?: string }> {
+  const content = await bridge.readFile(backupPath);
+  return await applyBackupContent(targetPath, content);
+}
+
+/** 用指定内容覆盖目标(查看/编辑弹窗的「应用」用):当前文件先备份为 .bak-pre-restore-<ts>。 */
+export async function applyBackupContent(targetPath: string, content: string): Promise<{ path: string; backup?: string }> {
   let backup: string | undefined;
   const current = await bridge.readFileOrEmpty(targetPath);
   if (current) {
     backup = `${targetPath}.bak-pre-restore-${timestamp()}`;
     await bridge.writeFile(backup, current);
   }
-  const content = await bridge.readFile(backupPath);
   await bridge.writeFile(targetPath, content);
   return { path: targetPath, backup };
+}
+
+/** 重命名备份文件(同目录内),目标已存在时报错。返回新路径。 */
+export async function renameBackup(oldPath: string, newName: string): Promise<string> {
+  const dir = bridge.dirnamePath(oldPath);
+  const newPath = await bridge.joinPath(dir, newName);
+  if (await bridge.exists(newPath)) throw new Error("同名文件已存在");
+  await bridge.renameFile(oldPath, newPath);
+  return newPath;
 }
 
 // ---------------------------------------------------------------------------

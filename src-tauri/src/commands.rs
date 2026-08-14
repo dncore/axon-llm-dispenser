@@ -71,6 +71,70 @@ pub fn chmod(path: String, mode: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 重命名文件;目标已存在时报错(不覆盖)。
+#[tauri::command]
+pub fn rename_file(from: String, to: String) -> Result<(), String> {
+    if Path::new(&to).exists() {
+        return Err(format!("目标已存在: {}", to));
+    }
+    fs::rename(&from, &to).map_err(|e| format!("重命名失败 {} -> {}: {}", from, to, e))
+}
+
+/// 删除文件。
+#[tauri::command]
+pub fn delete_file(path: String) -> Result<(), String> {
+    fs::remove_file(&path).map_err(|e| format!("删除失败 {}: {}", path, e))
+}
+
+/// 按扩展名校验配置格式(JSON/TOML/YAML);备份文件带 .bak-* 后缀
+/// (如 settings.json.bak-20260814),按 .bak- 之前的原扩展名校验。
+/// 未知类型不校验。错误消息直接展示给用户。
+#[tauri::command]
+pub fn validate_config(path: String, content: String) -> Result<(), String> {
+    let base = path.split(".bak-").next().unwrap_or(&path);
+    let ext = Path::new(base)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "json" => serde_json::from_str::<serde_json::Value>(&content)
+            .map(|_| ())
+            .map_err(|e| format!("JSON 格式错误: {}", e)),
+        "toml" => toml::from_str::<toml::Value>(&content)
+            .map(|_| ())
+            .map_err(|e| format!("TOML 格式错误: {}", e)),
+        "yaml" | "yml" => serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map(|_| ())
+            .map_err(|e| format!("YAML 格式错误: {}", e)),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_config;
+
+    #[test]
+    fn backup_paths_validate_by_original_extension() {
+        // 备份文件名(.bak-* 后缀)按原扩展名校验
+        assert!(validate_config("settings.json.bak-20260814-101010".into(), "{\"a\": 1}".into()).is_ok());
+        let err = validate_config("settings.json.bak-20260814-101010".into(), "{\"a\": 1,}".into()).unwrap_err();
+        assert!(err.contains("JSON"), "trailing comma should fail: {err}");
+        assert!(validate_config("config.toml.bak-2".into(), "a = 1".into()).is_ok());
+        assert!(validate_config("config.toml.bak-2".into(), "a = [".into()).is_err());
+        assert!(validate_config("settings.yaml.bak-3".into(), "a: 1".into()).is_ok());
+        assert!(validate_config("settings.yaml.bak-3".into(), "a: [".into()).is_err());
+        // 还原前备份(.bak-pre-restore-*)同样按原扩展名
+        let err = validate_config("settings.json.bak-pre-restore-123".into(), "{\"a\":}".into()).unwrap_err();
+        assert!(err.contains("JSON"));
+        // 普通路径行为不变;未知类型不校验
+        assert!(validate_config("settings.json".into(), "{\"a\": 1}".into()).is_ok());
+        assert!(validate_config("settings.json".into(), "bad".into()).is_err());
+        assert!(validate_config("note.txt".into(), "anything".into()).is_ok());
+    }
+}
+
 #[tauri::command]
 pub fn exists(path: String) -> bool {
     Path::new(&path).exists()

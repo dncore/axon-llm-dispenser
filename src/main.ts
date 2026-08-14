@@ -44,6 +44,7 @@ let config: bridge.AppConfig = {
 
 function log(lines: string[], kind: "info" | "error" = "info"): void {
   const out = $("output");
+  out.querySelector(".log-empty")?.remove(); // 有日志后隐藏空提示
   const block = h("div", { class: `log-block log-${kind}` });
   for (const line of lines) block.append(h("div", {}, [line]));
   out.prepend(block);
@@ -92,10 +93,12 @@ function build(): void {
   ]);
 
   const modelsCard = h("section", { class: "card models-sidebar" }, [
-    h("h2", {}, ["模型目录"]),
-    h("div", { class: "row" }, [
-      h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
-      h("span", { id: "model-count", class: "hint" }, []),
+    h("h2", { class: "models-title" }, [
+      "模型目录",
+      h("div", { class: "fetch-right" }, [
+        h("span", { id: "model-count", class: "hint" }, []),
+        h("button", { id: "btn-fetch", class: "btn btn-small btn-icon-only", type: "button", title: "拉取模型(/models)" }, [icon("refresh")]),
+      ]),
     ]),
     h("label", { class: "row toggle" }, [
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
@@ -113,13 +116,6 @@ function build(): void {
     toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
   ]);
 
-  const outputCard = h("section", { class: "card" }, [
-    h("h2", {}, ["输出"]),
-    h("div", { id: "output", class: "output" }, [
-      h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
-    ]),
-  ]);
-
   root.append(
     h("div", { id: "toast-container", class: "toast-container" }, []),
     h("header", { class: "header" }, [
@@ -135,11 +131,18 @@ function build(): void {
     h("main", { class: "main" }, [
       modelsCard,
       h("div", { class: "col" }, [connCard]),
-      h("div", { class: "col" }, [toolsCard, outputCard]),
+      h("div", { class: "col" }, [toolsCard]),
     ]),
 
-    h("footer", { class: "footer" }, [
-      h("span", {}, ["配置写入各工具官方配置文件,原文件自动备份;密钥文件 0600。"]),
+    h("footer", { id: "footer", class: "footer" }, [
+      h("div", { id: "footer-handle", class: "footer-handle", title: "拖拽调整高度" }, []),
+      h("div", { class: "footer-bar" }, [
+        h("span", { class: "footer-title" }, ["输出"]),
+        h("button", { id: "btn-expand-log", class: "btn btn-small btn-ghost", type: "button", title: "展开到半个视窗高度" }, ["展开 ▲"]),
+      ]),
+      h("div", { id: "output", class: "output" }, [
+        h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
+      ]),
     ]),
   );
 }
@@ -155,10 +158,19 @@ function field(label: string, id: string, placeholder: string, value: string, ty
 const ICONS: Record<string, string> = {
   config:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  generate:
+    '<path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-  restore: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  restore:
+    '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
   key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/><path d="M7 16.5l2-2"/>',
   lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+  refresh:
+    '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
+  pen: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
+  trash:
+    '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
 };
 
 function icon(name: string): SVGSVGElement {
@@ -223,7 +235,7 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
 }
 
 const ACTION_ICONS: Record<string, string> = {
-  "配置": "config",
+  "配置": "generate",
   "状态": "info",
   "还原": "restore",
   "生成 Token": "key",
@@ -291,6 +303,26 @@ function renderModelsList(): void {
 function setModelRows(rows: ModelRow[]): void {
   modelRows = rows;
   renderModelsList();
+}
+
+/** 拉取模型并渲染到侧栏;失败时重置状态并抛出,由调用方 run() 统一报错。 */
+async function fetchAndRenderModels(): Promise<void> {
+  const s = $("conn-status");
+  s.textContent = "连接中…";
+  try {
+    const info = await flows.testConnection(config.baseUrl, config.apiKey);
+    let shown = info;
+    if (config.excludeDoubao) {
+      shown = info.filter((m) => !flows.isDoubaoModel(m.id));
+      if (shown.length !== info.length) notify(`已过滤 ${info.length - shown.length} 个 Doubao 模型`, "info");
+    }
+    setModelRows(shown);
+    s.textContent = "连接成功";
+    notify(`连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`, "info");
+  } catch (e) {
+    s.textContent = "";
+    throw e;
+  }
 }
 
 function validateProvider(): boolean {
@@ -369,9 +401,9 @@ function clearOverlays(): void {
   document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
 }
 
-/** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。 */
+/** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。
+ * 不清除已有弹窗:允许叠加在还原弹窗等上层做二次确认(ESC 只关最上层)。 */
 function confirmDialog(message: string, onOk: () => void, okLabel = "确认", cancelLabel = "取消"): void {
-  clearOverlays();
   const overlay = h("div", { class: "modal-overlay" }, []);
   const modal = h("div", { class: "modal modal-sm" }, [
     h("p", { class: "confirm-text" }, [message]),
@@ -497,24 +529,30 @@ function openClaudeConfigModal(): void {
   });
 }
 
-/** 还原弹窗:列出所选工具的全部备份,用户点选恢复。 */
+/** 还原弹窗:列出所选工具的全部备份,支持应用(▶)/重命名(✎)/删除(🗑)/查看编辑。 */
 function openRestoreModal(tool: string): void {
   clearOverlays();
   void run(`还原(${tool})`, async () => {
     const targets = await flows.getRestoreTargets(tool);
-    const backups: { label: string; name: string; path: string; time: string; size: string }[] = [];
-    for (const t of targets) {
-      for (const b of await flows.listBackups(t.path)) {
-        backups.push({
-          label: t.label,
-          name: b.name,
-          path: b.path,
-          time: new Date(b.mtimeMs).toLocaleString(),
-          size: `${(b.size / 1024).toFixed(1)}KB`,
-        });
+    const collect = async (): Promise<BackupRow[]> => {
+      const out: BackupRow[] = [];
+      for (const t of targets) {
+        for (const b of await flows.listBackups(t.path)) {
+          out.push({
+            label: t.label,
+            targetPath: t.path,
+            base: bridge.basenamePath(t.path),
+            name: b.name,
+            path: b.path,
+            time: new Date(b.mtimeMs).toLocaleString(),
+            size: `${(b.size / 1024).toFixed(1)}KB`,
+          });
+        }
       }
-    }
-    if (backups.length === 0) {
+      return out;
+    };
+    let rows = await collect();
+    if (rows.length === 0) {
       notify(`${tool} 暂无备份(每次配置写入前会自动备份 .bak-*)`, "info");
       return;
     }
@@ -522,44 +560,62 @@ function openRestoreModal(tool: string): void {
     const overlay = h("div", { class: "modal-overlay" }, []);
     const modal = h("div", { class: "modal" }, [
       h("h3", {}, [`还原 - ${tool}`]),
-      h("div", { class: "modal-sub" }, [`共 ${backups.length} 个备份,点击选择要恢复的备份`]),
+      h("div", { class: "modal-sub" }, [`共 ${rows.length} 个备份。点击条目查看/编辑配置;▶ 应用、✎ 重命名、🗑 删除`]),
     ]);
     const list = h("div", { class: "modal-list" }, []);
-    for (const b of backups) {
-      const row = h("button", { class: "modal-row" }, [
-        h("span", { class: "modal-label" }, [b.label]),
-        h("span", { class: "modal-name" }, [b.name]),
-        h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
-      ]);
-      row.addEventListener("click", () => {
-        // 直接还原(当前文件自动备份 .bak-pre-restore-*,可再从此恢复),弹窗内显示结果
-        const targetPath = targets.find((t) => t.label === b.label)?.path ?? "";
-        row.disabled = true;
-        row.replaceChildren(h("span", { class: "modal-label" }, [b.label]), h("span", { class: "modal-name", id: "restore-progress" }, ["还原中…"]));
+
+    /** 应用备份后弹窗内联显示结果。 */
+    const showResult = (label: string, backup?: string): void => {
+      list.replaceChildren(
+        h("div", { class: "modal-result" }, [
+          `✓ 已还原「${label}」`,
+          h("div", { class: "hint" }, [backup ? `当前文件已备份: ${bridge.basenamePath(backup)}` : ""]),
+        ]),
+      );
+    };
+    /** 播放按钮:二次确认后应用备份。 */
+    const applyRow = (b: BackupRow): void => {
+      confirmDialog(`将用备份「${b.name}」覆盖「${b.label}」?当前配置会先备份为 .bak-pre-restore-*,确认?`, () => {
         void run("还原", async () => {
-          try {
-            const r = await flows.restoreBackup(targetPath, b.path);
-            list.replaceChildren(
-              h("div", { class: "modal-result" }, [
-                `✓ 已还原「${b.label}」`,
-                h("div", { class: "hint" }, [r.backup ? `当前文件已备份: ${bridge.basenamePath(r.backup)}` : ""]),
-              ]),
-            );
-            notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
-            if (tool === "pi") notify("还原后重启 pi 生效", "info");
-          } catch (e) {
-            row.disabled = false;
-            row.replaceChildren(
-              h("span", { class: "modal-label" }, [b.label]),
-              h("span", { class: "modal-name" }, [b.name]),
-              h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
-            );
-            notify(`还原失败: ${e}`, "error");
-          }
+          const r = await flows.restoreBackup(b.targetPath, b.path);
+          showResult(b.label, r.backup);
+          notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
+          if (tool === "pi") notify("还原后重启 pi 生效", "info");
         });
       });
-      list.append(row);
-    }
+    };
+    /** 重命名/删除/编辑保存后重新拉取列表,保证名称/大小/时间准确。 */
+    const refresh = async (): Promise<void> => {
+      rows = await collect();
+      render();
+    };
+    const render = (): void => {
+      list.replaceChildren();
+      for (const b of rows) {
+        const main = h("button", { class: "modal-row-main", type: "button" }, [
+          h("span", { class: "modal-label" }, [b.label]),
+          h("span", { class: "modal-name" }, [b.name]),
+          h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
+        ]);
+        main.addEventListener("click", () => openBackupEditor(b, () => void refresh()));
+        const play = h("button", { class: "backup-action-btn", type: "button", title: "应用此备份" }, [icon("play")]);
+        play.addEventListener("click", () => applyRow(b));
+        const rename = h("button", { class: "backup-action-btn", type: "button", title: "重命名" }, [icon("pen")]);
+        rename.addEventListener("click", () => openRenameModal(b, () => void refresh()));
+        const del = h("button", { class: "backup-action-btn danger", type: "button", title: "删除" }, [icon("trash")]);
+        del.addEventListener("click", () =>
+          confirmDialog(`确定删除备份「${b.name}」?删除后不可恢复。`, () => {
+            void run("删除备份", async () => {
+              await bridge.deleteFile(b.path);
+              notify(`已删除 ${b.name}`, "info");
+              await refresh();
+            });
+          }),
+        );
+        list.append(h("div", { class: "modal-row" }, [main, h("div", { class: "backup-actions" }, [play, rename, del])]));
+      }
+    };
+    render();
     modal.append(list);
     const close = h("button", { class: "btn btn-ghost", id: "modal-close" }, ["关闭"]);
     close.addEventListener("click", () => overlay.remove());
@@ -572,6 +628,90 @@ function openRestoreModal(tool: string): void {
   });
 }
 
+type BackupRow = { label: string; targetPath: string; base: string; name: string; path: string; time: string; size: string };
+
+/** 查看/编辑备份内容:保存(校验格式)写回备份文件,应用(校验格式)还原到当前配置。 */
+function openBackupEditor(b: BackupRow, onDone: () => void): void {
+  const overlay = h("div", { class: "modal-overlay" }, []);
+  const ta = h("textarea", { class: "backup-editor", spellcheck: "false" }, []);
+  const modal = h("div", { class: "modal" }, [
+    h("h3", {}, [`查看/编辑 - ${b.name}`]),
+    h("div", { class: "modal-sub" }, [`${b.label} · 保存写回备份文件,应用还原到当前配置(均校验格式)`]),
+    ta,
+  ]);
+  const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
+  const save = h("button", { class: "btn" }, ["保存"]);
+  const apply = h("button", { class: "btn" }, ["应用"]);
+  cancel.addEventListener("click", () => overlay.remove());
+  // 格式错误时 validateConfig 抛错 → run() toast 提示,弹窗保持打开(编辑状态不丢失)
+  save.addEventListener("click", () =>
+    void run("保存备份", async () => {
+      await bridge.validateConfig(b.path, ta.value);
+      await bridge.writeFile(b.path, ta.value);
+      notify(`已保存 ${b.name}`, "info");
+      overlay.remove();
+      onDone();
+    }),
+  );
+  apply.addEventListener("click", () =>
+    confirmDialog(`将当前编辑内容应用到「${b.label}」?当前配置会先备份为 .bak-pre-restore-*,确认?`, () => {
+      void run("应用备份", async () => {
+        await bridge.validateConfig(b.path, ta.value);
+        const r = await flows.applyBackupContent(b.targetPath, ta.value);
+        notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
+        overlay.remove();
+        onDone();
+      });
+    }),
+  );
+  modal.append(h("div", { class: "modal-footer" }, [cancel, save, apply]));
+  overlay.append(modal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.append(overlay);
+  void run("读取备份", async () => {
+    ta.value = await bridge.readFile(b.path);
+  });
+}
+
+/** 重命名备份弹窗:校验名称(保留 .bak- 前缀、不含路径分隔符、不与现有文件冲突)。 */
+function openRenameModal(b: BackupRow, onDone: () => void): void {
+  const overlay = h("div", { class: "modal-overlay" }, []);
+  const input = h("input", { class: "input", type: "text", placeholder: "新的文件名" }, []);
+  input.value = b.name;
+  const modal = h("div", { class: "modal modal-sm" }, [
+    h("h3", {}, ["重命名备份"]),
+    h("div", { class: "modal-sub" }, [`文件名需以 ${b.base}.bak- 开头,否则不会出现在备份列表`]),
+    input,
+  ]);
+  const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
+  const ok = h("button", { class: "btn" }, ["确认"]);
+  // 校验失败 throw → run() toast 提示,弹窗保持打开
+  const submit = (): void =>
+    void run("重命名", async () => {
+      const name = input.value.trim();
+      if (!name) throw new Error("名称不能为空");
+      if (/[/\\]/.test(name)) throw new Error("名称不能包含路径分隔符");
+      if (!name.startsWith(`${b.base}.bak-`)) throw new Error(`名称需以 ${b.base}.bak- 开头`);
+      await flows.renameBackup(b.path, name);
+      notify(`已重命名为 ${name}`, "info");
+      overlay.remove();
+      onDone();
+    });
+  cancel.addEventListener("click", () => overlay.remove());
+  ok.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+  modal.append(h("div", { class: "modal-footer" }, [cancel, ok]));
+  overlay.append(modal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.append(overlay);
+}
+
 /** 统一包装异步操作:任何异常都在输出面板可见,不再静默失败。 */
 async function run(label: string, fn: () => Promise<void>): Promise<void> {
   try {
@@ -581,7 +721,62 @@ async function run(label: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 底部日志面板:默认 3 行高,展开按钮切到半屏,上边缘拖拽调整高度
+// ---------------------------------------------------------------------------
+
+let FOOTER_MIN = 128; // 兜底默认值;启动时按日志区实际行高重算
+
+function setFooterHeight(h: number): void {
+  const footer = $("footer");
+  const max = Math.max(FOOTER_MIN, window.innerHeight - 120); // 预留 header 与主区域
+  footer.style.height = `${Math.min(Math.max(h, FOOTER_MIN), max)}px`;
+  syncExpandBtn();
+}
+
+function syncExpandBtn(): void {
+  const expanded = $("footer").offsetHeight > FOOTER_MIN + 20;
+  $("btn-expand-log").textContent = expanded ? "收起 ▼" : "展开 ▲";
+}
+
+/** 按日志块实际高度计算最小高度(3 条日志),避免跨平台字体/padding 差异。 */
+function initFooterMin(): void {
+  const footer = $("footer");
+  const out = $("output");
+  const overhead = footer.offsetHeight - out.clientHeight; // 拖拽条 + 标题栏 + 边距
+  const probe = h("div", { class: "log-block" }, ["行"]); // 探针块:实测一条日志的实际高度
+  out.append(probe);
+  const rowH = probe.offsetHeight;
+  probe.remove();
+  FOOTER_MIN = overhead + 16 + 3 * rowH + 4; // 16 = 日志区上下 padding,+4 缓冲
+  setFooterHeight(FOOTER_MIN);
+}
+
 function bind(): void {
+  // 底部日志面板:展开/收起、拖拽调高、窗口缩放时重新夹紧
+  initFooterMin();
+  $("btn-expand-log").addEventListener("click", () => {
+    const expanded = $("footer").offsetHeight > FOOTER_MIN + 20;
+    setFooterHeight(expanded ? FOOTER_MIN : Math.floor(window.innerHeight / 2));
+  });
+  window.addEventListener("resize", () => setFooterHeight($("footer").offsetHeight));
+  $("footer-handle").addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = $("footer").offsetHeight;
+    document.body.classList.add("footer-dragging");
+    const move = (ev: PointerEvent): void => setFooterHeight(startH + startY - ev.clientY);
+    const stop = (): void => {
+      document.body.classList.remove("footer-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  });
+
   $("btn-save").addEventListener("click", () =>
     run("保存配置", async () => {
       readFields();
@@ -601,17 +796,7 @@ function bind(): void {
         notify("请先填写 Base URL", "error");
         return;
       }
-      const s = $("conn-status");
-      s.textContent = "连接中…";
-      const info = await flows.testConnection(config.baseUrl, config.apiKey);
-      let shown = info;
-      if (config.excludeDoubao) {
-        shown = info.filter((m) => !flows.isDoubaoModel(m.id));
-        if (shown.length !== info.length) notify(`已过滤 ${info.length - shown.length} 个 Doubao 模型`, "info");
-      }
-      setModelRows(shown);
-      s.textContent = "连接成功";
-      notify(`连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`, "info");
+      await fetchAndRenderModels();
     }),
   );
 
@@ -745,9 +930,12 @@ async function boot(): Promise<void> {
   });
   // 关闭 webview 右键默认菜单(Reload/返回等)
   document.addEventListener("contextmenu", (e) => e.preventDefault());
-  // ESC 关闭最上层弹窗
+  // ESC 只关闭最上层弹窗(确认/编辑弹窗叠加在还原弹窗上时逐层退出)
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") clearOverlays();
+    if (e.key === "Escape") {
+      const overlays = document.querySelectorAll(".modal-overlay");
+      overlays[overlays.length - 1]?.remove();
+    }
   });
   // 全局 JS 错误显示为 toast(暴露隐藏错误)
   window.addEventListener("error", (ev) => notify(`页面错误: ${ev.message}`, "error"));
@@ -775,6 +963,10 @@ async function boot(): Promise<void> {
     ($("chk-exclude-doubao") as HTMLInputElement).checked = config.excludeDoubao;
   } catch {
     // 使用默认配置
+  }
+  // 首次打开:有上次保存的 Base URL 与 API Key 时自动拉取模型列表
+  if (config.baseUrl && config.apiKey) {
+    void run("自动拉取模型", fetchAndRenderModels);
   }
 }
 

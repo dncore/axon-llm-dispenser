@@ -55,6 +55,14 @@ body {
   line-height: 1.5;
 }
 
+/* 桌面应用壳层:app 固定视窗高度,header/main/footer 纵向排布,main 内部滚动 */
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -73,16 +81,20 @@ body {
 .version { color: var(--muted); font-size: 12px; }
 
 .main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   max-width: 1280px;
+  width: 100%;
   margin: 0 auto;
   padding: 20px;
-  display: grid;
-  grid-template-columns: 300px 1fr 1fr;
+  display: flex;
   gap: 16px;
-  align-items: start;
+  align-items: flex-start;
 }
 
 .col {
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -120,9 +132,9 @@ body {
 .input:focus, .models:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .models-sidebar {
-  position: sticky;
-  top: 76px;
-  max-height: calc(100vh - 100px);
+  width: 300px;
+  flex-shrink: 0;
+  align-self: stretch; /* 高度撑满 main 内容区:视窗高度 - header - footer - 上下间距 */
   display: flex;
   flex-direction: column;
 }
@@ -156,6 +168,10 @@ body {
 .row { display: flex; align-items: center; gap: 10px; }
 .hint { color: var(--muted); font-size: 12px; }
 
+/* 模型目录:标题行右侧放模型数+刷新按钮 */
+.card h2.models-title { display: flex; align-items: center; justify-content: space-between; }
+.fetch-right { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+
 .btn {
   padding: 8px 16px;
   border: 1px solid var(--accent);
@@ -185,11 +201,12 @@ body {
 .tool-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 .output {
-  max-height: 320px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   background: #0f172a;
   border-radius: 8px;
-  padding: 12px;
+  padding: 8px 12px;
   color: #e2e8f0;
   font-family: ui-monospace, monospace;
   font-size: 12px;
@@ -200,12 +217,31 @@ body {
 .log-error { color: #fca5a5; }
 .log-info { color: #e2e8f0; }
 
+/* 底部日志面板:默认约 3 行,上边缘可拖拽调高,展开按钮切半屏 */
 .footer {
-  text-align: center;
-  color: var(--muted);
-  font-size: 12px;
-  padding: 16px;
+  flex-shrink: 0;
+  height: 128px; /* 兜底默认值,启动时由 JS 按实际行高重算;拖拽/展开时由 JS 覆盖 */
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-top: 1px solid var(--border);
 }
+.footer-handle {
+  flex-shrink: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+.footer-handle:hover { background: var(--border); }
+body.footer-dragging { user-select: none; cursor: ns-resize; }
+.footer-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 16px 4px;
+}
+.footer-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+.footer .output { margin: 0 16px 12px; }
 
 /* 还原弹窗 */
 .modal-overlay {
@@ -244,17 +280,59 @@ body {
 .modal-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fafbfc;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.modal-row:hover { border-color: var(--accent); background: #eff6ff; }
+.modal-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: none;
+  background: none;
   cursor: pointer;
   text-align: left;
   font: inherit;
-  flex-shrink: 0;
 }
-.modal-row:hover { border-color: var(--accent); background: #eff6ff; }
+.backup-actions { display: flex; gap: 2px; padding-right: 6px; flex-shrink: 0; }
+.backup-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.backup-action-btn:hover { background: #e2e8f0; color: var(--text); }
+.backup-action-btn.danger:hover { color: var(--danger); background: #fee2e2; }
+.backup-action-btn .btn-icon { width: 13px; height: 13px; }
+.backup-editor {
+  flex: 1;
+  min-height: 260px;
+  width: 100%;
+  resize: none;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  white-space: pre;
+  overflow: auto;
+}
+.backup-editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .modal-label { font-weight: 600; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
 .modal-name { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .modal-meta { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }

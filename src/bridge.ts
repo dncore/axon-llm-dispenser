@@ -52,6 +52,19 @@ export function chmod(path: string, mode: number): Promise<void> {
   return invoke("chmod", { path, mode });
 }
 
+export function renameFile(from: string, to: string): Promise<void> {
+  return invoke("rename_file", { from, to });
+}
+
+export function deleteFile(path: string): Promise<void> {
+  return invoke("delete_file", { path });
+}
+
+/** 按扩展名校验配置格式(JSON/TOML/YAML),格式错误时 reject。 */
+export function validateConfig(path: string, content: string): Promise<void> {
+  return invoke("validate_config", { path, content });
+}
+
 export function exists(path: string): Promise<boolean> {
   return invoke<boolean>("exists", { path });
 }
