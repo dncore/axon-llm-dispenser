@@ -276,9 +276,12 @@ function openRestoreModal(tool: string): void {
         h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
       ]);
       row.addEventListener("click", () => {
+        // 直接还原(当前文件自动备份 .bak-pre-restore-*,可再从此恢复),弹窗内显示结果
         const targetPath = targets.find((t) => t.label === b.label)?.path ?? "";
-        confirmDialog(`用「${b.name}」还原「${b.label}」?\n当前文件会先备份为 .bak-pre-restore-*,确认还原?`, () => {
-          void run("还原", async () => {
+        row.disabled = true;
+        row.replaceChildren(h("span", { class: "modal-label" }, [b.label]), h("span", { class: "modal-name", id: "restore-progress" }, ["还原中…"]));
+        void run("还原", async () => {
+          try {
             const r = await flows.restoreBackup(targetPath, b.path);
             list.replaceChildren(
               h("div", { class: "modal-result" }, [
@@ -288,7 +291,15 @@ function openRestoreModal(tool: string): void {
             );
             notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
             if (tool === "pi") notify("还原后重启 pi 生效", "info");
-          });
+          } catch (e) {
+            row.disabled = false;
+            row.replaceChildren(
+              h("span", { class: "modal-label" }, [b.label]),
+              h("span", { class: "modal-name" }, [b.name]),
+              h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
+            );
+            notify(`还原失败: ${e}`, "error");
+          }
         });
       });
       list.append(row);
