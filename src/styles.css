@@ -168,6 +168,8 @@ body {
 }
 .btn:hover { background: var(--accent-hover); }
 .btn-small { padding: 4px 10px; font-size: 12px; }
+.btn-icon-only { padding: 5px; line-height: 0; }
+.btn-icon { width: 15px; height: 15px; display: block; }
 .btn-ghost { background: transparent; color: var(--accent); }
 .btn-ghost:hover { background: #eff6ff; }
 

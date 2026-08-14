@@ -154,6 +154,29 @@ function field(label: string, id: string, placeholder: string, value: string, ty
   ]);
 }
 
+/** 内联 SVG 图标(Lucide 风格 stroke 图标)。 */
+const ICONS: Record<string, string> = {
+  config:
+    '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/><path d="M7 16.5l2-2"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+};
+
+function icon(name: string): SVGSVGElement {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  el.setAttribute("viewBox", "0 0 24 24");
+  el.setAttribute("fill", "none");
+  el.setAttribute("stroke", "currentColor");
+  el.setAttribute("stroke-width", "2");
+  el.setAttribute("stroke-linecap", "round");
+  el.setAttribute("stroke-linejoin", "round");
+  el.innerHTML = ICONS[name] ?? ICONS.config;
+  el.classList.add("btn-icon");
+  return el;
+}
+
 /** 自定义下拉选择器(替代原生 select,匹配应用视觉)。 */
 function customSelect(options: string[], initial: string, onChange: (v: string) => void): { el: El; value: () => string } {
   let current = options.includes(initial) ? initial : options[0] ?? "";
@@ -197,8 +220,25 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
   return { el: wrap, value: () => current };
 }
 
+const ACTION_ICONS: Record<string, string> = {
+  "配置": "config",
+  "状态": "info",
+  "还原": "restore",
+  "生成 Token": "key",
+  "关闭鉴权": "lock",
+};
+const ACTION_TITLES: Record<string, string> = {
+  "配置": "配置(覆盖现有配置,自动备份)",
+  "状态": "查看配置状态",
+  "还原": "从备份还原",
+  "生成 Token": "生成鉴权 Token",
+  "关闭鉴权": "关闭鉴权",
+};
+
 function toolCard(id: string, name: string, actions: string[]): El {
-  const buttons = actions.map((a) => h("button", { class: "btn btn-small", id: `btn-${id}-${a}` }, [a]));
+  const buttons = actions.map((a) =>
+    h("button", { class: "btn btn-small btn-icon-only", id: `btn-${id}-${a}`, title: ACTION_TITLES[a] ?? a }, [icon(ACTION_ICONS[a] ?? "config")]),
+  );
   return h("div", { class: "tool" }, [
     h("span", { class: "tool-name" }, [name]),
     h("div", { class: "tool-actions" }, buttons),
@@ -539,13 +579,15 @@ function bind(): void {
 
 
   $("btn-codex-配置").addEventListener("click", () =>
-    run("Codex 配置", async () => {
-      readFields();
-      if (!validateProvider()) return;
-      const ids = await ensureModels();
-      if (!ids) return;
-      const r = await flows.configureCodex(config, ids);
-      log(r.lines);
+    confirmDialog("将覆盖 Codex 现有配置(config.toml / models.json),原文件会自动备份(.bak-*),确认?", () => {
+      void run("Codex 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configureCodex(config, ids);
+        log(r.lines);
+      });
     }),
   );
 
@@ -558,13 +600,15 @@ function bind(): void {
   $("btn-codex-还原").addEventListener("click", () => openRestoreModal("codex"));
 
   $("btn-reasonix-配置").addEventListener("click", () =>
-    run("Reasonix 配置", async () => {
-      readFields();
-      if (!validateProvider()) return;
-      const ids = await ensureModels();
-      if (!ids) return;
-      const r = await flows.configureReasonix(config, ids);
-      log(r.lines);
+    confirmDialog("将覆盖 Reasonix 现有配置(config.toml / .env),原文件会自动备份(.bak-*),确认?", () => {
+      void run("Reasonix 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configureReasonix(config, ids);
+        log(r.lines);
+      });
     }),
   );
 
@@ -596,13 +640,15 @@ function bind(): void {
   );
 
   $("btn-dsh-配置").addEventListener("click", () =>
-    run("dsh 配置", async () => {
-      readFields();
-      if (!validateProvider()) return;
-      const ids = await ensureModels();
-      if (!ids) return;
-      const r = await flows.configureDsh(config, ids);
-      log(r.lines);
+    confirmDialog("将覆盖 dsh 现有配置(settings.yaml / .credentials.yaml),原文件会自动备份(.bak-*),确认?", () => {
+      void run("dsh 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configureDsh(config, ids);
+        log(r.lines);
+      });
     }),
   );
 
@@ -626,13 +672,15 @@ function bind(): void {
   $("btn-claude-还原").addEventListener("click", () => openRestoreModal("claude"));
 
   $("btn-pi-配置").addEventListener("click", () =>
-    run("pi 配置", async () => {
-      readFields();
-      if (!validateProvider()) return;
-      const ids = await ensureModels();
-      if (!ids) return;
-      const r = await flows.configurePi(config, ids);
-      log(r.lines);
+    confirmDialog("将覆盖 pi 现有配置(models.json / settings.json),原文件会自动备份(.bak-*),确认?", () => {
+      void run("pi 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configurePi(config, ids);
+        log(r.lines);
+      });
     }),
   );
 
