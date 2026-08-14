@@ -437,26 +437,6 @@ export async function restoreBackup(targetPath: string, backupPath: string): Pro
 }
 
 // ---------------------------------------------------------------------------
-// 自动更新:下载 zip → 解压 → 替换当前应用(macOS)→ 重启
-// ---------------------------------------------------------------------------
-
-export async function performUpdate(assetUrl: string): Promise<void> {
-  const home = await bridge.homeDir();
-  const tmpZip = await bridge.joinPath(home, ".axon-update", "update.zip");
-  const tmpDir = await bridge.joinPath(home, ".axon-update", "extract");
-  await bridge.downloadFile(assetUrl, tmpZip);
-  await bridge.unzipFile(tmpZip, tmpDir);
-  await bridge.replaceApp(tmpDir);
-  // 清理 zip(目录已由 replaceApp 清理)
-  try {
-    await bridge.writeFile(tmpZip, "");
-  } catch {
-    // 忽略清理失败
-  }
-  await bridge.relaunchApp();
-}
-
-// ---------------------------------------------------------------------------
 // Doubao 过滤(全局开关,默认开启;参考插件 CODEX_EXCLUDED_MODELS 团队排除名单)
 // ---------------------------------------------------------------------------
 

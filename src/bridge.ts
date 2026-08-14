@@ -80,36 +80,6 @@ export function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
-export type GithubRelease = { tag: string; htmlUrl: string; assets: Array<{ name: string; url: string }> };
-
-export function githubLatest(ownerRepo: string): Promise<GithubRelease> {
-  const [owner, repo] = ownerRepo.split("/");
-  return invoke<GithubRelease>("github_latest", { owner, repo });
-}
-
-export function platform(): Promise<string> {
-  return invoke<string>("platform");
-}
-export function currentAppDir(): Promise<string> {
-  return invoke<string>("current_app_dir");
-}
-export function downloadFile(url: string, dest: string): Promise<void> {
-  return invoke("download_file", { url, dest });
-}
-export function unzipFile(zipPath: string, destDir: string): Promise<void> {
-  return invoke("unzip_file", { zipPath, destDir });
-}
-export function replaceApp(unzipDir: string): Promise<void> {
-  return invoke("replace_app", { unzipDir });
-}
-export function relaunchApp(): Promise<void> {
-  return invoke("relaunch_app");
-}
-
-// ---------------------------------------------------------------------------
-// 路径
-// ---------------------------------------------------------------------------
-
 export function homeDir(): Promise<string> {
   return invoke<string>("home_dir");
 }
@@ -122,7 +92,6 @@ export async function joinPath(...parts: string[]): Promise<string> {
   return invoke<string>("path_join", { parts });
 }
 
-/** 取目录部分(兼容 / 与 \\)。 */
 export function dirnamePath(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i <= 0 ? p : p.slice(0, i);

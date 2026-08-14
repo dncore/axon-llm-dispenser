@@ -1,14 +1,12 @@
 // axon-llm-dispenser 前端入口:连接设置 + 工具接入 + 鉴权 + 状态。
 
 import "./styles.css";
-import { listen } from "@tauri-apps/api/event";
 import * as bridge from "./bridge";
 import * as flows from "./flows";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 
 const APP_VERSION = "0.1.0";
-const GITHUB_REPO = "dncore/axon-llm-dispenser";
 
 type El = HTMLElement;
 
@@ -132,7 +130,6 @@ function build(): void {
       ]),
       h("div", { class: "header-actions" }, [
         h("span", { class: "version" }, [`v${APP_VERSION}`]),
-        h("button", { id: "btn-update", class: "btn btn-ghost" }, ["检查更新"]),
       ]),
     ]),
 
@@ -366,64 +363,6 @@ function showTip(target: El, text: string): void {
 function hideTip(): void {
   tipEl?.remove();
   tipEl = null;
-}
-
-let updateUi: { bar: El; pct: El; label: El; size: El } | null = null;
-let updateUnlisten: (() => void) | null = null;
-let updateSpeed = { last: 0, time: 0 };
-
-function fmtMB(n: number): string {
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-/** 打开更新进度弹窗并订阅 download-progress 事件。 */
-async function startUpdateProgress(): Promise<void> {
-  clearOverlays();
-  const overlay = h("div", { class: "modal-overlay" }, []);
-  const bar = h("div", { class: "progress-bar" }, []);
-  const pct = h("span", { class: "progress-pct" }, ["0%"]);
-  const size = h("span", { class: "progress-size" }, ["0 / 0"]);
-  const label = h("div", { class: "progress-label" }, ["正在下载更新…"]);
-  const modal = h("div", { class: "modal modal-sm progress-modal" }, [
-    h("h3", {}, ["更新进度"]),
-    label,
-    h("div", { class: "progress-track" }, [bar]),
-    h("div", { class: "progress-stats" }, [pct, size]),
-    h("div", { class: "progress-hint" }, ["更新期间请勿关闭应用"]),
-  ]);
-  overlay.append(modal);
-  document.body.append(overlay);
-  updateUi = { bar, pct, label, size };
-  updateSpeed = { last: 0, time: Date.now() };
-  // 事件系统不可用时(如异常环境)仍显示进度弹窗,只是无实时进度
-  try {
-    updateUnlisten = await listen<{ received: number; total: number; done?: boolean }>("download-progress", (e) => {
-      const p = e.payload;
-      if (!updateUi) return;
-      const pctVal = p.total > 0 ? Math.min(100, Math.round((p.received / p.total) * 100)) : 0;
-      updateUi.bar.style.width = `${pctVal}%`;
-      updateUi.pct.textContent = `${pctVal}%`;
-      updateUi.size.textContent = `${fmtMB(p.received)} / ${p.total > 0 ? fmtMB(p.total) : "?"}`;
-      // 实时速度:根据两次事件的时间与字节差计算
-      const now = Date.now();
-      const dt = (now - updateSpeed.time) / 1000;
-      if (dt > 0 && p.received > updateSpeed.last) {
-        const speed = ((p.received - updateSpeed.last) / dt) / (1024 * 1024);
-        updateUi.size.textContent += ` · ${speed.toFixed(1)} MB/s`;
-      }
-      updateSpeed = { last: p.received, time: now };
-      if (p.done) updateUi.label.textContent = "下载完成,正在解压替换…";
-    });
-  } catch {
-    // 忽略:无事件订阅时进度条停留在 0%
-  }
-}
-
-function closeUpdateProgress(): void {
-  updateUnlisten?.();
-  updateUnlisten = null;
-  updateUi = null;
-  clearOverlays();
 }
 
 /** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 *//** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
@@ -794,47 +733,6 @@ function bind(): void {
   );
 
   $("btn-pi-还原").addEventListener("click", () => openRestoreModal("pi"));
-
-  $("btn-update").addEventListener("click", () =>
-    run("检查更新", async () => {
-      // 通过 Rust ureq 查询(与下载同网络路径,走系统代理),避免 webview fetch 失败
-      const data = await bridge.githubLatest(GITHUB_REPO);
-      const latest = data.tag.replace(/^v/, "") ?? "";
-      if (!latest || latest === APP_VERSION) {
-        notify(`已是最新版本 v${APP_VERSION}`, "info");
-        return;
-      }
-      const plat = await bridge.platform();
-      const suffix = plat === "macos" ? "macos" : "windows";
-      const asset = data.assets.find((a) => a.name.includes(`-${suffix}-`));
-      if (!asset) {
-        notify("未找到当前平台的更新包,请前往 Release 页下载", "info");
-        if (data.htmlUrl) await bridge.openUrl(data.htmlUrl);
-        return;
-      }
-      // 弹窗询问是否更新
-      const direct = plat === "macos"; // macOS 可自动替换;Windows 便携 exe 打开下载页
-      confirmDialog(
-        `发现新版本 v${latest}(当前 v${APP_VERSION})\n${direct ? "是否立即下载并更新?(下载完成后自动重启)" : "请下载最新安装包手动替换(运行中的程序无法自替换)"}`,
-        () => {
-          if (!direct) {
-            void bridge.openUrl(asset.url);
-            return;
-          }
-          void run("更新", async () => {
-            try {
-              await startUpdateProgress();
-              await flows.performUpdate(asset.url);
-            } catch (e) {
-              closeUpdateProgress();
-              throw e;
-            }
-          });
-        },
-        "更新",
-      );
-    }),
-  );
 }
 
 // ---------------------------------------------------------------------------
