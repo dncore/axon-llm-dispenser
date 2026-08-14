@@ -1,0 +1,23 @@
+{
+  "name": "axon-llm-dispenser",
+  "version": "0.1.0",
+  "description": "把用户自有的 OpenAI 兼容网关一键接入 Codex / Reasonix / DeepSeek Harness",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}

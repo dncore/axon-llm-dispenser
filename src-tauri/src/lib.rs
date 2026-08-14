@@ -1,0 +1,19 @@
+mod commands;
+
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            commands::home_dir,
+            commands::config_dir,
+            commands::read_file,
+            commands::write_file,
+            commands::chmod,
+            commands::exists,
+            commands::mkdir,
+            commands::detect_cli,
+            commands::fetch_models,
+            commands::open_url,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running axon-llm-dispenser");
+}
