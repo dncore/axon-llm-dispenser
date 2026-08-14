@@ -209,6 +209,11 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
     e.stopPropagation();
     const isOpen = popup.classList.toggle("open");
     if (isOpen) {
+      const rect = btn.getBoundingClientRect();
+      popup.style.top = `${rect.bottom + 4}px`;
+      popup.style.left = `${rect.left}px`;
+      popup.style.width = `${rect.width}px`;
+      popup.style.maxHeight = `${Math.max(120, window.innerHeight - rect.bottom - 16)}px`;
       filter.value = "";
       render();
       filter.focus();
@@ -407,13 +412,13 @@ function openClaudeConfigModal(): void {
       return cur && ids.includes(cur) ? cur : def;
     };
 
-    const roleDefs: { key: "main" | "haiku" | "sonnet" | "opus" | "fable" | "subagent"; label: string }[] = [
-      { key: "main", label: "主模型 ANTHROPIC_MODEL" },
-      { key: "haiku", label: "Haiku 快速 DEFAULT_HAIKU" },
-      { key: "sonnet", label: "Sonnet DEFAULT_SONNET" },
-      { key: "opus", label: "Opus DEFAULT_OPUS" },
-      { key: "fable", label: "Fable DEFAULT_FABLE" },
-      { key: "subagent", label: "子代理 SUBAGENT_MODEL" },
+    const roleDefs: { key: "main" | "haiku" | "sonnet" | "opus" | "fable" | "subagent"; env: string; desc: string }[] = [
+      { key: "main", env: "ANTHROPIC_MODEL", desc: "主模型:默认会话使用的模型" },
+      { key: "haiku", env: "ANTHROPIC_DEFAULT_HAIKU_MODEL", desc: "Haiku 快速模型:后台任务 / 轻量调用" },
+      { key: "sonnet", env: "ANTHROPIC_DEFAULT_SONNET_MODEL", desc: "Sonnet 模型:日常任务" },
+      { key: "opus", env: "ANTHROPIC_DEFAULT_OPUS_MODEL", desc: "Opus 模型:复杂任务" },
+      { key: "fable", env: "ANTHROPIC_DEFAULT_FABLE_MODEL", desc: "Fable 模型" },
+      { key: "subagent", env: "CLAUDE_CODE_SUBAGENT_MODEL", desc: "子代理使用的模型" },
     ];
     const selects: Record<string, { value: () => string }> = {};
 
@@ -434,7 +439,10 @@ function openClaudeConfigModal(): void {
       selects[r.key] = sel;
       updatePreview(sel.value());
       list.append(h("div", { class: "claude-role-row" }, [
-        h("span", { class: "claude-role-label" }, [r.label]),
+        h("span", { class: "claude-role-label" }, [
+          r.env,
+          h("span", { class: "claude-tip", "data-tip": r.desc }, ["?"]),
+        ]),
         sel.el,
         preview,
       ]));
