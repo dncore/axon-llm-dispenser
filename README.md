@@ -64,6 +64,15 @@
 
 ## 下载 / 升级
 
+### Homebrew(macOS,推荐)
+
+```bash
+brew tap dncore/axon-llm-dispenser
+brew install --cask axon-llm-dispenser
+```
+
+### 手动下载
+
 从 [Releases](../../releases) 下载对应平台便携包，解压即用（免安装）：
 
 | 平台 | 产物 |
@@ -72,7 +81,6 @@
 | Windows | `axon-llm-dispenser-windows-<版本>.zip`（便携 exe） |
 
 > macOS 首次打开：右键 →「打开」→「打开」；或 `xattr -dr com.apple.quarantine /Applications/axon-llm-dispenser.app`。
-> 应用内「检查更新」会跳转到 GitHub Releases。
 
 ## 从源码构建
 
