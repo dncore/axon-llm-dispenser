@@ -1,7 +1,7 @@
 [package]
 name = "axon-llm-dispenser"
 version = "0.1.0"
-description = "把用户自有的 OpenAI 兼容网关一键接入 Codex / Reasonix / DeepSeek Harness"
+description = "把用户自有的 OpenAI 兼容网关一键配置到各 Agent 工具"
 edition = "2021"
 
 [lib]

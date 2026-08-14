@@ -75,10 +75,22 @@ body {
   z-index: 10;
 }
 
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-icon { width: 45px; height: 45px; border-radius: 8px; flex-shrink: 0; } /* 与两行文字同高(27+18) */
+.brand-text { display: flex; flex-direction: column; }
+.brand-title { display: flex; align-items: center; gap: 8px; }
 .brand h1 { margin: 0; font-size: 18px; }
 .subtitle { color: var(--muted); font-size: 12px; }
-.header-actions { display: flex; align-items: center; gap: 12px; }
-.version { color: var(--muted); font-size: 12px; }
+
+/* 版本号:底部面板标题栏右侧的圆角徽章 */
+.version {
+  color: var(--muted);
+  font-size: 11px;
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
 
 .main {
   flex: 1;
@@ -147,8 +159,31 @@ body {
 }
 .input:focus, .models:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+/* 密码输入框:右侧眼睛按钮 */
+.input-wrap { position: relative; }
+.input-wrap .input { width: 100%; padding-right: 34px; }
+.input-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.input-eye:hover { color: var(--text); background: #e2e8f0; }
+.input-eye.active { color: var(--accent); }
+.input-eye .btn-icon { width: 14px; height: 14px; }
+
 .models-sidebar {
-  width: 300px;
+  width: 380px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -260,20 +295,31 @@ body {
 }
 .footer-handle {
   flex-shrink: 0;
-  height: 6px;
+  height: 18px;
   cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center; /* chevron 按钮居中,两侧仍是拖拽区 */
 }
 .footer-handle:hover { background: var(--border); }
 body.footer-dragging { user-select: none; cursor: ns-resize; }
-.footer-bar {
-  flex-shrink: 0;
+/* 把手上的展开/收起按钮:无边框小 chevron */
+.btn-expand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 2px 16px 4px;
+  justify-content: center;
+  width: 20px;
+  height: 18px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  flex-shrink: 0;
 }
-.footer-title { font-size: 12px; font-weight: 600; color: var(--muted); }
-.footer .output { margin: 0 16px 12px; }
+.btn-expand:hover { background: #e2e8f0; color: var(--text); }
+.btn-expand .btn-icon { width: 12px; height: 12px; }
+.footer .output { margin: 6px 16px 12px; }
 
 /* 还原弹窗 */
 .modal-overlay {

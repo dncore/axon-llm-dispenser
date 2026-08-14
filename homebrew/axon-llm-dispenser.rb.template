@@ -4,7 +4,7 @@ cask "axon-llm-dispenser" do
 
   url "https://github.com/dncore/axon-llm-dispenser/releases/download/v#{version}/axon-llm-dispenser-macos-v#{version}.zip"
   name "Axon"
-  desc "把自有的 OpenAI 兼容网关一键接入 Codex / Reasonix / DeepSeek Harness / Claude Code / Pi agent"
+  desc "把自有的 OpenAI 兼容网关一键配置到各 Agent 工具"
   homepage "https://github.com/dncore/axon-llm-dispenser"
 
   app "Axon.app"

@@ -85,7 +85,7 @@ function build(): void {
         field("显示名", "input-display", "配置界面展示名", "Axon"),
       ]),
       field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
-      field("API Key", "input-key", "网关凭据", "", "password"),
+      field("API Key", "input-key", "网关凭据", "", "password", true),
       field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
       h("div", { class: "row" }, [
         h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
@@ -97,7 +97,7 @@ function build(): void {
 
   const modelsCard = h("section", { class: "card models-sidebar" }, [
     h("h2", { class: "models-title" }, [
-      "模型目录",
+      "模型列表",
       h("div", { class: "fetch-right" }, [
         h("span", { id: "model-count", class: "hint" }, []),
         h("button", { id: "btn-fetch", class: "btn btn-small btn-icon-only", type: "button", title: "拉取模型(/models)" }, [icon("refresh")]),
@@ -126,11 +126,14 @@ function build(): void {
     h("div", { id: "toast-container", class: "toast-container" }, []),
     h("header", { class: "header" }, [
       h("div", { class: "brand" }, [
-        h("h1", {}, ["Axon"]),
-        h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关接入 Codex / Reasonix / dsh / Claude / Pi"]),
-      ]),
-      h("div", { class: "header-actions" }, [
-        h("span", { id: "app-version", class: "version" }, ["v…"]),
+        h("img", { class: "brand-icon", src: "/app-icon.png", alt: "Axon" }),
+        h("div", { class: "brand-text" }, [
+          h("div", { class: "brand-title" }, [
+            h("h1", {}, ["Axon"]),
+            h("span", { id: "app-version", class: "version" }, ["v…"]),
+          ]),
+          h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关配置到各 Agent 工具"]),
+        ]),
       ]),
     ]),
 
@@ -141,10 +144,8 @@ function build(): void {
     ]),
 
     h("footer", { id: "footer", class: "footer" }, [
-      h("div", { id: "footer-handle", class: "footer-handle", title: "拖拽调整高度" }, []),
-      h("div", { class: "footer-bar" }, [
-        h("span", { class: "footer-title" }, ["输出"]),
-        h("button", { id: "btn-expand-log", class: "btn btn-small btn-ghost", type: "button", title: "展开到半个视窗高度" }, ["展开 ▲"]),
+      h("div", { id: "footer-handle", class: "footer-handle", title: "拖拽调整高度" }, [
+        h("button", { id: "btn-expand-log", class: "btn-expand", type: "button", title: "展开日志面板" }, [icon("chevron-up")]),
       ]),
       h("div", { id: "output", class: "output" }, [
         h("div", { class: "log-empty" }, ["操作结果会显示在这里"]),
@@ -153,10 +154,26 @@ function build(): void {
   );
 }
 
-function field(label: string, id: string, placeholder: string, value: string, type = "text"): El {
+function field(label: string, id: string, placeholder: string, value: string, type = "text", reveal = false): El {
+  const input = h("input", { id, class: "input", type, placeholder, value });
+  if (!reveal) {
+    return h("label", { class: "field" }, [
+      h("span", { class: "field-label" }, [label]),
+      input,
+    ]);
+  }
+  // reveal=true(密码字段):输入框右侧加眼睛按钮,点击切换明文/密文
+  const eye = h("button", { class: "input-eye", type: "button", title: "显示 API Key" }, [icon("eye")]);
+  eye.addEventListener("click", () => {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    eye.replaceChildren(icon(show ? "eye-off" : "eye"));
+    eye.title = show ? "隐藏 API Key" : "显示 API Key";
+    eye.classList.toggle("active", show);
+  });
   return h("label", { class: "field" }, [
     h("span", { class: "field-label" }, [label]),
-    h("input", { id, class: "input", type, placeholder, value }),
+    h("div", { class: "input-wrap" }, [input, eye]),
   ]);
 }
 
@@ -174,6 +191,11 @@ const ICONS: Record<string, string> = {
     '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="m7.5 4.3 9 5.2"/>',
   sliders:
     '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
+  "chevron-up": '<path d="m18 15-6-6-6 6"/>',
+  "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+  eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
+  "eye-off":
+    '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
   refresh:
     '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
   pen: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
@@ -848,9 +870,12 @@ function setFooterHeight(h: number): void {
   syncExpandBtn();
 }
 
+/** 展开/收起按钮图标与提示随面板高度状态切换。 */
 function syncExpandBtn(): void {
   const expanded = $("footer").offsetHeight > FOOTER_MIN + 20;
-  $("btn-expand-log").textContent = expanded ? "收起 ▼" : "展开 ▲";
+  const btn = $("btn-expand-log");
+  btn.replaceChildren(icon(expanded ? "chevron-down" : "chevron-up"));
+  btn.title = expanded ? "收起日志面板" : "展开日志面板";
 }
 
 /** 按日志块实际高度计算最小高度(3 条日志),避免跨平台字体/padding 差异。 */
@@ -867,13 +892,14 @@ function initFooterMin(): void {
 }
 
 function bind(): void {
-  // 底部日志面板:展开/收起、拖拽调高、窗口缩放时重新夹紧
+  // 底部日志面板:拖拽调高、把手上的 chevron 按钮单击展开/收起、窗口缩放时重新夹紧
   initFooterMin();
+  window.addEventListener("resize", () => setFooterHeight($("footer").offsetHeight));
+  $("btn-expand-log").addEventListener("pointerdown", (e) => e.stopPropagation()); // 点按钮不触发拖拽
   $("btn-expand-log").addEventListener("click", () => {
     const expanded = $("footer").offsetHeight > FOOTER_MIN + 20;
     setFooterHeight(expanded ? FOOTER_MIN : Math.floor(window.innerHeight / 2));
   });
-  window.addEventListener("resize", () => setFooterHeight($("footer").offsetHeight));
   $("footer-handle").addEventListener("pointerdown", (e) => {
     e.preventDefault();
     const startY = e.clientY;

@@ -4,7 +4,7 @@
 
 <h1 align="center">axon-llm-dispenser</h1>
 
-<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键接入 5 个编码 / Agent 工具:<strong>Codex · Reasonix · DeepSeek Harness · Claude Code · pi agent</strong></p>
+<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix 等,持续扩展)</p>
 
 <p align="center">
   <a href="https://github.com/dncore/axon-llm-dispenser/releases"><img src="https://img.shields.io/github/v/release/dncore/axon-llm-dispenser" alt="release"></a>

@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-`axon-llm-dispenser` 是一个跨平台桌面应用（Tauri v2），用于把**用户自有的 OpenAI 兼容网关**（base_url + api_key）一键接入常见的编码/Agent 工具：**Codex CLI、Reasonix、DeepSeek Harness (dsh)**，并为 Reasonix 生成/关闭 Web 服务鉴权 Token。
+`axon-llm-dispenser` 是一个跨平台桌面应用（Tauri v2），用于把**用户自有的 OpenAI 兼容网关**（base_url + api_key）一键配置到各 Agent 工具（Codex、Claude Code、dsh、Pi、omp、Reasonix 等），并为 Reasonix 生成/关闭 Web 服务鉴权 Token。
 
 它是从 一个 pi-agent 插件中 的「鉴权生成与配置」能力抽取、脱敏、泛化而来：不内置任何公司网关地址、不做团队级模型排除名单，`provider 名`、`base_url`、`api_key` 全部由用户输入。
 
