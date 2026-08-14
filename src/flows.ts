@@ -252,6 +252,25 @@ export type ClaudeRoleSelection = {
   subagent: string;
 };
 
+/** 读取当前 ~/.claude/settings.json 的角色模型(去掉 [1m]/[200k] 后缀),用于弹窗默认值。 */
+export async function getClaudeCurrentRoles(): Promise<ClaudeRoleSelection | null> {
+  const home = await bridge.homeDir();
+  const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
+  const s = parseClaudeStatus(await bridge.readFileOrEmpty(settingsPath));
+  if (!s.model && !s.haikuModel && !s.sonnetModel && !s.opusModel && !s.fableModel && !s.subagentModel) {
+    return null;
+  }
+  const strip = (v: string | null): string => (v ? v.replace(/\[[^\]]*\]$/, "") : "");
+  return {
+    main: strip(s.model),
+    haiku: strip(s.haikuModel),
+    sonnet: strip(s.sonnetModel),
+    opus: strip(s.opusModel),
+    fable: strip(s.fableModel),
+    subagent: strip(s.subagentModel),
+  };
+}
+
 export async function configureClaude(cfg: bridge.AppConfig, roles: ClaudeRoleSelection): Promise<FlowResult> {
   const home = await bridge.homeDir();
   const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");

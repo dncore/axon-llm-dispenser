@@ -96,6 +96,7 @@ export type ClaudeStatus = {
   haikuModel: string | null;
   sonnetModel: string | null;
   opusModel: string | null;
+  fableModel: string | null;
   subagentModel: string | null;
   smallFastSet: boolean;
 };
@@ -121,6 +122,7 @@ export function parseClaudeStatus(text: string): ClaudeStatus {
     haikuModel: get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
     sonnetModel: get("ANTHROPIC_DEFAULT_SONNET_MODEL"),
     opusModel: get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    fableModel: get("ANTHROPIC_DEFAULT_FABLE_MODEL"),
     subagentModel: get("CLAUDE_CODE_SUBAGENT_MODEL"),
     smallFastSet: "ANTHROPIC_SMALL_FAST_MODEL" in env,
   };

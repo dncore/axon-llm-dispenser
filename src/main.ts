@@ -272,11 +272,18 @@ function openClaudeConfigModal(): void {
     }
     ids.sort((a, b) => a.localeCompare(b));
 
+    // 默认值:优先取当前 ~/.claude/settings.json 的配置(去掉 [1m]/[200k] 后缀),
+    // 不在模型列表内或未配置时退回常用默认
     const def = config.defaultModel && ids.includes(config.defaultModel)
       ? config.defaultModel
       : ids.includes("deepseek-v4-flash")
         ? "deepseek-v4-flash"
         : ids[0];
+    const current = await flows.getClaudeCurrentRoles();
+    const pickDefault = (key: "main" | "haiku" | "sonnet" | "opus" | "fable" | "subagent"): string => {
+      const cur = current?.[key] ?? "";
+      return cur && ids.includes(cur) ? cur : def;
+    };
 
     const roleDefs: { key: "main" | "haiku" | "sonnet" | "opus" | "fable" | "subagent"; label: string }[] = [
       { key: "main", label: "主模型 ANTHROPIC_MODEL" },
@@ -296,7 +303,7 @@ function openClaudeConfigModal(): void {
     const list = h("div", { class: "modal-list" }, []);
     for (const r of roleDefs) {
       const sel = h("select", { class: "input claude-role-select" }, ids.map((id) => h("option", { value: id }, [id])));
-      sel.value = def;
+      sel.value = pickDefault(r.key);
       selects[r.key] = sel;
       const preview = h("span", { class: "claude-preview" }, []);
       const updatePreview = (): void => {
