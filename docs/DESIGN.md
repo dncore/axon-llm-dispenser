@@ -4,7 +4,7 @@
 
 `axon-llm-dispenser` 是一个跨平台桌面应用（Tauri v2），用于把**用户自有的 OpenAI 兼容网关**（base_url + api_key）一键接入常见的编码/Agent 工具：**Codex CLI、Reasonix、DeepSeek Harness (dsh)**，并为 Reasonix 生成/关闭 Web 服务鉴权 Token。
 
-它是从 `pi-agent-dispenser` 插件中 `/magene-setup` 与 `/magene-util` 的「鉴权生成与配置」能力抽取、脱敏、泛化而来：不内置任何公司网关地址、不做团队级模型排除名单，`provider 名`、`base_url`、`api_key` 全部由用户输入。
+它是从 一个 pi-agent 插件中 的「鉴权生成与配置」能力抽取、脱敏、泛化而来：不内置任何公司网关地址、不做团队级模型排除名单，`provider 名`、`base_url`、`api_key` 全部由用户输入。
 
 ## 2. 目标与范围
 
@@ -72,12 +72,12 @@ axon-llm-dispenser/
 
 | 原插件 | 脱敏后 |
 |--------|--------|
-| provider 名硬编码 `magene` | 用户自定义，默认 `axon`，校验 `[A-Za-z0-9][A-Za-z0-9._-]*` |
-| 环境变量 `MAGENE_API_KEY` | `deriveKeyRef(provider名)` = 大写去非法字符 + `_API_KEY`（对齐 dsh 官方规则） |
-| `DEFAULT_BASE_URL = http://tops.magene.cn:11636/api/v1` | 删除，用户输入 |
+| provider 名硬编码(原插件固定名) | 用户自定义，默认 `axon`，校验 `[A-Za-z0-9][A-Za-z0-9._-]*` |
+| 环境变量(原插件固定名) | `deriveKeyRef(provider名)` = 大写去非法字符 + `_API_KEY`（对齐 dsh 官方规则） |
+| 内置默认网关地址 | 删除，用户输入 |
 | 团队排除名单 `CODEX_EXCLUDED_MODELS` | 删除，无硬编码排除 |
 | 可用性白名单 `CODEX_OK_MODELS` | 删除，/models 拉到的全部可见 |
-| `~/.pi/agent/extensions/magene-provider/.env` | 应用配置 `config_dir()/config.json` |
+| 插件自身的 `.env` 路径 | 应用配置 `config_dir()/config.json` |
 | pi-web-fetch 提炼模型 | 删除 |
 | 默认模型 `deepseek-v4-flash` | 用户可自选，默认取 /models 第一个（无则留空） |
 | `KNOWN_MODELS` 110+ 模型元数据 | **保留**（通用模型元数据，非公司信息） |
@@ -122,7 +122,7 @@ axon-llm-dispenser/
 1. UI 读取 `config.json` → 展示 provider/base_url/api_key。
 2. 用户点「配置」→ `fetch_models(base_url, api_key)` 拉模型列表 → 合并手动增删。
 3. 构建 `models` 条目（`models.ts` 补 contextWindow/maxTokens/reasoningEfforts）。
-4. `core/dsh.ts` 的 `patchDshMageneProvider` + `patchDshDefaultModel` 生成 settings.yaml 文本。
+4. `core/dsh.ts` 的 `patchDshProvider` + `patchDshDefaultModel` 生成 settings.yaml 文本。
 5. 确认弹窗 → `bridge.write_file`（含备份）+ 写 `.credentials.yaml`（0600）。
 6. 展示结果 + Web UI 链接。
 
