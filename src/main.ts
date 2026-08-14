@@ -99,10 +99,6 @@ function build(): void {
       h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
       h("span", { id: "model-count", class: "hint" }, []),
     ]),
-    h("div", { class: "row" }, [
-      h("input", { id: "input-add-model", class: "input", type: "text", placeholder: "手动添加模型 ID" }),
-      h("button", { id: "btn-add-model", class: "btn btn-ghost" }, ["添加"]),
-    ]),
     h("label", { class: "row toggle" }, [
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
       h("span", {}, ["过滤 Doubao 系模型(拉取与生成配置均不含 doubao)"]),
@@ -234,7 +230,7 @@ function renderModelsList(): void {
   for (const r of modelRows) {
     const row = h("div", { class: "model-row" }, [
       h("span", { class: "model-row-id" }, [r.id]),
-      r.ownedBy ? h("span", { class: "model-row-owner" }, [r.ownedBy]) : h("span", { class: "model-row-owner" }, ["手动"]),
+      r.ownedBy ? h("span", { class: "model-row-owner" }, [r.ownedBy]) : h("span", { class: "model-row-owner" }, ["—"]),
       h("button", { class: "model-row-del", type: "button", title: "移除" }, ["×"]),
     ]);
     (row.querySelector(".model-row-del") as El).addEventListener("click", () => {
@@ -541,22 +537,6 @@ function bind(): void {
 
   $("btn-fetch").addEventListener("click", () => $("btn-test").click());
 
-  $("btn-add-model").addEventListener("click", () => {
-    const input = $("input-add-model") as HTMLInputElement;
-    const id = input.value.trim();
-    if (!id) return;
-    if (modelRows.some((m) => m.id === id)) {
-      notify("该模型已在列表中", "info");
-      return;
-    }
-    modelRows.push({ id });
-    input.value = "";
-    renderModelsList();
-    notify(`已添加 ${id}`, "info");
-  });
-  ($("input-add-model") as HTMLInputElement).addEventListener("keydown", (e) => {
-    if (e.key === "Enter") ($("btn-add-model") as HTMLButtonElement).click();
-  });
 
   $("btn-codex-配置").addEventListener("click", () =>
     run("Codex 配置", async () => {
