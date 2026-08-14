@@ -10,6 +10,7 @@ pub fn run() {
             commands::write_file,
             commands::chmod,
             commands::exists,
+            commands::read_dir,
             commands::mkdir,
             commands::detect_cli,
             commands::fetch_models,

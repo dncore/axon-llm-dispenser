@@ -31,6 +31,7 @@ let config: bridge.AppConfig = {
   baseUrl: "",
   apiKey: "",
   defaultModel: "",
+  anthropicBaseUrl: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,7 @@ function build(): void {
         ]),
         field("Base URL", "input-base", "OpenAI 兼容网关地址,如 https://gateway.example/v1", ""),
         field("API Key", "input-key", "网关凭据", "", "password"),
+        field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
         h("div", { class: "row" }, [
           h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
           h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
@@ -95,9 +97,11 @@ function build(): void {
 
       h("section", { class: "card" }, [
         h("h2", {}, ["工具接入"]),
-        toolCard("codex", "Codex", ["配置", "状态"]),
-        toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权"]),
-        toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态"]),
+        toolCard("codex", "Codex", ["配置", "状态", "还原"]),
+        toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
+        toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
+        toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
+        toolCard("pi", "pi agent", ["配置", "状态", "还原"]),
       ]),
 
       h("section", { class: "card" }, [
@@ -138,6 +142,7 @@ function readFields(): void {
   config.displayName = ($("input-display") as HTMLInputElement).value.trim() || config.provider;
   config.baseUrl = ($("input-base") as HTMLInputElement).value.trim();
   config.apiKey = ($("input-key") as HTMLInputElement).value.trim();
+  config.anthropicBaseUrl = ($("input-anthropic") as HTMLInputElement).value.trim();
 }
 
 function readModelIds(): string[] {
@@ -170,6 +175,66 @@ async function ensureModels(): Promise<string[] | null> {
     return null;
   }
   return ids;
+}
+
+/** 还原弹窗:列出所选工具的全部备份,用户点选恢复。 */
+function openRestoreModal(tool: string): void {
+  void run(`还原(${tool})`, async () => {
+    const targets = await flows.getRestoreTargets(tool);
+    const backups: { label: string; name: string; path: string; time: string; size: string }[] = [];
+    for (const t of targets) {
+      for (const b of await flows.listBackups(t.path)) {
+        backups.push({
+          label: t.label,
+          name: b.name,
+          path: b.path,
+          time: new Date(b.mtimeMs).toLocaleString(),
+          size: `${(b.size / 1024).toFixed(1)}KB`,
+        });
+      }
+    }
+    if (backups.length === 0) {
+      notify(`${tool} 暂无备份(每次配置写入前会自动备份 .bak-*)`, "info");
+      return;
+    }
+
+    const overlay = h("div", { class: "modal-overlay" }, []);
+    const modal = h("div", { class: "modal" }, [
+      h("h3", {}, [`还原 - ${tool}`]),
+      h("div", { class: "modal-sub" }, [`共 ${backups.length} 个备份,点击选择要恢复的备份`]),
+    ]);
+    const list = h("div", { class: "modal-list" }, []);
+    for (const b of backups) {
+      const row = h("button", { class: "modal-row" }, [
+        h("span", { class: "modal-label" }, [b.label]),
+        h("span", { class: "modal-name" }, [b.name]),
+        h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
+      ]);
+      row.addEventListener("click", () => {
+        overlay.remove();
+        const ok = confirm(`用 ${b.name} 还原「${b.label}」?\n当前文件会先备份为 .bak-pre-restore-*,确认?`);
+        if (!ok) return;
+        void run("还原", async () => {
+          const r = await flows.restoreBackup(
+            targets.find((t) => t.label === b.label)?.path ?? "",
+            b.path,
+          );
+          notify(`已还原 ${b.label}${r.backup ? `,当前文件已备份 ${bridge.basenamePath(r.backup)}` : ""}`, "info");
+          if (tool === "pi") notify("还原后重启 pi 生效", "info");
+        });
+      });
+      list.append(row);
+    }
+    modal.append(list);
+    const close = h("button", { class: "btn btn-ghost", id: "modal-close" }, ["关闭"]);
+    close.addEventListener("click", () => overlay.remove());
+    modal.append(h("div", { class: "modal-footer" }, [close]));
+    overlay.append(modal);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.body.append(overlay);
+  });
 }
 
 /** 统一包装异步操作:任何异常都在输出面板可见,不再静默失败。 */
@@ -230,6 +295,8 @@ function bind(): void {
     }),
   );
 
+  $("btn-codex-还原").addEventListener("click", () => openRestoreModal("codex"));
+
   $("btn-reasonix-配置").addEventListener("click", () =>
     run("Reasonix 配置", async () => {
       readFields();
@@ -247,6 +314,8 @@ function bind(): void {
       log(await flows.reasonixStatus(config));
     }),
   );
+
+  $("btn-reasonix-还原").addEventListener("click", () => openRestoreModal("reasonix"));
 
   $("btn-reasonix-生成 Token").addEventListener("click", () =>
     run("生成 Token", async () => {
@@ -282,6 +351,47 @@ function bind(): void {
     }),
   );
 
+  $("btn-dsh-还原").addEventListener("click", () => openRestoreModal("dsh"));
+
+  $("btn-claude-配置").addEventListener("click", () =>
+    run("Claude 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      const r = await flows.configureClaude(config, ids);
+      log(r.lines);
+    }),
+  );
+
+  $("btn-claude-状态").addEventListener("click", () =>
+    run("Claude 状态", async () => {
+      log(await flows.claudeStatus());
+    }),
+  );
+
+  $("btn-claude-还原").addEventListener("click", () => openRestoreModal("claude"));
+
+  $("btn-pi-配置").addEventListener("click", () =>
+    run("pi 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      const r = await flows.configurePi(config, ids);
+      log(r.lines);
+    }),
+  );
+
+  $("btn-pi-状态").addEventListener("click", () =>
+    run("pi 状态", async () => {
+      readFields();
+      log(await flows.piStatus(config));
+    }),
+  );
+
+  $("btn-pi-还原").addEventListener("click", () => openRestoreModal("pi"));
+
   $("btn-update").addEventListener("click", () =>
     run("检查更新", async () => {
       const resp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
@@ -315,6 +425,7 @@ async function boot(): Promise<void> {
     ($("input-display") as HTMLInputElement).value = config.displayName;
     ($("input-base") as HTMLInputElement).value = config.baseUrl;
     ($("input-key") as HTMLInputElement).value = config.apiKey;
+    ($("input-anthropic") as HTMLInputElement).value = config.anthropicBaseUrl;
   } catch {
     // 使用默认配置
   }

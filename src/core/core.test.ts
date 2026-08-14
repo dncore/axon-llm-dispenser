@@ -100,3 +100,64 @@ describe("patchDshProvider", () => {
     expect(() => upsertDshCredentialYaml("", "AXON_API_KEY", "")).toThrow();
   });
 });
+
+import { deriveAnthropicUrl, patchClaudeSettings, parseClaudeStatus } from "./claude";
+import { patchPiModelsJson, patchPiSettings, parsePiStatus } from "./pi";
+
+describe("claude", () => {
+  it("推导 Anthropic 端点", () => {
+    expect(deriveAnthropicUrl("http://host:8080/api/v1")).toBe("http://host:8080/api/anthropic");
+    expect(deriveAnthropicUrl("https://gw.example/v1")).toBe("https://gw.example/api/anthropic");
+    expect(deriveAnthropicUrl("https://gw.example/base")).toBe("https://gw.example/base/api/anthropic");
+  });
+
+  it("合并 env 到 settings.json,保留其它键", () => {
+    const r = patchClaudeSettings('{"permissions":{"allow":["Bash(ls *)"]}}', {
+      anthropicBaseUrl: "http://host/api/anthropic",
+      apiKey: "sk-x",
+      model: "m1",
+    });
+    const doc = JSON.parse(r.text) as { permissions: unknown; env: Record<string, string> };
+    expect(doc.permissions).toEqual({ allow: ["Bash(ls *)"] });
+    expect(doc.env.ANTHROPIC_BASE_URL).toBe("http://host/api/anthropic");
+    expect(doc.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-x");
+    expect(doc.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("m1");
+  });
+
+  it("状态解析", () => {
+    const s = parseClaudeStatus('{"env":{"ANTHROPIC_BASE_URL":"http://h","ANTHROPIC_AUTH_TOKEN":"t","ANTHROPIC_MODEL":"m"}}');
+    expect(s.baseUrl).toBe("http://h");
+    expect(s.authTokenSet).toBe(true);
+    expect(s.model).toBe("m");
+  });
+});
+
+describe("pi", () => {
+  it("合并 providers 到 models.json,保留其它 provider", () => {
+    const r = patchPiModelsJson('{"providers":{"ollama":{"baseUrl":"http://x","models":[]}}}', {
+      providerName: "axon",
+      baseUrl: "https://gw/v1",
+      apiKey: "sk-x",
+      models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: true, input: ["text"], contextWindow: 1000000, maxTokens: 384000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: {} }],
+    });
+    const doc = JSON.parse(r.text) as { providers: Record<string, { baseUrl: string; apiKey: string; authHeader: boolean; models: unknown[] }> };
+    expect(doc.providers.ollama).toBeDefined();
+    expect(doc.providers.axon.baseUrl).toBe("https://gw/v1");
+    expect(doc.providers.axon.authHeader).toBe(true);
+    expect(doc.providers.axon.models).toHaveLength(1);
+  });
+
+  it("settings defaultProvider/defaultModel", () => {
+    const r = patchPiSettings('{"defaultProvider":"old"}', "axon", "deepseek-v4-flash");
+    const doc = JSON.parse(r.text) as { defaultProvider: string; defaultModel: string };
+    expect(doc.defaultProvider).toBe("axon");
+    expect(doc.defaultModel).toBe("deepseek-v4-flash");
+  });
+
+  it("pi 状态解析", () => {
+    const s = parsePiStatus('{"providers":{"axon":{"baseUrl":"https://gw","models":[{}]}}}', '{"defaultProvider":"axon"}', "axon");
+    expect(s.providerConfigured).toBe(true);
+    expect(s.providerModels).toBe(1);
+    expect(s.defaultProvider).toBe("axon");
+  });
+});

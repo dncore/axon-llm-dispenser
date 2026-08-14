@@ -76,6 +76,30 @@ pub fn exists(path: String) -> bool {
     Path::new(&path).exists()
 }
 
+/// 列出目录内容(名称/大小/修改时间),用于备份列表。
+#[tauri::command]
+pub fn read_dir(path: String) -> Result<Vec<serde_json::Value>, String> {
+    let entries = fs::read_dir(&path).map_err(|e| format!("读取目录失败 {}: {}", path, e))?;
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let meta = entry.metadata().map_err(|e| e.to_string())?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        out.push(serde_json::json!({
+            "name": entry.file_name().to_string_lossy().to_string(),
+            "isFile": meta.is_file(),
+            "size": meta.len(),
+            "mtimeMs": mtime,
+        }));
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn mkdir(path: String, recursive: bool) -> Result<(), String> {
     if recursive {

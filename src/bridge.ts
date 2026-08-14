@@ -11,6 +11,8 @@ export type AppConfig = {
   baseUrl: string;
   apiKey: string;
   defaultModel: string;
+  /** Anthropic 兼容端点(Claude 用);留空时自动从 baseUrl 推导。 */
+  anthropicBaseUrl: string;
 };
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -19,6 +21,7 @@ const DEFAULT_CONFIG: AppConfig = {
   baseUrl: "",
   apiKey: "",
   defaultModel: "",
+  anthropicBaseUrl: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -48,6 +51,12 @@ export function chmod(path: string, mode: number): Promise<void> {
 
 export function exists(path: string): Promise<boolean> {
   return invoke<boolean>("exists", { path });
+}
+
+export type DirEntry = { name: string; isFile: boolean; size: number; mtimeMs: number };
+
+export function readDir(path: string): Promise<DirEntry[]> {
+  return invoke<DirEntry[]>("read_dir", { path });
 }
 
 export function mkdir(path: string, recursive = true): Promise<void> {
@@ -80,6 +89,18 @@ export function appConfigDir(): Promise<string> {
 
 export async function joinPath(...parts: string[]): Promise<string> {
   return invoke<string>("path_join", { parts });
+}
+
+/** 取目录部分(兼容 / 与 \\)。 */
+export function dirnamePath(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i <= 0 ? p : p.slice(0, i);
+}
+
+/** 取文件名部分(兼容 / 与 \\)。 */
+export function basenamePath(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i === -1 ? p : p.slice(i + 1);
 }
 
 export async function home(): Promise<string> {
@@ -118,6 +139,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
       baseUrl: parsed.baseUrl || "",
       apiKey: parsed.apiKey || "",
       defaultModel: parsed.defaultModel || "",
+      anthropicBaseUrl: parsed.anthropicBaseUrl || "",
     };
   } catch {
     return { ...DEFAULT_CONFIG };

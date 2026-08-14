@@ -2,7 +2,7 @@
 
 import * as bridge from "./bridge";
 import { buildResolvedModels, deriveKeyRef, type ResolvedModel } from "./core/models";
-import { generateToken } from "./core/util";
+import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchDshProvider, patchDshDefaultModel, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
@@ -227,4 +227,160 @@ export async function dshStatus(cfg: bridge.AppConfig): Promise<string[]> {
     `  凭据在 .credentials.yaml: ${s.credentialStored ? "是" : "否"}`,
     `dsh CLI: ${cli ?? "未检测到(可用 npx @deepseek-ai/dsh web 启动)"}`,
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code
+// ---------------------------------------------------------------------------
+
+import { deriveAnthropicUrl, patchClaudeSettings, parseClaudeStatus } from "./core/claude";
+import { patchPiModelsJson, patchPiSettings, parsePiStatus } from "./core/pi";
+
+export async function configureClaude(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.homeDir();
+  const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
+  const model = cfg.defaultModel || modelIds[0] || "";
+  const anthropicBaseUrl = cfg.anthropicBaseUrl || deriveAnthropicUrl(cfg.baseUrl);
+  const patched = patchClaudeSettings(await bridge.readFileOrEmpty(settingsPath), {
+    anthropicBaseUrl,
+    apiKey: cfg.apiKey,
+    model,
+  });
+  const written = await bridge.writeWithBackup(settingsPath, patched.text);
+  const lines = [
+    `settings.json: ${written.path}`,
+    `  ${patched.changes.join(", ") || "无变化"}`,
+    `Anthropic 端点: ${anthropicBaseUrl}`,
+  ];
+  if (written.backup) lines.push(`备份: ${written.backup}`);
+  return { changes: patched.changes, lines };
+}
+
+export async function claudeStatus(): Promise<string[]> {
+  const home = await bridge.homeDir();
+  const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
+  const s = parseClaudeStatus(await bridge.readFileOrEmpty(settingsPath));
+  const cli = await bridge.detectCli("claude");
+  return [
+    `Claude 配置: ${settingsPath}`,
+    `settings.json: ${s.settingsExists ? "存在" : "缺失"}`,
+    `ANTHROPIC_BASE_URL: ${s.baseUrl ?? "(未设置)"}`,
+    `ANTHROPIC_AUTH_TOKEN: ${s.authTokenSet ? "已设置" : "未设置"}`,
+    `ANTHROPIC_MODEL: ${s.model ?? "(未设置)"}`,
+    `claude CLI: ${cli ?? "未检测到"}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// pi agent
+// ---------------------------------------------------------------------------
+
+export async function configurePi(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.homeDir();
+  const piDir = await bridge.joinPath(home, ".pi", "agent");
+  const modelsPath = await bridge.joinPath(piDir, "models.json");
+  const settingsPath = await bridge.joinPath(piDir, "settings.json");
+  const resolved = buildResolvedModels(modelIds);
+  const defaultModel = cfg.defaultModel || resolved[0]?.id || "";
+
+  const p1 = patchPiModelsJson(await bridge.readFileOrEmpty(modelsPath), {
+    providerName: cfg.provider,
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    models: resolved,
+  });
+  const p2 = patchPiSettings(await bridge.readFileOrEmpty(settingsPath), cfg.provider, defaultModel);
+  const allChanges = [...p1.changes, ...p2.changes];
+  const w1 = await bridge.writeWithBackup(modelsPath, p1.text);
+  const w2 = await bridge.writeWithBackup(settingsPath, p2.text);
+
+  const lines = [
+    `models.json: ${w1.path}`,
+    `  ${p1.changes.join(", ") || "无变化"}`,
+    `settings.json: ${w2.path}`,
+    `  ${p2.changes.join(", ") || "无变化"}`,
+    `默认模型: ${cfg.provider}/${defaultModel}(pi 内用 /model 切换,重启 pi 生效)`,
+  ];
+  if (w1.backup) lines.push(`备份: ${w1.backup}`);
+  return { changes: allChanges, lines };
+}
+
+export async function piStatus(cfg: bridge.AppConfig): Promise<string[]> {
+  const home = await bridge.homeDir();
+  const piDir = await bridge.joinPath(home, ".pi", "agent");
+  const modelsPath = await bridge.joinPath(piDir, "models.json");
+  const settingsPath = await bridge.joinPath(piDir, "settings.json");
+  const s = parsePiStatus(await bridge.readFileOrEmpty(modelsPath), await bridge.readFileOrEmpty(settingsPath), cfg.provider);
+  return [
+    `pi 配置: ${piDir}`,
+    `models.json: ${s.modelsExists ? "存在" : "缺失"}`,
+    `provider ${cfg.provider}: ${s.providerConfigured ? `已配置(${s.providerModels} 个模型, baseURL=${s.providerBaseUrl})` : "未配置"}`,
+    `settings.json: ${s.settingsExists ? "存在" : "缺失"}`,
+    `defaultProvider: ${s.defaultProvider ?? "(未设置)"}`,
+    `defaultModel: ${s.defaultModel ?? "(未设置)"}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// 备份还原(所有工具)
+// ---------------------------------------------------------------------------
+
+export type BackupInfo = { path: string; name: string; size: number; mtimeMs: number };
+export type RestoreTarget = { id: string; label: string; path: string };
+
+/** 各工具可还原的文件目标。 */
+export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> {
+  const home = await bridge.homeDir();
+  const codexH = await bridge.codexHome();
+  const reasonixH = await bridge.reasonixHome();
+  const dshH = await bridge.dshHome();
+  const claudeH = await bridge.joinPath(home, ".claude");
+  const piH = await bridge.joinPath(home, ".pi", "agent");
+  switch (tool) {
+    case "codex":
+      return [
+        { id: "codex-config", label: "Codex config.toml", path: await bridge.joinPath(codexH, "config.toml") },
+        { id: "codex-models", label: "Codex models.json", path: await bridge.joinPath(codexH, "models.json") },
+      ];
+    case "reasonix":
+      return [{ id: "reasonix-config", label: "Reasonix config.toml", path: await bridge.joinPath(reasonixH, "config.toml") }];
+    case "dsh":
+      return [{ id: "dsh-settings", label: "dsh settings.yaml", path: await bridge.joinPath(dshH, "settings.yaml") }];
+    case "claude":
+      return [{ id: "claude-settings", label: "Claude settings.json", path: await bridge.joinPath(claudeH, "settings.json") }];
+    case "pi":
+      return [
+        { id: "pi-models", label: "pi models.json", path: await bridge.joinPath(piH, "models.json") },
+        { id: "pi-settings", label: "pi settings.json", path: await bridge.joinPath(piH, "settings.json") },
+      ];
+    default:
+      return [];
+  }
+}
+
+/** 列出某目标文件的所有备份(.bak-*),按时间倒序。 */
+export async function listBackups(targetPath: string): Promise<BackupInfo[]> {
+  const dir = bridge.dirnamePath(targetPath);
+  const base = bridge.basenamePath(targetPath);
+  const files = await bridge.readDir(dir);
+  const out: BackupInfo[] = [];
+  for (const f of files) {
+    if (f.isFile && f.name.startsWith(`${base}.bak-`)) {
+      out.push({ path: await bridge.joinPath(dir, f.name), name: f.name, size: f.size, mtimeMs: f.mtimeMs });
+    }
+  }
+  return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+/** 用备份覆盖目标:当前文件先备份为 .bak-pre-restore-<ts>。 */
+export async function restoreBackup(targetPath: string, backupPath: string): Promise<{ path: string; backup?: string }> {
+  let backup: string | undefined;
+  const current = await bridge.readFileOrEmpty(targetPath);
+  if (current) {
+    backup = `${targetPath}.bak-pre-restore-${timestamp()}`;
+    await bridge.writeFile(backup, current);
+  }
+  const content = await bridge.readFile(backupPath);
+  await bridge.writeFile(targetPath, content);
+  return { path: targetPath, backup };
 }
