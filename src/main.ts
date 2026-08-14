@@ -718,6 +718,8 @@ async function boot(): Promise<void> {
   window.addEventListener("unhandledrejection", (ev) => {
     notify(`未处理的错误: ${ev.reason}`, "error");
   });
+  // 关闭 webview 右键默认菜单(Reload/返回等)
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
   // 弹窗打开时锁定主页面滚动(body.modal-open → overflow:hidden)
   const syncModalLock = (): void => {
     document.body.classList.toggle("modal-open", document.querySelectorAll(".modal-overlay").length > 0);

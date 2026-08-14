@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "axon-llm-dispenser",
-        "width": 1080,
-        "height": 820,
-        "minWidth": 960,
-        "minHeight": 680,
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1280,
+        "minHeight": 800,
         "resizable": true
       }
     ],
