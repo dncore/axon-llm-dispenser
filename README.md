@@ -68,6 +68,7 @@
 
 ```bash
 brew tap dncore/axon-llm-dispenser
+brew trust dncore/axon-llm-dispenser   # 授权 tap 执行安装脚本(postflight 自动移除 quarantine)
 brew install --cask axon-llm-dispenser
 ```
 
