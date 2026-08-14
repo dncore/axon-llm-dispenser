@@ -48,3 +48,56 @@ export function unquoteYaml(s: string): string {
   if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1);
   return v;
 }
+
+// ---------------------------------------------------------------------------
+// YAML 块定位(缩进感知的文本级补丁,dsh/omp 共用)
+// ---------------------------------------------------------------------------
+
+/** 在 [from, to) 区域内定位 `key:` 行(可限定缩进)。 */
+export function findKeyInRegion(
+  text: string,
+  from: number,
+  to: number,
+  key: string,
+  exactIndent?: number,
+): { start: number; end: number; indent: number } | null {
+  const region = text.slice(from, to);
+  const re = new RegExp(`^( *)${escapeRegExp(key)}:(?:[ \\t]|$)`, "m");
+  const m = re.exec(region);
+  if (!m) return null;
+  if (exactIndent !== undefined && m[1].length !== exactIndent) return null;
+  const lineStart = from + m.index;
+  const lineEnd = text.indexOf("\n", lineStart);
+  const end = lineEnd === -1 ? text.length : lineEnd;
+  return { start: lineStart, end, indent: m[1].length };
+}
+
+/** 行尾后的下一个位置(跳过换行符)。 */
+export function lineAfter(text: string, lineEnd: number): number {
+  return lineEnd < text.length && text[lineEnd] === "\n" ? lineEnd + 1 : text.length;
+}
+
+/** 块体的结束位置:第一个缩进 <= blockIndent 的非空非注释行。 */
+export function blockBodyEnd(text: string, bodyStart: number, blockIndent: number, limit: number): number {
+  let pos = bodyStart;
+  while (pos < limit) {
+    const lineEnd = text.indexOf("\n", pos);
+    const end = lineEnd === -1 ? limit : lineEnd + 1;
+    const line = text.slice(pos, end);
+    const content = line.trimStart();
+    if (content.length > 0 && !content.startsWith("#")) {
+      const indent = line.length - line.trimStart().length;
+      if (indent <= blockIndent) return pos;
+    }
+    pos = end;
+  }
+  return limit;
+}
+
+/** 键行是否带内联值(flow style 等,直接报错要求手动编辑)。 */
+export function headerHasInlineContent(text: string, headerStart: number, headerEnd: number): boolean {
+  const line = text.slice(headerStart, headerEnd);
+  const colonIdx = line.indexOf(":");
+  const rest = line.slice(colonIdx + 1).trim();
+  return rest.length > 0 && !rest.startsWith("#");
+}

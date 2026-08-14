@@ -228,3 +228,200 @@ describe("codex models.json 保留现有条目", () => {
     expect(doc.models.find((m) => m.slug === "gpt-5")).toMatchObject({ display_name: "GPT-5" });
   });
 });
+
+import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./omp";
+import {
+  compareAgentConfig,
+  extractClaudeProvider,
+  extractCodexProvider,
+  extractDshProvider,
+  extractOmpProvider,
+  extractPiProvider,
+  extractReasonixProvider,
+} from "./agent-config";
+
+describe("omp", () => {
+  it("baseUrl 去尾 /v1(官方指南:不带 /v1)", () => {
+    expect(ompBaseUrl("https://gateway.example/v1")).toBe("https://gateway.example");
+    expect(ompBaseUrl("https://gateway.example/v1/")).toBe("https://gateway.example");
+    expect(ompBaseUrl("https://gateway.example")).toBe("https://gateway.example");
+  });
+
+  it("DeepSeek 模型带官方 thinking+完整 compat,非 DeepSeek 不带", () => {
+    const r = patchOmpModelsYml("", {
+      providerName: "axon",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-test",
+      models: buildResolvedModels(["deepseek-v4-pro", "qwen3.8-max"]),
+    });
+    expect(r.text).toContain("baseUrl: https://gateway.example");
+    expect(r.text).toContain("api: openai-completions");
+    expect(r.text).toContain("apiKey: sk-test");
+    expect(r.text).toContain("authHeader: true");
+    // DeepSeek 条目:thinking 等级锁定 + 三关键 compat 字段 + extraBody
+    expect(r.text).toContain("minLevel: high");
+    expect(r.text).toContain("maxLevel: xhigh");
+    expect(r.text).toContain("mode: effort");
+    expect(r.text).toContain("supportsToolChoice: false");
+    expect(r.text).toContain("requiresReasoningContentForToolCalls: true");
+    expect(r.text).toContain("requiresAssistantContentForToolCalls: true");
+    expect(r.text).toContain("type: enabled");
+    // 非 DeepSeek 条目不写 compat 块
+    const qwenIdx = r.text.indexOf("qwen3.8-max");
+    expect(qwenIdx).toBeGreaterThan(-1);
+    expect(r.text.slice(qwenIdx)).not.toContain("compat:");
+  });
+
+  it("已有其它 provider 时只更新目标段", () => {
+    const existing = [
+      "providers:",
+      "  other:",
+      "    baseUrl: https://x",
+      "    api: openai-completions",
+      "    apiKey: k",
+      "    authHeader: true",
+      "    models: []",
+      "",
+    ].join("\n");
+    const r = patchOmpModelsYml(existing, {
+      providerName: "axon",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-test",
+      models: buildResolvedModels(["deepseek-v4-flash"]),
+    });
+    expect(r.text).toContain("other:");
+    expect(r.text).toContain("axon:");
+    expect(r.text).toContain("baseUrl: https://x");
+  });
+
+  it("config.yml modelRoles.default upsert 与替换", () => {
+    const r1 = patchOmpConfigYml("", "axon", "deepseek-v4-flash");
+    expect(r1.text).toContain("modelRoles:");
+    expect(r1.text).toContain("default: axon/deepseek-v4-flash");
+    const r2 = patchOmpConfigYml(r1.text, "axon", "deepseek-v4-pro");
+    expect(r2.text).toContain("default: axon/deepseek-v4-pro");
+    expect(r2.text).not.toContain("deepseek-v4-flash");
+  });
+
+  it("状态解析", () => {
+    const models = patchOmpModelsYml("", {
+      providerName: "axon",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk",
+      models: buildResolvedModels(["deepseek-v4-pro", "qwen3.8-max"]),
+    }).text;
+    const cfg = patchOmpConfigYml("", "axon", "deepseek-v4-pro").text;
+    const s = parseOmpStatus(models, cfg, "axon");
+    expect(s.providerConfigured).toBe(true);
+    expect(s.providerBaseUrl).toBe("https://gateway.example");
+    expect(s.providerModels).toBe(2);
+    expect(s.defaultRole).toBe("axon/deepseek-v4-pro");
+  });
+
+  it("pi models.json 对 DeepSeek 应用官方 thinkingLevelMap", () => {
+    const r = patchPiModelsJson("", {
+      providerName: "axon",
+      baseUrl: "https://g/v1",
+      apiKey: "sk",
+      models: buildResolvedModels(["deepseek-v4-pro"]),
+    });
+    const doc = JSON.parse(r.text) as { providers: { axon: { models: Array<Record<string, unknown>> } } };
+    const m = doc.providers.axon.models[0];
+    expect(m.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null, high: "high", xhigh: "max" });
+    expect((m.compat as Record<string, unknown>).thinkingFormat).toBe("deepseek");
+    expect((m.compat as Record<string, unknown>).requiresReasoningContentOnAssistantMessages).toBe(true);
+  });
+});
+
+describe("agent 配置一致性检测", () => {
+  const want = { baseUrl: "https://gateway.example/v1", apiKey: "sk-test" };
+
+  it("比对:一致 / 不一致 / 缺失", () => {
+    expect(compareAgentConfig(want, { baseUrl: "https://gateway.example/v1/", apiKey: "sk-test" }).state).toBe("ok"); // 末尾斜杠归一化
+    expect(compareAgentConfig(want, { baseUrl: "https://gateway.example/v1", apiKey: "sk-other" }).state).toBe("stale");
+    expect(compareAgentConfig(want, { baseUrl: "https://old.example/v1", apiKey: "sk-test" }).state).toBe("stale");
+    expect(compareAgentConfig(want, { baseUrl: null, apiKey: null }).state).toBe("missing");
+    expect(compareAgentConfig({ baseUrl: "", apiKey: "" }, { baseUrl: null, apiKey: null }).state).toBe("missing");
+  });
+
+  it("claude 提取 settings.json env", () => {
+    const f = extractClaudeProvider(JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://g/v1/api/anthropic", ANTHROPIC_AUTH_TOKEN: "sk-test" } }));
+    expect(f).toEqual({ baseUrl: "https://g/v1/api/anthropic", apiKey: "sk-test" });
+    expect(extractClaudeProvider("bad").baseUrl).toBeNull();
+  });
+
+  it("codex 提取 [model_providers.<name>] 段", () => {
+    const cfg = [
+      'model = "deepseek-v4-flash"',
+      "",
+      "[model_providers.axon]",
+      'name = "axon"',
+      'base_url = "https://gateway.example/v1"',
+      'experimental_bearer_token = "sk-test"',
+      "requires_openai_auth = false",
+      "",
+      "[model_providers.other]",
+      'base_url = "https://x"',
+    ].join("\n");
+    expect(extractCodexProvider(cfg, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractCodexProvider(cfg, "nope").baseUrl).toBeNull();
+  });
+
+  it("reasonix 提取 [[providers]] 块 + .env 值", () => {
+    const cfg = [
+      "[[providers]]",
+      'name = "other"',
+      'base_url = "https://x"',
+      "",
+      "[[providers]]",
+      'name = "axon"',
+      'base_url = "https://gateway.example/v1"',
+      'api_key_env = "AXON_API_KEY"',
+    ].join("\n");
+    const env = 'AXON_API_KEY="sk-test"\n';
+    expect(extractReasonixProvider(cfg, env, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractReasonixProvider(cfg, "", "axon").apiKey).toBeNull();
+  });
+
+  it("dsh 提取 llm-pi-ai.providers.<name> + 凭据", () => {
+    const settings = [
+      "llm-pi-ai:",
+      "  providers:",
+      "    axon:",
+      "      displayName: Axon",
+      "      apiKeyEnv: AXON_API_KEY",
+      "      api: openai-completions",
+      "      baseURL: https://gateway.example/v1",
+      "      models:",
+      '        - id: "m1"',
+      "    other:",
+      "      baseURL: https://x",
+    ].join("\n");
+    const cred = "AXON_API_KEY: sk-test\n";
+    expect(extractDshProvider(settings, cred, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractDshProvider(settings, "", "other").baseUrl).toBe("https://x");
+  });
+
+  it("pi 提取 models.json providers", () => {
+    const models = JSON.stringify({ providers: { axon: { baseUrl: "https://gateway.example/v1", apiKey: "sk-test" } } });
+    expect(extractPiProvider(models, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractPiProvider(models, "nope").baseUrl).toBeNull();
+  });
+
+  it("omp 提取 models.yml providers", () => {
+    const models = [
+      "providers:",
+      "  axon:",
+      "    baseUrl: https://gateway.example",
+      "    api: openai-completions",
+      "    apiKey: sk-test",
+      "    authHeader: true",
+      "    models:",
+      '      - id: "m1"',
+      "  other:",
+      "    baseUrl: https://x",
+    ].join("\n");
+    expect(extractOmpProvider(models, "axon")).toEqual({ baseUrl: "https://gateway.example", apiKey: "sk-test" });
+    expect(extractOmpProvider(models, "nope").baseUrl).toBeNull();
+  });
+});

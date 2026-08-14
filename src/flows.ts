@@ -2,11 +2,22 @@
 
 import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
-import { buildResolvedModels, deriveKeyRef, type ResolvedModel } from "./core/models";
+import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchDshProvider, patchDshDefaultModel, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
+import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
+import {
+  compareAgentConfig,
+  extractClaudeProvider,
+  extractCodexProvider,
+  extractDshProvider,
+  extractOmpProvider,
+  extractPiProvider,
+  extractReasonixProvider,
+  type AgentConfigCheck,
+} from "./core/agent-config";
 
 export type FlowResult = {
   changes: string[];
@@ -29,6 +40,59 @@ export async function detectAgentCli(tool: string): Promise<string | null> {
   const info = AGENT_CLIS[tool];
   if (!info) return await bridge.detectCli(tool);
   return await bridge.detectCliIn(info.bin, info.dirs);
+}
+
+/** 检测某 agent 的配置文件里是否存在本 app 写入、且 baseUrl/Key 一致的 provider。 */
+export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Promise<AgentConfigCheck> {
+  const home = await bridge.homeDir();
+  const codexH = await bridge.codexHome();
+  const reasonixH = await bridge.reasonixHome();
+  const dshH = await bridge.dshHome();
+  const claudeH = await bridge.joinPath(home, ".claude");
+  const piH = await bridge.joinPath(home, ".pi", "agent");
+  const ompH = await bridge.joinPath(home, ".omp", "agent");
+  let wantUrl = cfg.baseUrl;
+  let found;
+  switch (tool) {
+    case "claude": {
+      const settingsPath = await bridge.joinPath(claudeH, "settings.json");
+      found = extractClaudeProvider(await bridge.readFileOrEmpty(settingsPath));
+      // Claude 写的是 Anthropic 端点(自动推导或手填),比对目标用该端点
+      wantUrl = cfg.anthropicBaseUrl || (cfg.baseUrl ? deriveAnthropicUrl(cfg.baseUrl) : "");
+      break;
+    }
+    case "codex": {
+      const configPath = await bridge.joinPath(codexH, "config.toml");
+      found = extractCodexProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
+      break;
+    }
+    case "reasonix": {
+      const configPath = await bridge.joinPath(reasonixH, "config.toml");
+      const envPath = await bridge.joinPath(reasonixH, ".env");
+      found = extractReasonixProvider(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(envPath), cfg.provider);
+      break;
+    }
+    case "dsh": {
+      const settingsPath = await bridge.joinPath(dshH, "settings.yaml");
+      const credPath = await bridge.joinPath(dshH, ".credentials.yaml");
+      found = extractDshProvider(await bridge.readFileOrEmpty(settingsPath), await bridge.readFileOrEmpty(credPath), cfg.provider);
+      break;
+    }
+    case "pi": {
+      const modelsPath = await bridge.joinPath(piH, "models.json");
+      found = extractPiProvider(await bridge.readFileOrEmpty(modelsPath), cfg.provider);
+      break;
+    }
+    case "omp": {
+      const modelsPath = await bridge.joinPath(ompH, "models.yml");
+      found = extractOmpProvider(await bridge.readFileOrEmpty(modelsPath), cfg.provider);
+      wantUrl = ompBaseUrl(cfg.baseUrl); // omp 配置按官方指南去 /v1
+      break;
+    }
+    default:
+      return { state: "missing", baseUrl: null, keyMatches: false };
+  }
+  return compareAgentConfig({ baseUrl: wantUrl, apiKey: cfg.apiKey }, found);
 }
 
 function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
@@ -381,6 +445,59 @@ export async function piStatus(cfg: bridge.AppConfig): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Oh My Pi (omp)
+// ---------------------------------------------------------------------------
+
+export async function configureOmp(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.homeDir();
+  const ompDir = await bridge.joinPath(home, ".omp", "agent");
+  const modelsPath = await bridge.joinPath(ompDir, "models.yml");
+  const configPath = await bridge.joinPath(ompDir, "config.yml");
+  const resolved = buildResolvedModels(modelIds);
+  const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
+
+  const p1 = patchOmpModelsYml(await bridge.readFileOrEmpty(modelsPath), {
+    providerName: cfg.provider,
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    models: resolved,
+  });
+  const written = await bridge.writeWithBackup(modelsPath, p1.text);
+
+  const p2 = patchOmpConfigYml(await bridge.readFileOrEmpty(configPath), cfg.provider, defaultModel);
+  const cfgWritten = await bridge.writeWithBackup(configPath, p2.text);
+
+  const deepseekCount = resolved.filter((m) => isDeepseekModel(m.id)).length;
+  const lines = [
+    `models.yml: ${written.path}`,
+    `  ${p1.changes.join(", ") || "无变化"}`,
+    `config.yml: ${cfgWritten.path}`,
+    `  ${p2.changes.join(", ") || "无变化"}`,
+  ];
+  if (deepseekCount > 0) lines.push(`DeepSeek 模型 ${deepseekCount} 个:已应用官方特配(thinking 等级 + 完整 compat 块)`);
+  lines.push(`使用: omp --model ${cfg.provider}/${defaultModel}`);
+  if (written.backup) lines.push(`备份: ${written.backup}`);
+  return { changes: [...p1.changes, ...p2.changes], lines };
+}
+
+export async function ompStatus(cfg: bridge.AppConfig): Promise<string[]> {
+  const home = await bridge.homeDir();
+  const ompDir = await bridge.joinPath(home, ".omp", "agent");
+  const modelsPath = await bridge.joinPath(ompDir, "models.yml");
+  const configPath = await bridge.joinPath(ompDir, "config.yml");
+  const s = parseOmpStatus(await bridge.readFileOrEmpty(modelsPath), await bridge.readFileOrEmpty(configPath), cfg.provider);
+  const cli = await detectAgentCli("omp");
+  return [
+    `omp 配置目录: ${ompDir}`,
+    `models.yml: ${s.modelsExists ? "存在" : "缺失"}`,
+    `provider ${cfg.provider}: ${s.providerConfigured ? `已配置(${s.providerModels} 个模型, baseUrl=${s.providerBaseUrl})` : "未配置"}`,
+    `config.yml: ${s.configExists ? "存在" : "缺失"}`,
+    `modelRoles.default: ${s.defaultRole ?? "(未设置)"}`,
+    `omp CLI: ${cli ?? "未检测到"}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // 备份还原(所有工具)
 // ---------------------------------------------------------------------------
 
@@ -412,6 +529,14 @@ export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> 
         { id: "pi-models", label: "Pi models.json", path: await bridge.joinPath(piH, "models.json") },
         { id: "pi-settings", label: "Pi settings.json", path: await bridge.joinPath(piH, "settings.json") },
       ];
+    case "omp":
+      {
+        const ompH = await bridge.joinPath(home, ".omp", "agent");
+        return [
+          { id: "omp-models", label: "omp models.yml", path: await bridge.joinPath(ompH, "models.yml") },
+          { id: "omp-config", label: "omp config.yml", path: await bridge.joinPath(ompH, "config.yml") },
+        ];
+      }
     default:
       return [];
   }

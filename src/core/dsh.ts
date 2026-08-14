@@ -1,7 +1,7 @@
 // DeepSeek Harness (dsh) 配置:官方 settings.yaml + .credentials.yaml。
 // 纯文本变换(缩进感知的 YAML 块补丁),不做文件 I/O。
 
-import { escapeRegExp, yamlQuote, unquoteYaml } from "./util";
+import { blockBodyEnd, escapeRegExp, findKeyInRegion, headerHasInlineContent, lineAfter, yamlQuote, unquoteYaml } from "./util";
 
 /** 写入 dsh 模型目录的单个模型条目。 */
 export type DshModelEntry = {
@@ -14,55 +14,6 @@ export type DshModelEntry = {
   reasoningEfforts?: Record<string, string | null>;
   input?: string[];
 };
-
-// ---------------------------------------------------------------------------
-// YAML 块定位
-// ---------------------------------------------------------------------------
-
-function findKeyInRegion(
-  text: string,
-  from: number,
-  to: number,
-  key: string,
-  exactIndent?: number,
-): { start: number; end: number; indent: number } | null {
-  const region = text.slice(from, to);
-  const re = new RegExp(`^( *)${escapeRegExp(key)}:(?:[ \\t]|$)`, "m");
-  const m = re.exec(region);
-  if (!m) return null;
-  if (exactIndent !== undefined && m[1].length !== exactIndent) return null;
-  const lineStart = from + m.index;
-  const lineEnd = text.indexOf("\n", lineStart);
-  const end = lineEnd === -1 ? text.length : lineEnd;
-  return { start: lineStart, end, indent: m[1].length };
-}
-
-function lineAfter(text: string, lineEnd: number): number {
-  return lineEnd < text.length && text[lineEnd] === "\n" ? lineEnd + 1 : text.length;
-}
-
-function blockBodyEnd(text: string, bodyStart: number, blockIndent: number, limit: number): number {
-  let pos = bodyStart;
-  while (pos < limit) {
-    const lineEnd = text.indexOf("\n", pos);
-    const end = lineEnd === -1 ? limit : lineEnd + 1;
-    const line = text.slice(pos, end);
-    const content = line.trimStart();
-    if (content.length > 0 && !content.startsWith("#")) {
-      const indent = line.length - line.trimStart().length;
-      if (indent <= blockIndent) return pos;
-    }
-    pos = end;
-  }
-  return limit;
-}
-
-function headerHasInlineContent(text: string, headerStart: number, headerEnd: number): boolean {
-  const line = text.slice(headerStart, headerEnd);
-  const colonIdx = line.indexOf(":");
-  const rest = line.slice(colonIdx + 1).trim();
-  return rest.length > 0 && !rest.startsWith("#");
-}
 
 // ---------------------------------------------------------------------------
 // settings.yaml 补丁
@@ -198,7 +149,8 @@ export function upsertDshCredentialYaml(text: string, key: string, value: string
 // 状态诊断
 // ---------------------------------------------------------------------------
 
-function locateProviderBlock(text: string, providerName: string): { bodyStart: number; bodyEnd: number } | null {
+/** 定位 settings.yaml 中 llm-pi-ai.providers.<name> 块体范围(供补丁与配置检测共用)。 */
+export function locateProviderBlock(text: string, providerName: string): { bodyStart: number; bodyEnd: number } | null {
   const llm = findKeyInRegion(text, 0, text.length, "llm-pi-ai", 0);
   if (!llm) return null;
   const llmBodyStart = lineAfter(text, llm.end);

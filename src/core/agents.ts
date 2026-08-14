@@ -53,6 +53,11 @@ export const AGENT_CLIS: Record<string, AgentCli> = {
     // curl 安装器(pi.dev/install.sh)与 npm/pnpm/bun 全局安装均落在 npm 全局目录
     dirs: [...COMMON_BINS],
   },
+  omp: {
+    bin: "omp",
+    // curl 安装器(omp.sh/install)→ ~/.local/bin;brew tap can1357/tap/omp;bun 全局 @oh-my-pi/pi-coding-agent
+    dirs: [...COMMON_BINS],
+  },
   reasonix: {
     bin: "reasonix",
     // npm i -g reasonix / brew install esengine/reasonix/reasonix

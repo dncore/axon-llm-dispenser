@@ -56,8 +56,8 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-r1": { contextWindow: 131072, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
   "deepseek-r1-0528": { contextWindow: 131072, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
   "deepseek-reasoner": { contextWindow: 131072, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
-  "deepseek-v4-pro": { name: "DeepSeek V4 Pro", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
-  "deepseek-v4-flash": { name: "DeepSeek V4 Flash", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
+  "deepseek-v4-pro": { name: "DeepSeek V4 Pro", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
+  "deepseek-v4-flash": { name: "DeepSeek V4 Flash", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
   "deepseek-v3.1-terminus": { contextWindow: 128000, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
 
   // ---- Qwen ----
@@ -262,6 +262,11 @@ function resolveModel(id: string): ResolvedModel {
 /** 把模型 id 列表解析为完整元数据(已知模型精确规格,未知模型按 id 正则推断)。 */
 export function buildResolvedModels(ids: string[]): ResolvedModel[] {
   return ids.map((id) => resolveModel(id)).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** 是否为 DeepSeek 系模型(pi/omp 走 DeepSeek 官方特配)。 */
+export function isDeepseekModel(id: string): boolean {
+  return /deepseek/i.test(id);
 }
 
 /** 由 provider 名派生凭据环境变量名(对齐 dsh 官方 deriveKeyRef 规则)。 */

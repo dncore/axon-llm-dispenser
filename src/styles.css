@@ -183,8 +183,9 @@ body {
 .row { display: flex; align-items: center; gap: 10px; }
 .hint { color: var(--muted); font-size: 12px; }
 
-/* 模型目录:标题行右侧放模型数+刷新按钮 */
-.card h2.models-title { display: flex; align-items: center; justify-content: space-between; }
+/* 模型目录/工具接入:标题行左右分布(右侧放计数+按钮或帮助图标) */
+.card h2.models-title,
+.card h2.tools-title { display: flex; align-items: center; justify-content: space-between; }
 .fetch-right { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 
 .btn {
@@ -215,18 +216,20 @@ body {
 .tool-name { font-weight: 500; }
 .tool-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
-/* 工具接入:agent 安装检测徽标(绿=已检测到,灰=未检测到,蓝脉冲=检测中) */
+/* 工具接入:agent 状态徽标(图标点亮/置灰;蓝脉冲=检测中;点击重检)
+   安装=包裹盒,配置=滑杆 */
 .tool-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.agent-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--border);
+.agent-state {
+  width: 14px;
+  height: 14px;
+  display: block;
   flex-shrink: 0;
+  cursor: pointer;
+  color: #cbd5e1; /* 置灰:未安装/未配置 */
 }
-.agent-dot.checking { background: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
-.agent-dot.installed { background: var(--ok); }
-.agent-dot.missing { background: #cbd5e1; }
+.agent-state.checking { color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.agent-state.installed, .agent-state.ok { color: var(--ok); }
+.agent-state.stale { color: #d97706; }
 @keyframes agent-pulse { 50% { opacity: 0.3; } }
 
 .output {
@@ -381,7 +384,8 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
   gap: 5px;
   font-family: ui-monospace, monospace;
 }
-.claude-tip {
+.claude-tip,
+.help-tip {
   position: relative;
   display: inline-flex;
   width: 14px;
@@ -405,12 +409,17 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 11px;
+  width: max-content; /* 按内容定宽,说明文字不折行 */
   white-space: nowrap;
-  max-width: 340px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   pointer-events: none;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+/* tooltip 内说明行:真实图标 + 文字 */
+.tip-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.tip-row .btn-icon { width: 12px; height: 12px; flex-shrink: 0; color: #93c5fd; }
+.tip-note { color: #94a3b8; padding: 2px 0; }
+
 .claude-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ok); font-weight: 600; white-space: nowrap; width: 52px; text-align: right; }
 
 /* 自定义下拉 */

@@ -111,12 +111,13 @@ function build(): void {
   ]);
 
   const toolsCard = h("section", { class: "card" }, [
-    h("h2", {}, ["工具接入"]),
+    h("h2", { class: "tools-title" }, ["工具接入", helpTipIcon()]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
       toolCard("codex", "Codex", ["配置", "状态", "还原"]),
       toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
       toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
+      toolCard("omp", "Oh My Pi", ["配置", "状态", "还原"]),
       toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
     ]),
   ]);
@@ -169,6 +170,10 @@ const ICONS: Record<string, string> = {
   key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/><path d="M7 16.5l2-2"/>',
   lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+  package:
+    '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="m7.5 4.3 9 5.2"/>',
+  sliders:
+    '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
   refresh:
     '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
   pen: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
@@ -187,6 +192,35 @@ function icon(name: string): SVGSVGElement {
   el.innerHTML = ICONS[name] ?? ICONS.config;
   el.classList.add("btn-icon");
   return el;
+}
+
+/** 状态徽标图标(安装/配置检测):颜色由 CSS 类控制(点亮/置灰/脉冲)。 */
+function stateIcon(name: string, id: string, cls: string): SVGSVGElement {
+  const el = icon(name);
+  el.id = id;
+  el.classList.add("agent-state", cls);
+  return el;
+}
+
+/** 工具接入卡片标题行右侧的「?」图标:悬停展示图标与按钮说明(用真实图标,不用文字描述形状)。 */
+function toolsHelpContent(): El {
+  const row = (iconName: string, desc: string): El =>
+    h("div", { class: "tip-row" }, [icon(iconName), h("span", {}, [desc])]);
+  return h("div", {}, [
+    row("package", "安装检测:绿=已检测到 CLI,灰=未检测到(PATH 与常见安装目录)"),
+    row("sliders", "配置一致性:绿=与当前网关 baseUrl/Key 一致,橙=不一致,灰=未配置"),
+    h("div", { class: "tip-note" }, ["两个状态图标均可点击重新检测"]),
+    row("play", "配置 = 生成/更新接入配置(写入官方配置文件,自动备份 .bak-*)"),
+    row("info", "状态 = 查看该工具的配置状态"),
+    row("restore", "还原 = 从备份恢复(可重命名/删除/编辑备份内容)"),
+  ]);
+}
+
+function helpTipIcon(): El {
+  const tip = h("span", { class: "help-tip" }, ["?"]);
+  tip.addEventListener("mouseenter", () => showTip(tip, toolsHelpContent()));
+  tip.addEventListener("mouseleave", hideTip);
+  return tip;
 }
 
 /** 自定义下拉选择器(替代原生 select,匹配应用视觉)。 */
@@ -258,33 +292,85 @@ function toolCard(id: string, name: string, actions: string[]): El {
   );
   return h("div", { class: "tool" }, [
     h("div", { class: "tool-left" }, [
-      h("span", { id: `agent-dot-${id}`, class: "agent-dot checking", title: "检测安装中…" }, []),
+      stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
+      stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
       h("span", { class: "tool-name" }, [name]),
     ]),
     h("div", { class: "tool-actions" }, buttons),
   ]);
 }
 
+/** 检测单个 agent CLI 并更新徽标。 */
+async function detectOne(tool: string): Promise<void> {
+  const info = AGENT_CLIS[tool];
+  if (!info) return;
+  const dot = document.getElementById(`agent-dot-${tool}`);
+  if (!dot) return;
+  dot.classList.add("checking");
+  dot.classList.remove("installed", "missing");
+  dot.title = "检测安装中…";
+  try {
+    const p = await flows.detectAgentCli(tool);
+    dot.classList.remove("checking");
+    if (p) {
+      dot.classList.add("installed");
+      dot.title = `已检测到 ${info.bin}: ${p}(点击重新检测)`;
+    } else {
+      dot.classList.add("missing");
+      dot.title = `未检测到 ${info.bin}(已检查 PATH 与常见安装目录;点击重新检测)${info.note ? `;${info.note}` : ""}`;
+    }
+  } catch {
+    dot.classList.remove("checking");
+    dot.classList.add("missing");
+    dot.title = "安装检测失败(点击重新检测)";
+  }
+}
+
 /** 启动后异步检测各 agent CLI 安装情况(不阻塞渲染,只更新工具卡片的安装徽标)。 */
 async function detectAgents(): Promise<void> {
-  for (const [tool, info] of Object.entries(AGENT_CLIS)) {
+  for (const tool of Object.keys(AGENT_CLIS)) {
     const dot = document.getElementById(`agent-dot-${tool}`);
-    if (!dot) continue;
-    try {
-      const p = await flows.detectAgentCli(tool);
-      dot.classList.remove("checking");
-      if (p) {
-        dot.classList.add("installed");
-        dot.title = `已检测到 ${info.bin}: ${p}`;
-      } else {
-        dot.classList.add("missing");
-        dot.title = `未检测到 ${info.bin}(已检查 PATH 与常见安装目录)${info.note ? `;${info.note}` : ""}`;
-      }
-    } catch {
-      dot.classList.remove("checking");
+    dot?.addEventListener("click", () => void detectOne(tool)); // 点击徽标强制重检
+    void detectOne(tool);
+  }
+}
+
+/** 检测单个 agent 的网关配置一致性并更新方形徽标(绿=一致,橙=不一致,灰=未配置)。 */
+async function detectAgentConfigOne(tool: string): Promise<void> {
+  const dot = document.getElementById(`agent-cfg-dot-${tool}`);
+  if (!dot) return;
+  readFields();
+  dot.classList.add("checking");
+  dot.classList.remove("ok", "stale", "missing");
+  dot.title = "检测配置中…";
+  try {
+    const r = await flows.detectAgentConfig(tool, config);
+    dot.classList.remove("checking");
+    if (r.state === "ok") {
+      dot.classList.add("ok");
+      dot.title = "已配置且一致:provider 的 baseUrl 与 Key 同当前网关配置(点击重新检测)";
+    } else if (r.state === "stale") {
+      dot.classList.add("stale");
+      dot.title = `检测到 provider 但配置不一致: baseUrl=${r.baseUrl ?? "(无)"},Key ${r.keyMatches ? "一致" : "不一致"}(点击重新检测)`;
+    } else {
       dot.classList.add("missing");
-      dot.title = "安装检测失败";
+      dot.title = config.baseUrl
+        ? "未检测到本 app 写入的 provider(点击重新检测)"
+        : "未保存网关配置,无法检测(点击重新检测)";
     }
+  } catch {
+    dot.classList.remove("checking");
+    dot.classList.add("missing");
+    dot.title = "配置检测失败(点击重新检测)";
+  }
+}
+
+/** 启动后异步检测各 agent 的配置一致性(方形徽标)。 */
+async function detectAgentConfigs(): Promise<void> {
+  for (const tool of Object.keys(AGENT_CLIS)) {
+    const dot = document.getElementById(`agent-cfg-dot-${tool}`);
+    dot?.addEventListener("click", () => void detectAgentConfigOne(tool)); // 点击徽标强制重检
+    void detectAgentConfigOne(tool);
   }
 }
 
@@ -343,7 +429,6 @@ async function fetchAndRenderModels(): Promise<void> {
     let shown = info;
     if (config.excludeDoubao) {
       shown = info.filter((m) => !flows.isDoubaoModel(m.id));
-      if (shown.length !== info.length) notify(`已过滤 ${info.length - shown.length} 个 Doubao 模型`, "info");
     }
     setModelRows(shown);
     s.textContent = "连接成功";
@@ -388,9 +473,7 @@ async function ensureModels(): Promise<string[] | null> {
     }
   }
   if (config.excludeDoubao) {
-    const before = ids.length;
     ids = flows.filterDoubao(ids, true);
-    if (ids.length !== before) notify(`已过滤 ${before - ids.length} 个 Doubao 模型`, "info");
   }
   if (ids.length === 0) {
     notify("过滤后模型列表为空,请取消「过滤 Doubao」或添加其它模型", "error");
@@ -401,10 +484,10 @@ async function ensureModels(): Promise<string[] | null> {
 
 let tipEl: El | null = null;
 
-/** JS tooltip:fixed 定位逃逸弹窗 overflow:hidden,自动贴边。 */
-function showTip(target: El, text: string): void {
+/** JS tooltip:fixed 定位逃逸弹窗 overflow:hidden,自动贴边。内容支持文本或 DOM 节点。 */
+function showTip(target: El, text: string | El): void {
   hideTip();
-  const el = h("div", { class: "tip-popup" }, [text]);
+  const el = h("div", { class: "tip-popup" }, [text instanceof Node ? text : document.createTextNode(text)]);
   document.body.append(el);
   const r = target.getBoundingClientRect();
   const er = el.getBoundingClientRect();
@@ -547,6 +630,7 @@ function openClaudeConfigModal(): void {
           subagent: selects.subagent.value(),
         });
         log(r.lines);
+        void detectAgentConfigOne("claude");
       });
     });
     modal.append(h("div", { class: "modal-footer" }, [cancel, ok]));
@@ -842,6 +926,7 @@ function bind(): void {
         if (!ids) return;
         const r = await flows.configureCodex(config, ids);
         log(r.lines);
+        void detectAgentConfigOne("codex");
       });
     }),
   );
@@ -863,6 +948,7 @@ function bind(): void {
         if (!ids) return;
         const r = await flows.configureReasonix(config, ids);
         log(r.lines);
+        void detectAgentConfigOne("reasonix");
       });
     }),
   );
@@ -903,6 +989,7 @@ function bind(): void {
         if (!ids) return;
         const r = await flows.configureDsh(config, ids);
         log(r.lines);
+        void detectAgentConfigOne("dsh");
       });
     }),
   );
@@ -935,6 +1022,7 @@ function bind(): void {
         if (!ids) return;
         const r = await flows.configurePi(config, ids);
         log(r.lines);
+        void detectAgentConfigOne("pi");
       });
     }),
   );
@@ -947,6 +1035,29 @@ function bind(): void {
   );
 
   $("btn-pi-还原").addEventListener("click", () => openRestoreModal("pi"));
+
+  $("btn-omp-配置").addEventListener("click", () =>
+    confirmDialog("将更新 omp 的接入配置:写入 models.yml / config.yml 中 provider/鉴权与模型相关字段,DeepSeek 模型应用官方特配(thinking 等级 + 完整 compat),保留其它设置;原文件自动备份(.bak-*),确认?", () => {
+      void run("omp 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configureOmp(config, ids);
+        log(r.lines);
+        void detectAgentConfigOne("omp");
+      });
+    }),
+  );
+
+  $("btn-omp-状态").addEventListener("click", () =>
+    run("omp 状态", async () => {
+      readFields();
+      log(await flows.ompStatus(config));
+    }),
+  );
+
+  $("btn-omp-还原").addEventListener("click", () => openRestoreModal("omp"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1111,8 @@ async function boot(): Promise<void> {
   if (config.baseUrl && config.apiKey) {
     void run("自动拉取模型", fetchAndRenderModels);
   }
+  // 启动后异步检测各 agent 的配置一致性(方形徽标)
+  void detectAgentConfigs();
 }
 
 void boot();
