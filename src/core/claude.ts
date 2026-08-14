@@ -7,6 +7,8 @@ export type ClaudeConfigInput = {
   apiKey: string;
   /** 默认模型(同时用于 ANTHROPIC_MODEL 与 DEFAULT_*_MODEL 映射)。 */
   model: string;
+  /** 模型真实上下文窗口;写入 CLAUDE_CODE_MAX_CONTEXT_TOKENS,避免 Claude Code 对未知模型按 200k 假设。 */
+  contextWindow?: number;
 };
 
 /** 从 OpenAI 兼容 base_url 推导 Anthropic 端点:/api/v1 → /api/anthropic。 */
@@ -41,7 +43,12 @@ export function patchClaudeSettings(text: string, input: ClaudeConfigInput): { t
   set("ANTHROPIC_DEFAULT_HAIKU_MODEL", input.model);
   set("ANTHROPIC_DEFAULT_SONNET_MODEL", input.model);
   set("ANTHROPIC_DEFAULT_OPUS_MODEL", input.model);
+  set("ANTHROPIC_DEFAULT_FABLE_MODEL", input.model);
   set("CLAUDE_CODE_SUBAGENT_MODEL", input.model);
+  // 未知模型时 Claude Code 默认按 200k 假设并告警;写入真实窗口即可消除。
+  if (input.contextWindow && input.contextWindow > 0) {
+    set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", String(input.contextWindow));
+  }
   doc.env = env;
 
   return { text: JSON.stringify(doc, null, 2) + "\n", changes };

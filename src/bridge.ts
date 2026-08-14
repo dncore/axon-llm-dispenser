@@ -13,6 +13,8 @@ export type AppConfig = {
   defaultModel: string;
   /** Anthropic 兼容端点(Claude 用);留空时自动从 baseUrl 推导。 */
   anthropicBaseUrl: string;
+  /** 全局过滤 Doubao 系模型(默认开启,生成配置不含 doubao)。 */
+  excludeDoubao: boolean;
 };
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -22,6 +24,7 @@ const DEFAULT_CONFIG: AppConfig = {
   apiKey: "",
   defaultModel: "",
   anthropicBaseUrl: "",
+  excludeDoubao: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +143,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
       apiKey: parsed.apiKey || "",
       defaultModel: parsed.defaultModel || "",
       anthropicBaseUrl: parsed.anthropicBaseUrl || "",
+      excludeDoubao: parsed.excludeDoubao ?? true,
     };
   } catch {
     return { ...DEFAULT_CONFIG };

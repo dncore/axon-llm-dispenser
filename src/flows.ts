@@ -12,6 +12,13 @@ export type FlowResult = {
   lines: string[];
 };
 
+/** 默认模型选择:配置的优先;否则优先网关内常见的 deepseek-v4-flash,再退回第一个。 */
+function pickDefaultModel(modelIds: string[], configured?: string): string {
+  if (configured) return configured;
+  if (modelIds.includes("deepseek-v4-flash")) return "deepseek-v4-flash";
+  return modelIds[0] ?? "";
+}
+
 export async function testConnection(baseUrl: string, apiKey: string): Promise<string[]> {
   return await bridge.fetchModels(baseUrl, apiKey);
 }
@@ -47,7 +54,7 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
     providerName: cfg.provider,
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
-    defaultModel: cfg.defaultModel || resolved[0]?.id,
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
     modelsJsonPath: modelsPath,
   });
 
@@ -106,7 +113,7 @@ export async function configureReasonix(cfg: bridge.AppConfig, modelIds: string[
     baseUrl: cfg.baseUrl,
     apiKeyEnv,
     modelIds: resolved.map((m) => m.id),
-    defaultModel: cfg.defaultModel || resolved[0]?.id,
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
     modelContexts,
   });
 
@@ -180,7 +187,7 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const apiKeyEnv = deriveKeyRef(cfg.provider);
   const resolved = buildResolvedModels(modelIds);
   const entries = toDshEntries(resolved);
-  const defaultModel = cfg.defaultModel || resolved[0]?.id || "";
+  const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
   const settingsText = await bridge.readFileOrEmpty(settingsPath);
   const p1 = patchDshProvider(settingsText, {
@@ -239,12 +246,15 @@ import { patchPiModelsJson, patchPiSettings, parsePiStatus } from "./core/pi";
 export async function configureClaude(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
   const home = await bridge.homeDir();
   const settingsPath = await bridge.joinPath(home, ".claude", "settings.json");
-  const model = cfg.defaultModel || modelIds[0] || "";
+  const model = pickDefaultModel(modelIds, cfg.defaultModel);
+  // 解析模型真实上下文窗口(已知/推断),写入 CLAUDE_CODE_MAX_CONTEXT_TOKENS 消除未知模型告警
+  const contextWindow = buildResolvedModels(model ? [model] : [])[0]?.contextWindow;
   const anthropicBaseUrl = cfg.anthropicBaseUrl || deriveAnthropicUrl(cfg.baseUrl);
   const patched = patchClaudeSettings(await bridge.readFileOrEmpty(settingsPath), {
     anthropicBaseUrl,
     apiKey: cfg.apiKey,
     model,
+    contextWindow,
   });
   const written = await bridge.writeWithBackup(settingsPath, patched.text);
   const lines = [
@@ -281,7 +291,7 @@ export async function configurePi(cfg: bridge.AppConfig, modelIds: string[]): Pr
   const modelsPath = await bridge.joinPath(piDir, "models.json");
   const settingsPath = await bridge.joinPath(piDir, "settings.json");
   const resolved = buildResolvedModels(modelIds);
-  const defaultModel = cfg.defaultModel || resolved[0]?.id || "";
+  const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
   const p1 = patchPiModelsJson(await bridge.readFileOrEmpty(modelsPath), {
     providerName: cfg.provider,
@@ -383,4 +393,18 @@ export async function restoreBackup(targetPath: string, backupPath: string): Pro
   const content = await bridge.readFile(backupPath);
   await bridge.writeFile(targetPath, content);
   return { path: targetPath, backup };
+}
+
+// ---------------------------------------------------------------------------
+// Doubao 过滤(全局开关,默认开启;参考插件 CODEX_EXCLUDED_MODELS 团队排除名单)
+// ---------------------------------------------------------------------------
+
+/** 是否为 Doubao 系模型。 */
+export function isDoubaoModel(id: string): boolean {
+  return /doubao/i.test(id);
+}
+
+/** 按开关过滤模型列表。 */
+export function filterDoubao(models: string[], exclude: boolean): string[] {
+  return exclude ? models.filter((id) => !isDoubaoModel(id)) : models;
 }

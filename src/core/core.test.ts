@@ -116,12 +116,15 @@ describe("claude", () => {
       anthropicBaseUrl: "http://host/api/anthropic",
       apiKey: "sk-x",
       model: "m1",
+      contextWindow: 256000,
     });
     const doc = JSON.parse(r.text) as { permissions: unknown; env: Record<string, string> };
     expect(doc.permissions).toEqual({ allow: ["Bash(ls *)"] });
     expect(doc.env.ANTHROPIC_BASE_URL).toBe("http://host/api/anthropic");
     expect(doc.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-x");
     expect(doc.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("m1");
+    expect(doc.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("m1");
+    expect(doc.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("256000");
   });
 
   it("状态解析", () => {
@@ -159,5 +162,21 @@ describe("pi", () => {
     expect(s.providerConfigured).toBe(true);
     expect(s.providerModels).toBe(1);
     expect(s.defaultProvider).toBe("axon");
+  });
+});
+
+import { isDoubaoModel, filterDoubao } from "../flows";
+
+describe("doubao 过滤", () => {
+  it("识别 doubao 系模型(大小写不敏感)", () => {
+    expect(isDoubaoModel("Doubao-Seed-2.0-Code")).toBe(true);
+    expect(isDoubaoModel("doubao-pro-256k")).toBe(true);
+    expect(isDoubaoModel("deepseek-v4-flash")).toBe(false);
+  });
+
+  it("开关开启时过滤,关闭时保留", () => {
+    const ids = ["deepseek-v4-flash", "Doubao-Seed-2.0-Code", "doubao-pro-256k", "qwen3.8-max"];
+    expect(filterDoubao(ids, true)).toEqual(["deepseek-v4-flash", "qwen3.8-max"]);
+    expect(filterDoubao(ids, false)).toEqual(ids);
   });
 });

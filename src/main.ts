@@ -32,6 +32,7 @@ let config: bridge.AppConfig = {
   apiKey: "",
   defaultModel: "",
   anthropicBaseUrl: "",
+  excludeDoubao: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,10 @@ function build(): void {
           h("button", { id: "btn-fetch", class: "btn" }, ["拉取模型(/models)"]),
           h("span", { id: "model-count", class: "hint" }, []),
         ]),
+        h("label", { class: "row toggle" }, [
+          h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
+          h("span", {}, ["过滤 Doubao 系模型(默认开启,拉取与生成配置均不含 doubao)"]),
+        ]),
         h("textarea", { id: "models", class: "models", placeholder: "每行一个模型 ID;可手动增删。点击「拉取模型」自动填充。" }, []),
       ]),
 
@@ -143,6 +148,7 @@ function readFields(): void {
   config.baseUrl = ($("input-base") as HTMLInputElement).value.trim();
   config.apiKey = ($("input-key") as HTMLInputElement).value.trim();
   config.anthropicBaseUrl = ($("input-anthropic") as HTMLInputElement).value.trim();
+  config.excludeDoubao = ($("chk-exclude-doubao") as HTMLInputElement).checked;
 }
 
 function readModelIds(): string[] {
@@ -169,9 +175,19 @@ function validateProvider(): boolean {
 }
 
 async function ensureModels(): Promise<string[] | null> {
-  const ids = readModelIds();
-  if (ids.length === 0) {
+  const raw = readModelIds();
+  if (raw.length === 0) {
     notify("模型列表为空,请先「拉取模型」或手动输入", "error");
+    return null;
+  }
+  let ids = raw;
+  if (config.excludeDoubao) {
+    const before = ids.length;
+    ids = flows.filterDoubao(ids, true);
+    if (ids.length !== before) notify(`已过滤 ${before - ids.length} 个 Doubao 模型`, "info");
+  }
+  if (ids.length === 0) {
+    notify("过滤后模型列表为空,请取消「过滤 Doubao」或添加其它模型", "error");
     return null;
   }
   return ids;
@@ -269,10 +285,15 @@ function bind(): void {
       const s = $("conn-status");
       s.textContent = "连接中…";
       const ids = await flows.testConnection(config.baseUrl, config.apiKey);
-      ($("models") as HTMLTextAreaElement).value = ids.join("\n");
-      $("model-count").textContent = `${ids.length} 个模型`;
+      let shown = ids;
+      if (config.excludeDoubao) {
+        shown = flows.filterDoubao(ids, true);
+        if (shown.length !== ids.length) notify(`已过滤 ${ids.length - shown.length} 个 Doubao 模型`, "info");
+      }
+      ($("models") as HTMLTextAreaElement).value = shown.join("\n");
+      $("model-count").textContent = `${shown.length} 个模型`;
       s.textContent = "连接成功";
-      notify(`连接成功,拉取到 ${ids.length} 个模型`, "info");
+      notify(`连接成功,拉取到 ${ids.length} 个模型(展示 ${shown.length})`, "info");
     }),
   );
 
@@ -426,6 +447,7 @@ async function boot(): Promise<void> {
     ($("input-base") as HTMLInputElement).value = config.baseUrl;
     ($("input-key") as HTMLInputElement).value = config.apiKey;
     ($("input-anthropic") as HTMLInputElement).value = config.anthropicBaseUrl;
+    ($("chk-exclude-doubao") as HTMLInputElement).checked = config.excludeDoubao;
   } catch {
     // 使用默认配置
   }
