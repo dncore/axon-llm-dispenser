@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "事件监听权限:升级/安装日志流(agent-update-log)等 Rust → 前端事件",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

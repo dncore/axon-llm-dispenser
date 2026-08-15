@@ -1,3 +1,4 @@
+mod agent_update;
 mod commands;
 
 pub fn run() {
@@ -20,6 +21,9 @@ pub fn run() {
             commands::fetch_models,
             commands::open_url,
             commands::app_version,
+            agent_update::agent_check,
+            agent_update::agent_update,
+            agent_update::agent_install,
                                                                                             ])
         .run(tauri::generate_context!())
         .expect("error while running axon-llm-dispenser");

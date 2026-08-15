@@ -339,7 +339,29 @@ button:focus:not(:focus-visible) { outline: none; }
 .agent-state.checking { color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
 .agent-state.installed, .agent-state.ok { color: var(--ok); }
 .agent-state.stale { color: #d97706; }
+.agent-state.update-available { color: #d97706; } /* 可升级:橙色↑ */
+.agent-state.updating { color: var(--accent); animation: agent-pulse 1s ease-in-out infinite; } /* 升级/安装中 */
 @keyframes agent-pulse { 50% { opacity: 0.3; } }
+
+/* 工具接入标题行右侧:批量升级按钮 + 帮助图标 */
+.tools-title-right { display: flex; align-items: center; gap: 8px; }
+.btn-upgrade-all {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: #d97706;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.btn-upgrade-all.show { display: flex; }
+.btn-upgrade-all.updating { animation: agent-pulse 1s ease-in-out infinite; }
+.btn-upgrade-all:hover { background: #fef3c7; }
+.btn-upgrade-all .btn-icon { width: 14px; height: 14px; }
 
 .output {
   flex: 1;

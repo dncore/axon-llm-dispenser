@@ -115,7 +115,13 @@ function build(): void {
   ]);
 
   const toolsCard = h("section", { class: "card card-lockable" }, [
-    h("h2", { class: "tools-title" }, ["工具接入", helpTipIcon()]),
+    h("h2", { class: "tools-title" }, [
+      "工具接入",
+      h("div", { class: "tools-title-right" }, [
+        h("button", { id: "btn-upgrade-all", class: "btn-upgrade-all", type: "button", title: "升级全部" }, [icon("arrow-up")]),
+        helpTipIcon(),
+      ]),
+    ]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
       toolCard("codex", "Codex", ["配置", "状态", "还原"]),
@@ -203,6 +209,7 @@ const ICONS: Record<string, string> = {
     '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
   "chevron-up": '<path d="m18 15-6-6-6 6"/>',
   "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+  "arrow-up": '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
   eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
   "eye-off":
     '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
@@ -240,8 +247,9 @@ function toolsHelpContent(): El {
     h("div", { class: "tip-row" }, [icon(iconName), h("span", {}, [desc])]);
   return h("div", {}, [
     row("package", "安装检测:绿=已检测到 CLI,灰=未检测到(PATH 与常见安装目录)"),
+    row("arrow-up", "升级:安装图标变橙色↑表示有新版本,点击按现有安装方式升级;未安装时点击可选官方方式安装"),
     row("sliders", "配置一致性:绿=与当前网关 baseUrl/Key 一致,橙=不一致,灰=未配置"),
-    h("div", { class: "tip-note" }, ["两个状态图标均可点击重新检测"]),
+    h("div", { class: "tip-note" }, ["状态图标均可点击重新检测;标题行 ↑ 按钮为批量升级"]),
     row("play", "配置 = 生成/更新接入配置(写入官方配置文件,自动备份 .bak-*)"),
     row("info", "状态 = 查看该工具的配置状态"),
     row("restore", "还原 = 从备份恢复(可重命名/删除/编辑备份内容)"),
@@ -362,9 +370,171 @@ async function detectOne(tool: string): Promise<void> {
 async function detectAgents(): Promise<void> {
   for (const tool of Object.keys(AGENT_CLIS)) {
     const dot = document.getElementById(`agent-dot-${tool}`);
-    dot?.addEventListener("click", () => void detectOne(tool)); // 点击徽标强制重检
+    dot?.addEventListener("click", () => void onInstallIconClick(tool)); // 点击:升级/安装/重检
     void detectOne(tool);
   }
+}
+
+// ---------------------------------------------------------------------------
+// agent 升级/安装:检查可升级状态、图标切换、安装方式选择、批量升级、流式日志
+// ---------------------------------------------------------------------------
+
+const updStatus = new Map<string, bridge.AgentUpdateStatus>();
+let updating = false;
+
+/** 检查各 agent 的可升级状态(复用安装检测定位二进制,再由 Rust 端比对版本)。 */
+async function checkAgentUpdates(): Promise<void> {
+  const entries: bridge.AgentUpdateEntry[] = [];
+  for (const tool of Object.keys(AGENT_CLIS)) {
+    entries.push({ name: tool, path: await flows.detectAgentCli(tool) });
+  }
+  let list: bridge.AgentUpdateStatus[];
+  try {
+    list = await bridge.agentCheck(entries);
+  } catch {
+    return; // 检查失败保持现状
+  }
+  updStatus.clear();
+  for (const s of list) updStatus.set(s.name, s);
+  syncUpgradeIcons();
+}
+
+/** 按可升级状态切换安装图标:可升级→橙色↑;未安装→灰包裹盒(点击安装);已安装最新→绿包裹盒。 */
+function syncUpgradeIcons(): void {
+  let updatable: string[] = [];
+  for (const [tool, s] of updStatus) {
+    const el = document.getElementById(`agent-dot-${tool}`);
+    if (!el) continue;
+    el.classList.remove("updating");
+    if (s.updateAvailable) {
+      updatable.push(tool);
+      el.innerHTML = ICONS["arrow-up"];
+      el.classList.add("update-available");
+      el.classList.remove("installed", "missing", "checking");
+      el.title = `${s.label} 有新版本:${s.version ?? "?"} → ${s.latest ?? "?"}(安装方式:${s.manager ?? "未知"};点击升级)`;
+    } else if (!s.installed) {
+      el.innerHTML = ICONS.package;
+      el.classList.add("missing");
+      el.classList.remove("installed", "checking", "update-available");
+      el.title = `未安装 ${AGENT_CLIS[tool].bin}(点击选择官方方式安装)`;
+    } else {
+      el.innerHTML = ICONS.package;
+      el.classList.add("installed");
+      el.classList.remove("missing", "checking", "update-available");
+      el.title = `已检测到 ${AGENT_CLIS[tool].bin}: v${s.version ?? "?"}(点击重新检测)`;
+    }
+  }
+  const batchBtn = document.getElementById("btn-upgrade-all");
+  if (batchBtn) {
+    batchBtn.classList.remove("updating");
+    batchBtn.classList.toggle("show", updatable.length > 0);
+    batchBtn.title = `升级全部(${updatable.length} 个可升级)`;
+  }
+}
+
+/** 升级/安装进行中:目标图标与批量按钮进入 loading 脉冲状态。 */
+function setUpdatingIcons(tools: string[], on: boolean): void {
+  for (const t of tools) {
+    document.getElementById(`agent-dot-${t}`)?.classList.toggle("updating", on);
+  }
+  const batchBtn = document.getElementById("btn-upgrade-all");
+  batchBtn?.classList.toggle("updating", on);
+  if (batchBtn && on) batchBtn.title = "升级中…";
+}
+
+/** 安装图标点击:可升级→确认升级;未安装→选择官方方式安装;否则重检。 */
+async function onInstallIconClick(tool: string): Promise<void> {
+  const s = updStatus.get(tool);
+  if (s?.updateAvailable) {
+    confirmDialog(`升级 ${s.label}?当前 ${s.version ?? "?"} → 最新 ${s.latest ?? "?"}(按现有安装方式 ${s.manager ?? "未知"}),过程日志实时显示在底部面板。`, () => {
+      void runUpgrade([tool]);
+    });
+    return;
+  }
+  if (s && !s.installed) {
+    openInstallModal(tool, s.installMethods);
+    return;
+  }
+  await detectOne(tool);
+  await checkAgentUpdates();
+  const after = updStatus.get(tool);
+  if (after?.installed) {
+    notify(`${after.label} 已是最新 (v${after.version ?? "?"},最新 ${after.latest ?? "?"})`, "info");
+  }
+}
+
+/** 未安装时弹安装方式选择(多种方式)或直接确认(单一方式)。 */
+function openInstallModal(tool: string, methods: bridge.InstallMethod[]): void {
+  const bin = AGENT_CLIS[tool].bin;
+  if (methods.length === 1) {
+    const m = methods[0];
+    confirmDialog(`安装 ${bin}?将执行官方命令:${m.command}(过程日志实时显示在底部面板)`, () => {
+      void runInstall(tool, m.id);
+    });
+    return;
+  }
+  clearOverlays();
+  const overlay = h("div", { class: "modal-overlay" }, []);
+  const modal = h("div", { class: "modal modal-sm" }, [
+    h("h3", {}, [`安装 ${bin}`]),
+    h("div", { class: "modal-sub" }, ["选择官方安装方式(执行过程显示在底部日志面板)"]),
+  ]);
+  const list = h("div", { class: "modal-list" }, []);
+  for (const m of methods) {
+    const row = h("button", { class: "modal-row", type: "button" }, [
+      h("span", { class: "modal-label" }, [m.label]),
+      h("span", { class: "modal-name" }, [m.command]),
+    ]);
+    row.addEventListener("click", () => {
+      overlay.remove();
+      void runInstall(tool, m.id);
+    });
+    list.append(row);
+  }
+  modal.append(list);
+  const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
+  cancel.addEventListener("click", () => overlay.remove());
+  modal.append(h("div", { class: "modal-footer" }, [cancel]));
+  overlay.append(modal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.append(overlay);
+}
+
+/** 批量/单个升级:顺序执行,日志事件实时写入日志面板,完成后重检。
+ * 升级行为不改变日志面板高度(展开/收起由用户手动控制)。 */
+async function runUpgrade(tools: string[]): Promise<void> {
+  if (updating) return;
+  updating = true;
+  setUpdatingIcons(tools, true);
+  const entries: bridge.AgentUpdateEntry[] = tools.map((t) => ({ name: t, path: updStatus.get(t)?.path ?? null }));
+  try {
+    await bridge.agentUpdate(entries);
+    notify("升级任务完成,详见底部日志", "info");
+  } catch (e) {
+    notify(`升级失败: ${e}`, "error");
+  }
+  updating = false;
+  setUpdatingIcons(tools, false);
+  await checkAgentUpdates();
+}
+
+/** 按官方方式安装:日志实时写入,完成后重检安装与升级状态。 */
+async function runInstall(tool: string, methodId: string): Promise<void> {
+  if (updating) return;
+  updating = true;
+  setUpdatingIcons([tool], true);
+  try {
+    await bridge.agentInstall(tool, methodId);
+    notify("安装完成,正在重新检测…", "info");
+  } catch (e) {
+    notify(`安装失败: ${e}`, "error");
+  }
+  updating = false;
+  setUpdatingIcons([tool], false);
+  await detectOne(tool);
+  await checkAgentUpdates();
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +707,7 @@ async function fetchAndRenderModels(): Promise<void> {
       shown = info.filter((m) => !flows.isDoubaoModel(m.id));
     }
     setModelRows(shown);
+    config.models = shown.map((m) => ({ id: m.id, ownedBy: m.ownedBy })); // 持久化,避免刷新/升级后模型项丢失
     setConnStatus("ok", `连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`);
     notify(`连接成功,拉取到 ${info.length} 个模型(展示 ${shown.length})`, "info");
     gatewayConnected = true;
@@ -995,6 +1166,15 @@ function initFooterMin(): void {
 }
 
 function bind(): void {
+  // 批量升级:升级全部可升级的 agent(各按现有安装方式)
+  $("btn-upgrade-all").addEventListener("click", () => {
+    const names = [...updStatus.entries()].filter(([, s]) => s.updateAvailable).map(([n]) => n);
+    if (names.length === 0) return;
+    confirmDialog(`将升级 ${names.length} 个 Agent(${names.join("、")}),按各自现有安装方式执行,过程日志实时显示在底部面板。确认?`, () => {
+      void runUpgrade(names);
+    });
+  });
+
   // 新手引导条关闭按钮(本次会话内隐藏)
   $("guide-close").addEventListener("click", () => {
     guideDismissed = true;
@@ -1243,8 +1423,12 @@ async function boot(): Promise<void> {
   build();
   bind();
   syncCardLock(); // 初始锁定模型列表/工具接入(避免加载配置前可交互)
+  // 升级/安装日志流:逐行写入底部日志面板
+  void bridge.onAgentUpdateLog((line) => log([line], "info"));
   // 启动后异步检测各 agent CLI 安装情况(徽标)
   void detectAgents();
+  // 启动后异步检查各 agent 可升级状态(橙色↑图标)
+  void checkAgentUpdates();
   // 版本号跟随应用版本(发版时由 CI 写入 tauri.conf.json,显示即 tag 版本)
   try {
     const vEl = document.getElementById("app-version");
@@ -1258,9 +1442,16 @@ async function boot(): Promise<void> {
   } catch {
     // 使用默认配置
   }
+  // 上次保存的模型列表先恢复(升级/刷新后不丢),随后再自动拉取刷新
+  if (config.models && config.models.length > 0) {
+    setModelRows(config.models);
+  }
   // 首次打开:有上次保存的 Base URL 与 API Key 时自动拉取模型列表
   if (config.baseUrl && config.apiKey) {
-    void run("自动拉取模型", fetchAndRenderModels);
+    void run("自动拉取模型", async () => {
+      await fetchAndRenderModels();
+      await bridge.saveAppConfig(config).catch(() => {}); // 持久化最新模型列表
+    });
   }
   // 启动后异步检测各 agent 的配置一致性(方形徽标)
   void detectAgentConfigs();

@@ -3,6 +3,7 @@
 // 避免 ACL 权限配置问题。
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { timestamp } from "./core/util";
 
 export type AppConfig = {
@@ -15,6 +16,8 @@ export type AppConfig = {
   anthropicBaseUrl: string;
   /** 全局过滤 Doubao 系模型(默认开启,生成配置不含 doubao)。 */
   excludeDoubao: boolean;
+  /** 上次拉取的模型列表(持久化,避免刷新/升级后模型项丢失)。 */
+  models?: { id: string; ownedBy?: string }[];
 };
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -25,6 +28,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultModel: "",
   anthropicBaseUrl: "",
   excludeDoubao: true,
+  models: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,49 @@ export function detectCli(name: string): Promise<string | null> {
 /** 检测 CLI:先 PATH,再候选目录(支持 ~ 前缀与 glob 通配)。 */
 export function detectCliIn(name: string, dirs: string[]): Promise<string | null> {
   return invoke<string | null>("detect_cli_in", { name, dirs });
+}
+
+// ---------------------------------------------------------------------------
+// agent 升级/安装(agent_update 模块)
+// ---------------------------------------------------------------------------
+
+export type AgentUpdateEntry = { name: string; path: string | null };
+export type InstallMethod = { id: string; label: string; command: string };
+
+export type AgentUpdateStatus = {
+  name: string;
+  label: string;
+  installed: boolean;
+  path: string | null;
+  manager: string | null;
+  version: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  installMethods: InstallMethod[];
+};
+
+/** 检查各 agent 版本与可升级状态(前端传入已检测到的二进制路径)。 */
+export function agentCheck(entries: AgentUpdateEntry[]): Promise<AgentUpdateStatus[]> {
+  return invoke<AgentUpdateStatus[]>("agent_check", { entries });
+}
+
+/** 逐个升级(按各 agent 现有安装方式),日志经 agent-update-log 事件实时推送。 */
+export function agentUpdate(entries: AgentUpdateEntry[]): Promise<unknown> {
+  return invoke("agent_update", { entries });
+}
+
+/** 按官方安装方式安装 agent。 */
+export function agentInstall(name: string, methodId: string): Promise<void> {
+  return invoke("agent_install", { name, methodId });
+}
+
+/** 订阅升级/安装日志流;返回取消订阅函数(浏览器环境无事件时为空实现)。 */
+export async function onAgentUpdateLog(cb: (line: string) => void): Promise<() => void> {
+  try {
+    return await listen<string>("agent-update-log", (e) => cb(e.payload));
+  } catch {
+    return () => {};
+  }
 }
 
 export type ModelInfo = { id: string; ownedBy?: string };
@@ -163,6 +210,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
       defaultModel: parsed.defaultModel || "",
       anthropicBaseUrl: parsed.anthropicBaseUrl || "",
       excludeDoubao: parsed.excludeDoubao ?? true,
+      models: Array.isArray(parsed.models) ? parsed.models : [],
     };
   } catch {
     return { ...DEFAULT_CONFIG };
