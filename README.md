@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="app-icon.png" width="112" height="112" alt="axon-llm-dispenser">
+  <img src="app-icon.png" width="112" height="112" alt="Axon LLM dispenser">
 </p>
 
-<h1 align="center">axon-llm-dispenser</h1>
+<h1 align="center">Axon LLM dispenser</h1>
 
 <p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix 等,持续扩展)</p>
 

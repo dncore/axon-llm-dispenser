@@ -444,6 +444,10 @@ function setUpdatingIcons(tools: string[], on: boolean): void {
 
 /** 安装图标点击:可升级→确认升级;未安装→选择官方方式安装;否则重检。 */
 async function onInstallIconClick(tool: string): Promise<void> {
+  if (updating) {
+    notify("升级/安装进行中,请稍候", "info");
+    return;
+  }
   const s = updStatus.get(tool);
   if (s?.updateAvailable) {
     confirmDialog(`升级 ${s.label}?当前 ${s.version ?? "?"} → 最新 ${s.latest ?? "?"}(按现有安装方式 ${s.manager ?? "未知"}),过程日志实时显示在底部面板。`, () => {
