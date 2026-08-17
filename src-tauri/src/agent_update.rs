@@ -23,8 +23,20 @@ static NPM_LOCK: Mutex<()> = Mutex::new(());
 struct InstallMethodDef {
     id: &'static str,
     label: &'static str,
-    /// unix shell 命令;Windows 下仅纯 npm/bun 类命令可执行(curl|sh 不可用)。
+    /// unix shell 命令(sh -c 执行)。
     command: &'static str,
+    /// Windows 变体(powershell -Command 执行);None 表示该方式在 Windows 不可用。
+    windows: Option<&'static str>,
+}
+
+impl InstallMethodDef {
+    const fn m(id: &'static str, label: &'static str, command: &'static str, windows: Option<&'static str>) -> Self {
+        InstallMethodDef { id, label, command, windows }
+    }
+    /// 纯命令行管理器(npm/bun):Windows 可直接执行,无需变体。
+    const fn manager(id: &'static str, label: &'static str, command: &'static str) -> Self {
+        InstallMethodDef { id, label, command, windows: None }
+    }
 }
 
 struct AgentDef {
@@ -44,9 +56,9 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("@anthropic-ai/claude-code"),
         install_methods: &[
-            InstallMethodDef { id: "curl", label: "官方脚本 (curl)", command: "curl -fsSL https://claude.ai/install.sh | bash" },
-            InstallMethodDef { id: "npm", label: "npm 全局", command: "npm install -g @anthropic-ai/claude-code" },
-            InstallMethodDef { id: "brew", label: "Homebrew Cask", command: "brew install --cask claude-code" },
+            InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://claude.ai/install.sh | bash", Some("irm https://claude.ai/install.ps1 | iex")),
+            InstallMethodDef::manager("npm", "npm 全局", "npm install -g @anthropic-ai/claude-code"),
+            InstallMethodDef::m("brew", "Homebrew Cask", "brew install --cask claude-code", None),
         ],
     },
     AgentDef {
@@ -56,9 +68,9 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("@openai/codex"),
         install_methods: &[
-            InstallMethodDef { id: "npm", label: "npm 全局", command: "npm install -g @openai/codex" },
-            InstallMethodDef { id: "brew", label: "Homebrew Cask", command: "brew install --cask codex" },
-            InstallMethodDef { id: "curl", label: "官方脚本 (curl)", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
+            InstallMethodDef::manager("npm", "npm 全局", "npm install -g @openai/codex"),
+            InstallMethodDef::m("brew", "Homebrew Cask", "brew install --cask codex", None),
+            InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://chatgpt.com/codex/install.sh | sh", Some("irm https://chatgpt.com/codex/install.ps1 | iex")),
         ],
     },
     AgentDef {
@@ -68,7 +80,7 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("@deepseek-ai/dsh"),
         install_methods: &[
-            InstallMethodDef { id: "npm", label: "npm 全局", command: "npm install -g @deepseek-ai/dsh" },
+            InstallMethodDef::manager("npm", "npm 全局", "npm install -g @deepseek-ai/dsh"),
         ],
     },
     AgentDef {
@@ -78,8 +90,8 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("@earendil-works/pi-coding-agent"),
         install_methods: &[
-            InstallMethodDef { id: "npm", label: "npm 全局", command: "npm install -g @earendil-works/pi-coding-agent" },
-            InstallMethodDef { id: "curl", label: "官方脚本 (curl)", command: "curl -fsSL https://pi.dev/install.sh | sh" },
+            InstallMethodDef::manager("npm", "npm 全局", "npm install -g @earendil-works/pi-coding-agent"),
+            InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://pi.dev/install.sh | sh", Some("irm https://pi.dev/install.ps1 | iex")),
         ],
     },
     AgentDef {
@@ -89,9 +101,9 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("@oh-my-pi/pi-coding-agent"),
         install_methods: &[
-            InstallMethodDef { id: "bun", label: "bun 全局 (官方推荐)", command: "bun add -g @oh-my-pi/pi-coding-agent" },
-            InstallMethodDef { id: "curl", label: "官方脚本 (curl)", command: "curl -fsSL https://omp.sh/install | sh" },
-            InstallMethodDef { id: "brew", label: "Homebrew Tap", command: "brew install can1357/tap/omp" },
+            InstallMethodDef::manager("bun", "bun 全局 (官方推荐)", "bun add -g @oh-my-pi/pi-coding-agent"),
+            InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://omp.sh/install | sh", Some("irm https://omp.sh/install.ps1 | iex")),
+            InstallMethodDef::m("brew", "Homebrew Tap", "brew install can1357/tap/omp", None),
         ],
     },
     AgentDef {
@@ -101,8 +113,8 @@ const AGENTS: &[AgentDef] = &[
         version_args: &["--version"],
         npm_package: Some("reasonix"),
         install_methods: &[
-            InstallMethodDef { id: "npm", label: "npm 全局", command: "npm install -g reasonix" },
-            InstallMethodDef { id: "brew", label: "Homebrew Tap", command: "brew install esengine/reasonix/reasonix" },
+            InstallMethodDef::manager("npm", "npm 全局", "npm install -g reasonix"),
+            InstallMethodDef::m("brew", "Homebrew Tap", "brew install esengine/reasonix/reasonix", None),
         ],
     },
 ];
@@ -334,12 +346,12 @@ fn quote_cmd_line(args: &[String]) -> String {
         .join(" ")
 }
 
-/// 执行 shell 字符串(unix: sh -c;windows: cmd /C,curl|sh 类命令不可用会失败并报错)。
+/// 执行安装脚本(unix: sh -c;windows: powershell -NoProfile -Command)。
 fn build_shell_command(script: &str) -> Command {
     #[cfg(windows)]
     {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(script);
+        let mut c = Command::new("powershell");
+        c.arg("-NoProfile").arg("-Command").arg(script);
         c
     }
     #[cfg(not(windows))]
@@ -347,6 +359,27 @@ fn build_shell_command(script: &str) -> Command {
         let mut c = Command::new("sh");
         c.arg("-c").arg(script);
         c
+    }
+}
+
+/// 该安装方式在当前平台是否可用。
+/// Windows 下:有 PowerShell 变体、或纯 npm/bun 命令行(brew、curl|sh 不可用)。
+fn method_available_on(m: &InstallMethodDef, is_windows: bool) -> bool {
+    if !is_windows {
+        return true;
+    }
+    m.windows.is_some() || m.command.starts_with("npm ") || m.command.starts_with("bun ")
+}
+
+/// 该安装方式在当前平台要执行的命令(Windows 用 PowerShell 变体)。
+fn method_script(m: &InstallMethodDef) -> &str {
+    #[cfg(windows)]
+    {
+        m.windows.unwrap_or(m.command)
+    }
+    #[cfg(not(windows))]
+    {
+        m.command
     }
 }
 
@@ -507,7 +540,8 @@ fn compare_versions(a: &str, b: &str) -> i32 {
 fn methods_out(def: &'static AgentDef) -> Vec<InstallMethodOut> {
     def.install_methods
         .iter()
-        .map(|m| InstallMethodOut { id: m.id.to_string(), label: m.label.to_string(), command: m.command.to_string() })
+        .filter(|m| method_available_on(m, cfg!(windows)))
+        .map(|m| InstallMethodOut { id: m.id.to_string(), label: m.label.to_string(), command: method_script(m).to_string() })
         .collect()
 }
 
@@ -911,10 +945,14 @@ pub async fn agent_install(app: AppHandle, name: String, method_id: String) -> R
         let Some(method) = def.install_methods.iter().find(|m| m.id == method_id) else {
             return Err(format!("未知安装方式: {}", method_id));
         };
+        if !method_available_on(method, cfg!(windows)) {
+            return Err(format!("安装方式 {} 在当前平台不可用", method.label));
+        }
+        let script = method_script(method);
         emit_log(&app, format!("── 安装 {} ({}) ──", def.label, method.label));
-        emit_log(&app, format!("$ {}", method.command));
+        emit_log(&app, format!("$ {}", script));
         let _npm_guard = NPM_LOCK.lock().ok(); // 安装命令多为 npm 家族,串行防锁竞争
-        match run_shell_streaming(&app, method.command, Duration::from_secs(600)) {
+        match run_shell_streaming(&app, script, Duration::from_secs(600)) {
             Ok(0) => {
                 emit_log(&app, format!("✔ {} 安装完成", def.label));
                 Ok(())
@@ -1064,6 +1102,29 @@ mod tests {
         for a in AGENTS {
             assert!(!a.install_methods.is_empty(), "{} 缺安装方式", a.name);
             assert!(a.npm_package.is_some(), "{} 缺 npm 包(用于 latest 检查)", a.name);
+        }
+    }
+
+    #[test]
+    fn windows_filters_out_brew_and_uses_powershell_variants() {
+        // Windows 下:brew 不可用;curl 脚本换 PowerShell 变体;npm/bun 保留
+        for a in AGENTS {
+            let methods: Vec<_> = a.install_methods.iter().filter(|m| method_available_on(m, true)).collect();
+            assert!(!methods.is_empty(), "{} 在 Windows 无可用安装方式", a.name);
+            for m in methods {
+                assert!(!m.command.starts_with("brew "), "{}: brew 不应出现在 Windows", a.name);
+                if m.command.contains("| sh") || m.command.contains("| bash") {
+                    assert!(m.windows.is_some(), "{}: curl|sh 方式缺 Windows 变体", a.name);
+                }
+            }
+        }
+        // claude 的 curl 方式在 Windows 走 PowerShell 变体
+        let claude = &AGENTS[0];
+        let curl = claude.install_methods.iter().find(|m| m.id == "curl").unwrap();
+        assert_eq!(curl.windows, Some("irm https://claude.ai/install.ps1 | iex"));
+        // unix 下全部可用
+        for a in AGENTS {
+            assert_eq!(a.install_methods.iter().filter(|m| method_available_on(m, false)).count(), a.install_methods.len());
         }
     }
 }
