@@ -100,15 +100,28 @@ function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
     const entry: DshModelEntry = { id: m.id, contextWindow: m.contextWindow, maxTokens: m.maxTokens, reasoning: m.reasoning };
     if (m.name && m.name !== m.id) entry.name = m.name;
     if (m.thinkingLevelMap) {
-      const efforts: Record<string, string | null> = {};
-      for (const [level, wire] of Object.entries(m.thinkingLevelMap)) {
-        if (level !== "off" && typeof wire === "string" && wire.length > 0) efforts[level] = wire;
+      let efforts: Record<string, string | null> = {};
+      if (m.reasoning && isDeepseekModel(m.id)) {
+        // dsh(pi-ai) 的 DeepSeek 权威 reasoningEfforts:最高档用 max(非 xhigh),
+        // flash 额外支持 low。与 pi 的 xhigh 体系不同,需单独映射,否则
+        // dsh 默认请求 max 档时映射为 null,网关返回 400 INVALID_REQUEST。
+        efforts = dshDeepseekEfforts(m.id);
+      } else {
+        for (const [level, wire] of Object.entries(m.thinkingLevelMap)) {
+          if (level !== "off" && typeof wire === "string" && wire.length > 0) efforts[level] = wire;
+        }
       }
       if (Object.keys(efforts).length > 0) entry.reasoningEfforts = efforts;
     }
     if (m.input?.includes("image")) entry.input = m.input;
     return entry;
   });
+}
+
+/** dsh(pi-ai) 内置目录的 DeepSeek 权威 reasoningEfforts(参考 @earendil-works/pi-ai deepseek 目录)。 */
+export function dshDeepseekEfforts(id: string): Record<string, string> {
+  if (id === "deepseek-v4-flash") return { low: "low", high: "high", max: "max" };
+  return { high: "high", max: "max" };
 }
 
 // ---------------------------------------------------------------------------

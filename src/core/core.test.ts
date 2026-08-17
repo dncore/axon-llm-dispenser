@@ -191,7 +191,17 @@ describe("pi", () => {
   });
 });
 
-import { isDoubaoModel, filterDoubao } from "../flows";
+import { isDoubaoModel, filterDoubao, dshDeepseekEfforts } from "../flows";
+
+describe("dsh DeepSeek reasoningEfforts 映射", () => {
+  it("对齐 pi-ai 内置目录:max 档(非 xhigh),flash 额外 low", () => {
+    // dsh(pi-ai)权威:deepseek-v4-pro = high/max;v4-flash = low/high/max
+    expect(dshDeepseekEfforts("deepseek-v4-pro")).toEqual({ high: "high", max: "max" });
+    expect(dshDeepseekEfforts("deepseek-v4-flash")).toEqual({ low: "low", high: "high", max: "max" });
+    // 不含 xhigh:那是 pi 的体系,dsh 会把 max 档映射成 null → 400
+    expect(JSON.stringify(dshDeepseekEfforts("deepseek-v4-pro"))).not.toContain("xhigh");
+  });
+});
 
 describe("doubao 过滤", () => {
   it("识别 doubao 系模型(大小写不敏感)", () => {
