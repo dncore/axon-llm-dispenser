@@ -311,6 +311,43 @@ fn classify(real: &str) -> (Manager, Option<String>, Option<String>, bool) {
 // 子进程辅助
 // ---------------------------------------------------------------------------
 
+/// 安装/升级子进程统一注入非交互环境:绝大多数工具识别后跳过交互提示。
+/// 再配合 stdin 关闭(读到 EOF 立即结束),保证不会因等待输入而挂起。
+fn noninteractive_env() -> Vec<(String, String)> {
+    [
+        ("CI", "1"),
+        ("NONINTERACTIVE", "1"),
+        ("HOMEBREW_NO_AUTO_UPDATE", "1"),
+        ("HOMEBREW_NO_ENV_HINTS", "1"),
+        ("HOMEBREW_NO_INSTALL_UPGRADE", "1"),
+        ("npm_config_yes", "true"),
+        ("npm_config_fund", "false"),
+        ("npm_config_audit", "false"),
+        ("CODEX_NON_INTERACTIVE", "1"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+fn apply_noninteractive(cmd: &mut Command) {
+    for (k, v) in noninteractive_env() {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null()); // 交互提示读到 EOF 立即结束,绝不挂起
+}
+
+/// 清洗一行输出:先按 `\r`/`\n` 切分(进度条刷新帧),再逐段去 ANSI 转义序列。
+fn clean_output_line(raw: &str) -> Vec<String> {
+    raw.split(|c| c == '\r' || c == '\n')
+        .map(|seg| {
+            let stripped = strip_ansi_escapes::strip(seg.as_bytes());
+            String::from_utf8_lossy(&stripped).trim_end().to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// 把命令行转成 Command:Windows 下 .cmd 工具(npm/pnpm/bun 等)经 cmd /C 执行。
 fn build_command(cmd: &[String]) -> Command {
     let mut c;
@@ -383,9 +420,11 @@ fn method_script(m: &InstallMethodDef) -> &str {
     }
 }
 
-/// 运行命令并捕获输出(超时返回 timeout 标记)。
+/// 运行命令并捕获输出(超时返回 timeout 标记;非交互)。
 fn run_capture(cmd: &[String], timeout: Duration) -> Result<String, String> {
-    let mut child = build_command(cmd)
+    let mut c = build_command(cmd);
+    apply_noninteractive(&mut c);
+    let mut child = c
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -416,9 +455,11 @@ fn run_capture(cmd: &[String], timeout: Duration) -> Result<String, String> {
     }
 }
 
-/// 运行命令,stdout/stderr 逐行推给前端事件;返回退出码。
+/// 运行命令,stdout/stderr 逐行推给前端事件(非交互、清洗 ANSI/\\r);返回退出码。
 fn run_streaming(app: &AppHandle, cmd: &[String], timeout: Duration) -> Result<i32, String> {
-    let mut child = build_command(cmd)
+    let mut c = build_command(cmd);
+    apply_noninteractive(&mut c);
+    let mut child = c
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -429,7 +470,9 @@ fn run_streaming(app: &AppHandle, cmd: &[String], timeout: Duration) -> Result<i
     let t1 = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             if let Ok(l) = line {
-                a1.emit("agent-update-log", l).ok();
+                for part in clean_output_line(&l) {
+                    a1.emit("agent-update-log", part).ok();
+                }
             }
         }
     });
@@ -437,8 +480,8 @@ fn run_streaming(app: &AppHandle, cmd: &[String], timeout: Duration) -> Result<i
     let t2 = std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
             if let Ok(l) = line {
-                if !l.trim().is_empty() {
-                    a2.emit("agent-update-log", l).ok();
+                for part in clean_output_line(&l) {
+                    a2.emit("agent-update-log", part).ok();
                 }
             }
         }
@@ -965,9 +1008,11 @@ pub async fn agent_install(app: AppHandle, name: String, method_id: String) -> R
     .map_err(|e| format!("安装任务失败: {}", e))?
 }
 
-/// 执行 shell 字符串命令(用于安装脚本)。
+/// 执行 shell 字符串命令(用于安装脚本;非交互、清洗 ANSI/\\r)。
 fn run_shell_streaming(app: &AppHandle, script: &str, timeout: Duration) -> Result<i32, String> {
-    let mut child = build_shell_command(script)
+    let mut c = build_shell_command(script);
+    apply_noninteractive(&mut c);
+    let mut child = c
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -978,7 +1023,9 @@ fn run_shell_streaming(app: &AppHandle, script: &str, timeout: Duration) -> Resu
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             if let Ok(l) = line {
-                a1.emit("agent-update-log", l).ok();
+                for part in clean_output_line(&l) {
+                    a1.emit("agent-update-log", part).ok();
+                }
             }
         }
     });
@@ -986,8 +1033,8 @@ fn run_shell_streaming(app: &AppHandle, script: &str, timeout: Duration) -> Resu
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
             if let Ok(l) = line {
-                if !l.trim().is_empty() {
-                    a2.emit("agent-update-log", l).ok();
+                for part in clean_output_line(&l) {
+                    a2.emit("agent-update-log", part).ok();
                 }
             }
         }
@@ -1103,6 +1150,18 @@ mod tests {
             assert!(!a.install_methods.is_empty(), "{} 缺安装方式", a.name);
             assert!(a.npm_package.is_some(), "{} 缺 npm 包(用于 latest 检查)", a.name);
         }
+    }
+
+    #[test]
+    fn clean_output_strips_ansi_and_splits_carriage_return() {
+        // ANSI 颜色码去除
+        let l = clean_output_line("\u{1b}[32m✔ done\u{1b}[0m");
+        assert_eq!(l, vec!["✔ done".to_string()]);
+        // 进度条 \r 刷新切分为独立行
+        let l = clean_output_line("\u{1b}[2K\u{1b}[1G[####] 50%\r[########] 100%");
+        assert_eq!(l, vec!["[####] 50%".to_string(), "[########] 100%".to_string()]);
+        // 空白行过滤
+        assert!(clean_output_line("   \r  ").is_empty());
     }
 
     #[test]
