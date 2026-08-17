@@ -44,18 +44,18 @@ function renderProviderChildren(indent: number, opts: DshProviderInput): string[
     if (m.name && m.name !== m.id) out.push(`${pad(6)}name: ${yamlQuote(m.name)}`);
     out.push(`${pad(6)}contextWindow: ${m.contextWindow}`);
     out.push(`${pad(6)}maxTokens: ${m.maxTokens}`);
-    // 只保留非 off 且值非空的等级:dsh 校验要求 reasoningEfforts 至少提供一个 off 之外的等级。
-    const efforts = m.reasoning && m.reasoningEfforts
-      ? Object.fromEntries(
-          Object.entries(m.reasoningEfforts)
-            .filter(([level, wire]) => level !== "off" && typeof wire === "string" && wire.length > 0)
-            .sort(([a], [b]) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b)),
-        )
-      : {};
-    if (Object.keys(efforts).length > 0) {
-      out.push(`${pad(6)}reasoningEfforts:`);
-      for (const [level, wire] of Object.entries(efforts)) {
-        out.push(`${pad(8)}${level}: ${yamlQuote(wire as string)}`);
+    // reasoningEfforts:对齐 dsh 官方(off 空值 + 非 off 档位),off 用空值声明
+    // 「选 Off 时发送 nothing」;其余档位 key=可选级别, value=wire 拼写。
+    if (m.reasoning && m.reasoningEfforts) {
+      const nonOff = Object.entries(m.reasoningEfforts)
+        .filter(([level, wire]) => level !== "off" && typeof wire === "string" && wire.length > 0)
+        .sort(([a], [b]) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
+      if (nonOff.length > 0) {
+        out.push(`${pad(6)}reasoningEfforts:`);
+        out.push(`${pad(8)}off:`);
+        for (const [level, wire] of nonOff) {
+          out.push(`${pad(8)}${level}: ${yamlQuote(wire as string)}`);
+        }
       }
     }
     if (m.input && m.input.includes("image")) out.push(`${pad(6)}input: [text, image]`);
@@ -127,6 +127,64 @@ export function patchDshDefaultModel(text: string, provider: string, model: stri
   const body = `  provider: ${yamlQuote(provider)}\n  model: ${yamlQuote(model)}\n`;
   const next = text.slice(0, bodyStart) + body + text.slice(bodyEnd);
   return { text: next, changes: next === text ? [] : [`${NS} 已更新(provider=${provider}, model=${model})`] };
+}
+
+/** 删除 llm-pi-ai.providers 下除 target 外的所有 provider 路由(改 provider 名后清理旧路由残留)。 */
+export function removeDshOtherProviders(text: string, target: string): { text: string; removed: string[] } {
+  const removed: string[] = [];
+  const NS = "llm-pi-ai";
+  const llm = findKeyInRegion(text, 0, text.length, NS, 0);
+  if (!llm) return { text, removed };
+  const llmBodyStart = lineAfter(text, llm.end);
+  const llmBodyEnd = blockBodyEnd(text, llmBodyStart, llm.indent, text.length);
+  const prov = findKeyInRegion(text, llmBodyStart, llmBodyEnd, "providers");
+  if (!prov) return { text, removed };
+  const provBodyStart = lineAfter(text, prov.end);
+  const provBodyEnd = blockBodyEnd(text, provBodyStart, prov.indent, llmBodyEnd);
+
+  // providers 下每个子路由块:key 行缩进 = prov.indent + 2
+  const childIndent = prov.indent + 2;
+  const blocks: { name: string; start: number; end: number }[] = [];
+  let pos = provBodyStart;
+  while (pos < provBodyEnd) {
+    const lineEnd = text.indexOf("\n", pos);
+    const lineEndSafe = lineEnd === -1 ? provBodyEnd : lineEnd;
+    const line = text.slice(pos, lineEndSafe);
+    const indent = line.length - line.trimStart().length;
+    const content = line.trim();
+    if (content.length > 0 && !content.startsWith("#") && indent === childIndent && content.endsWith(":")) {
+      const name = content.slice(0, -1).trim();
+      const bodyStart = lineAfter(text, lineEndSafe);
+      const bodyEnd = blockBodyEnd(text, bodyStart, indent, provBodyEnd);
+      blocks.push({ name, start: pos, end: bodyEnd });
+      pos = bodyEnd;
+    } else {
+      pos = lineEndSafe === provBodyEnd ? provBodyEnd : lineEndSafe + 1;
+    }
+  }
+
+  // 从后往前删(避免偏移),只删非 target 的
+  let out = text;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (b.name !== target) {
+      out = out.slice(0, b.start) + out.slice(b.end);
+      removed.push(b.name);
+    }
+  }
+  return { text: out, removed };
+}
+
+/** 删除废弃的 `llm-deepseek` 段(新版不再生成,清理旧版遗留)。 */
+export function removeDshDeepseekSection(text: string): { text: string; removed: boolean } {
+  const NS = "llm-deepseek";
+  const block = findKeyInRegion(text, 0, text.length, NS, 0);
+  if (!block) return { text, removed: false };
+  const bodyStart = lineAfter(text, block.end);
+  const bodyEnd = blockBodyEnd(text, bodyStart, block.indent, text.length);
+  // 连同前面的空行一起删,避免留下孤立空行
+  const next = text.slice(0, block.start).replace(/\n{2,}$/, "\n") + text.slice(bodyEnd);
+  return { text: next, removed: true };
 }
 
 // ---------------------------------------------------------------------------

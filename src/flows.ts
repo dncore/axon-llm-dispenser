@@ -6,7 +6,7 @@ import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel 
 import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
-import { patchDshProvider, patchDshDefaultModel, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
+import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
 import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
 import {
   compareAgentConfig,
@@ -273,10 +273,26 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const credPath = await bridge.joinPath(home, ".credentials.yaml");
   const apiKeyEnv = deriveKeyRef(cfg.provider);
   const resolved = buildResolvedModels(modelIds);
-  const entries = toDshEntries(resolved);
   const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
-  const settingsText = await bridge.readFileOrEmpty(settingsPath);
+  let settingsText = await bridge.readFileOrEmpty(settingsPath);
+  const cleanup: string[] = [];
+  // 清理旧版遗留:废弃的 llm-deepseek 段 + 改 provider 名后残留的旧 provider 路由
+  const rmDs = removeDshDeepseekSection(settingsText);
+  if (rmDs.removed) {
+    settingsText = rmDs.text;
+    cleanup.push("移除废弃的 llm-deepseek 段");
+  }
+  const rmProv = removeDshOtherProviders(settingsText, cfg.provider);
+  if (rmProv.removed.length > 0) {
+    settingsText = rmProv.text;
+    cleanup.push(`清理旧 provider 路由: ${rmProv.removed.join(", ")}`);
+  }
+
+  // 所有模型(含 DeepSeek)统一走 llm-pi-ai 的 hand-declared route(对齐 dsh 官方
+  // acme-gateway 示例):DeepSeek 模型靠 reasoningEfforts + compat.thinkingFormat
+  // 声明推理能力与 DeepSeek 方言,私有网关 URL 认不出方言所以必须显式声明。
+  const entries = toDshEntries(resolved);
   const p1 = patchDshProvider(settingsText, {
     providerName: cfg.provider,
     displayName: cfg.displayName || cfg.provider,
@@ -285,7 +301,7 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
     models: entries,
   });
   const p2 = patchDshDefaultModel(p1.text, cfg.provider, defaultModel);
-  const allChanges = [...p1.changes, ...p2.changes];
+  const allChanges = [...cleanup, ...p1.changes, ...p2.changes];
 
   const written = await bridge.writeWithBackup(settingsPath, p2.text);
   const credText = await bridge.readFileOrEmpty(credPath);

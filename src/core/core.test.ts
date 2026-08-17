@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels } from "./models";
 import { patchCodexConfigToml, renderCodexModelsJson } from "./codex";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
-import { patchDshProvider, patchDshDefaultModel, upsertDshCredentialYaml } from "./dsh";
+import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
 
 describe("deriveKeyRef", () => {
   it("大写并去非法字符,追加 _API_KEY", () => {
@@ -70,7 +70,7 @@ describe("patchReasonix", () => {
 });
 
 describe("patchDshProvider", () => {
-  it("空文件创建 llm-pi-ai.providers.<name>,不写 off", () => {
+  it("空文件创建 llm-pi-ai.providers.<name>,DeepSeek 带 off 空值声明", () => {
     const r = patchDshProvider("", {
       providerName: "axon",
       displayName: "Axon",
@@ -85,7 +85,10 @@ describe("patchDshProvider", () => {
     expect(r.text).toContain("axon:");
     expect(r.text).toContain("reasoningEfforts:");
     expect(r.text).toContain("low: high");
-    expect(r.text).not.toContain("off:");
+    // 对齐 dsh 官方:off 用空值声明「选 Off 时发送 nothing」
+    expect(r.text).toContain("off:");
+    // 非推理档位齐全的模型(qwen 只有 off)不产生 reasoningEfforts 段
+    expect((r.text.match(/reasoningEfforts:/g) ?? []).length).toBe(1);
   });
 
   it("默认模型段", () => {
@@ -98,6 +101,52 @@ describe("patchDshProvider", () => {
     const r = upsertDshCredentialYaml("", "AXON_API_KEY", "sk-x");
     expect(r.text).toBe("AXON_API_KEY: sk-x\n");
     expect(() => upsertDshCredentialYaml("", "AXON_API_KEY", "")).toThrow();
+  });
+});
+
+describe("dsh 清理旧版遗留", () => {
+  it("removeDshOtherProviders 只保留 target 路由,删除其它", () => {
+    const yaml = [
+      "llm-pi-ai:",
+      "  providers:",
+      "    axon:",
+      "      displayName: Axon",
+      "      baseURL: https://a",
+      "      models: []",
+      "    magene:",
+      "      displayName: Magene",
+      "      baseURL: https://b",
+      "      models: []",
+      "    other:",
+      "      displayName: Other",
+      "      baseURL: https://c",
+      "      models: []",
+      "",
+    ].join("\n");
+    const r = removeDshOtherProviders(yaml, "axon");
+    expect([...r.removed].sort()).toEqual(["magene", "other"]);
+    expect(r.text).toContain("axon:");
+    expect(r.text).not.toContain("magene:");
+    expect(r.text).not.toContain("other:");
+  });
+
+  it("removeDshDeepseekSection 删除废弃段", () => {
+    const yaml = [
+      "llm-pi-ai:",
+      "  providers:",
+      "    axon:",
+      "      baseURL: https://a",
+      "",
+      "llm-deepseek:",
+      "  apiKeyEnv: AXON_API_KEY",
+      "  baseURL: https://x",
+      "  models: []",
+      "",
+    ].join("\n");
+    const r = removeDshDeepseekSection(yaml);
+    expect(r.removed).toBe(true);
+    expect(r.text).not.toContain("llm-deepseek:");
+    expect(r.text).toContain("llm-pi-ai:");
   });
 });
 
