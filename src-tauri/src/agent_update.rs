@@ -383,12 +383,16 @@ fn quote_cmd_line(args: &[String]) -> String {
         .join(" ")
 }
 
-/// 执行安装脚本(unix: sh -c;windows: powershell -NoProfile -Command)。
+/// 执行安装脚本(unix: sh -c;windows: powershell -NoProfile -ExecutionPolicy Bypass -Command)。
 fn build_shell_command(script: &str) -> Command {
     #[cfg(windows)]
     {
         let mut c = Command::new("powershell");
-        c.arg("-NoProfile").arg("-Command").arg(script);
+        c.arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(script);
         c
     }
     #[cfg(not(windows))]
@@ -397,6 +401,12 @@ fn build_shell_command(script: &str) -> Command {
         c.arg("-c").arg(script);
         c
     }
+}
+
+/// 纯命令行管理器命令(npm/bun/pnpm/brew),Windows 下应走 cmd /C 解析
+/// npm.cmd 而非 PowerShell 解析 npm.ps1(避免 ExecutionPolicy 拦截)。
+fn is_manager_cmd(script: &str) -> bool {
+    ["npm ", "bun ", "pnpm ", "brew "].iter().any(|p| script.starts_with(p))
 }
 
 /// 该安装方式在当前平台是否可用。
@@ -1009,7 +1019,17 @@ pub async fn agent_install(app: AppHandle, name: String, method_id: String) -> R
 }
 
 /// 执行 shell 字符串命令(用于安装脚本;非交互、清洗 ANSI/\\r)。
+/// Windows 下按命令类型分流:管理器命令走 cmd,脚本走 powershell。
 fn run_shell_streaming(app: &AppHandle, script: &str, timeout: Duration) -> Result<i32, String> {
+    #[cfg(windows)]
+    let mut c = if is_manager_cmd(script) {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(script);
+        c
+    } else {
+        build_shell_command(script)
+    };
+    #[cfg(not(windows))]
     let mut c = build_shell_command(script);
     apply_noninteractive(&mut c);
     let mut child = c
@@ -1162,6 +1182,16 @@ mod tests {
         assert_eq!(l, vec!["[####] 50%".to_string(), "[########] 100%".to_string()]);
         // 空白行过滤
         assert!(clean_output_line("   \r  ").is_empty());
+    }
+
+    #[test]
+    fn manager_commands_detected_for_cmd_routing() {
+        assert!(is_manager_cmd("npm install -g foo"));
+        assert!(is_manager_cmd("bun add -g foo"));
+        assert!(is_manager_cmd("pnpm add -g foo"));
+        assert!(is_manager_cmd("brew install foo"));
+        assert!(!is_manager_cmd("irm https://x/install.ps1 | iex"));
+        assert!(!is_manager_cmd("curl -fsSL https://x | sh"));
     }
 
     #[test]
