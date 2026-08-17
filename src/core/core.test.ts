@@ -89,6 +89,8 @@ describe("patchDshProvider", () => {
     expect(r.text).toContain("off:");
     // 非推理档位齐全的模型(qwen 只有 off)不产生 reasoningEfforts 段
     expect((r.text.match(/reasoningEfforts:/g) ?? []).length).toBe(1);
+    // route 级 reasoning:部署默认思考档位,缺省会导致非思考模式、reasoning_content 缺失
+    expect(r.text).toContain("reasoning: high");
   });
 
   it("默认模型段", () => {

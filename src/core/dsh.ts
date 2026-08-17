@@ -38,6 +38,10 @@ function renderProviderChildren(indent: number, opts: DshProviderInput): string[
   out.push(`${pad(2)}baseURL: ${yamlQuote(opts.baseUrl)}`);
   out.push(`${pad(2)}compat:`);
   out.push(`${pad(4)}thinkingFormat: deepseek`);
+  // route 级 reasoning:部署默认思考档位。缺省时请求不带 reasoningEffort,
+  // pi-ai 的 thinkingFormat=deepseek 分支不发 thinking 开关,模型走非思考模式、
+  // 不返回 reasoning_content,多轮工具调用后网关 400。
+  out.push(`${pad(2)}reasoning: high`);
   out.push(`${pad(2)}models:`);
   for (const m of opts.models) {
     out.push(`${pad(4)}- id: ${yamlQuote(m.id)}`);
