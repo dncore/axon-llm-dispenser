@@ -6,6 +6,12 @@
 
 它是从 一个 pi-agent 插件中 的「鉴权生成与配置」能力抽取、脱敏、泛化而来：不内置任何公司网关地址、不做团队级模型排除名单，`provider 名`、`base_url`、`api_key` 全部由用户输入。
 
+### 命名由来 / About the name
+
+**Axon（轴突）** 是神经元的一部分，由神经细胞的细胞本体向外延伸突起，是神经系统中主要的神经信号传递渠道。本项目作为 provider 鉴权分配器，行为非常接近轴突的生物学意义，因此命名 Axon。
+
+**Axon** is part of a neuron — a projection extending outward from the cell body, serving as the primary channel for signal transmission in the nervous system. As a provider-credential dispenser, this project behaves much like an axon in its biological sense, hence the name Axon.
+
 ## 2. 目标与范围
 
 ### 2.1 目标
