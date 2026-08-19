@@ -856,6 +856,10 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
                     "updated" => format!("✔ {}: {} → {}", det.def.label, before.as_deref().unwrap_or("?"), after.as_deref().unwrap_or("?")),
                     _ => format!("✔ {}: 已是最新 ({})", det.def.label, after.as_deref().unwrap_or("?")),
                 });
+                // Pi 本体升级成功后,顺带更新其扩展(packages:pi update --extensions)
+                if det.def.name == "pi" {
+                    update_pi_extensions(app, &det.real_path);
+                }
                 UpdateResult { name: det.def.name.into(), status: status.into(), before, after, error: None }
             } else {
                 emit_log(app, format!("✘ {}: 升级失败(退出码 {})", det.def.label, code));
@@ -971,6 +975,35 @@ fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) ->
             UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) }
         }
     }
+}
+
+/// 更新 Pi 扩展/包(packages):pi update --extensions,不碰 pi 本体。
+/// 通过 pi 官方命令,由 pi 自己处理 npm 锁文件与 git 引用对齐。
+fn update_pi_extensions(app: &AppHandle, pi_bin: &str) {
+    emit_log(app, "── 更新 Pi 扩展 (pi update --extensions) ──");
+    let cmd = vec![pi_bin.to_string(), "update".to_string(), "--extensions".to_string()];
+    let _guard = NPM_LOCK.lock().ok(); // pi update 内部跑 npm,串行防锁竞争
+    match run_streaming(app, &cmd, Duration::from_secs(600)) {
+        Ok(0) => emit_log(app, "✔ Pi 扩展更新完成"),
+        Ok(code) => emit_log(app, format!("✘ Pi 扩展更新失败(退出码 {})", code)),
+        Err(e) => emit_log(app, format!("✘ Pi 扩展更新失败: {}", e)),
+    }
+}
+
+/// 仅更新 Pi 扩展(pi 未安装时报错;pi 本体无更新时也可单独更新扩展)。
+#[tauri::command]
+pub async fn pi_extensions_update(app: AppHandle, pi_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if pi_path.is_empty() || !Path::new(&pi_path).exists() {
+            emit_log(&app, "⊘ 未检测到 pi,无法更新扩展".to_string());
+            return Err("未检测到 pi,无法更新扩展".to_string());
+        }
+        update_pi_extensions(&app, &realpath(&pi_path));
+        emit_log(&app, "── Pi 扩展更新结束 ──");
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("更新任务失败: {}", e))?
 }
 
 /// 逐个升级(顺序执行,日志清晰);返回各 agent 结果摘要。

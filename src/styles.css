@@ -343,6 +343,27 @@ button:focus:not(:focus-visible) { outline: none; }
 .agent-state.updating { color: var(--accent); animation: agent-pulse 1s ease-in-out infinite; } /* 升级/安装中 */
 @keyframes agent-pulse { 50% { opacity: 0.3; } }
 
+/* Pi 扩展角标:即点即更(pi update --extensions),不更新 pi 本体 */
+.agent-ext {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid #d97706;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #d97706;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.agent-ext:hover { background: #fef3c7; }
+.agent-ext.updating { animation: agent-pulse 1s ease-in-out infinite; opacity: 0.7; pointer-events: none; }
+
 /* 工具接入标题行右侧:批量升级按钮 + 帮助图标 */
 .tools-title-right { display: flex; align-items: center; gap: 8px; }
 .btn-upgrade-all {

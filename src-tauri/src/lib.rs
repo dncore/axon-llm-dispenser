@@ -24,6 +24,7 @@ pub fn run() {
             agent_update::agent_check,
             agent_update::agent_update,
             agent_update::agent_install,
+            agent_update::pi_extensions_update,
                                                                                             ])
         .run(tauri::generate_context!())
         .expect("error while running axon-llm-dispenser");

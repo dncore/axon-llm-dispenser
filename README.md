@@ -56,6 +56,7 @@
 - 安装图标变**橙色 ↑** 表示该 Agent 有新版本（tooltip 显示 v1 → v2 与安装方式），点击按现有安装方式升级：npm 全局（fnm/nvm 多版本安全，带 `--prefix <nodeRoot>`）/ pnpm / bun / Homebrew / 官方自更新 / npx 缓存刷新
 - **未安装**的 Agent 点击图标可一键安装：按官方方式（curl 脚本 / npm / bun / brew），多方式时弹窗选择
 - 标题行 ↑ 按钮**批量升级**全部可升级 Agent（升级中图标进入 loading 脉冲状态）
+- **Pi 扩展更新**：Pi agent 卡片安装图标旁的橙色 `ext` 角标 = 更新 Pi 扩展（packages），点击确认后执行 `pi update --extensions`（即点即更，无需版本检测；**pi 本体无更新时也可单独更新扩展**）；点击 Pi 主图标升级 pi 时，升级成功后会自动**顺带更新扩展**
 - 升级/安装过程**逐行实时输出到底部日志面板**，不依赖预装任何辅助工具
 
 ### DeepSeek 官方特配

@@ -250,6 +250,7 @@ function toolsHelpContent(): El {
     row("arrow-up", "升级:安装图标变橙色↑表示有新版本,点击按现有安装方式升级;未安装时点击可选官方方式安装"),
     row("sliders", "配置一致性:绿=与当前网关 baseUrl/Key 一致,橙=不一致,灰=未配置"),
     h("div", { class: "tip-note" }, ["状态图标均可点击重新检测;标题行 ↑ 按钮为批量升级"]),
+    h("div", { class: "tip-note" }, ["Pi 卡片上的橙色 ext 角标 = 更新 Pi 扩展(packages,即点即更;pi 本体无更新时也可单独更新;升级 pi 后也会自动顺带更新扩展)"]),
     row("play", "配置 = 生成/更新接入配置(写入官方配置文件,自动备份 .bak-*)"),
     row("info", "状态 = 查看该工具的配置状态"),
     row("restore", "还原 = 从备份恢复(可重命名/删除/编辑备份内容)"),
@@ -330,9 +331,14 @@ function toolCard(id: string, name: string, actions: string[]): El {
   const buttons = actions.map((a) =>
     h("button", { class: "btn btn-small btn-icon-only", id: `btn-${id}-${a}`, title: ACTION_TITLES[a] ?? a }, [icon(ACTION_ICONS[a] ?? "config")]),
   );
+  const extBadge =
+    id === "pi"
+      ? h("button", { id: "agent-ext-pi", class: "agent-ext", type: "button", style: "display:none", title: "更新 Pi 扩展(packages;pi update --extensions,即点即更,不更新 pi 本体)" }, ["ext"])
+      : null;
   return h("div", { class: "tool" }, [
     h("div", { class: "tool-left" }, [
       stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
+      ...(extBadge ? [extBadge] : []),
       stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
       h("span", { class: "tool-name" }, [name]),
     ]),
@@ -373,6 +379,7 @@ async function detectAgents(): Promise<void> {
     dot?.addEventListener("click", () => void onInstallIconClick(tool)); // 点击:升级/安装/重检
     void detectOne(tool);
   }
+  document.getElementById("agent-ext-pi")?.addEventListener("click", () => void onPiExtensionsClick()); // Pi 扩展角标:即点即更
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +413,11 @@ function syncUpgradeIcons(): void {
     const el = document.getElementById(`agent-dot-${tool}`);
     if (!el) continue;
     el.classList.remove("updating");
+    // Pi 扩展角标:仅已安装 pi 时可见(即点即更,不做版本检测)
+    if (tool === "pi") {
+      const extBtn = document.getElementById("agent-ext-pi");
+      if (extBtn) extBtn.style.display = s.installed ? "" : "none";
+    }
     if (s.updateAvailable) {
       updatable.push(tool);
       el.innerHTML = ICONS["arrow-up"];
@@ -521,6 +533,42 @@ async function runUpgrade(tools: string[]): Promise<void> {
   }
   updating = false;
   setUpdatingIcons(tools, false);
+  await checkAgentUpdates();
+}
+
+/** Pi 扩展角标点击:确认后即点即更(pi update --extensions,无需检测,不更新 pi 本体)。 */
+async function onPiExtensionsClick(): Promise<void> {
+  if (updating) {
+    notify("升级/安装进行中,请稍候", "info");
+    return;
+  }
+  const s = updStatus.get("pi");
+  const piPath = s?.path ?? (await flows.detectAgentCli("pi"));
+  if (!piPath) {
+    notify("未检测到 pi,请先安装 pi", "error");
+    return;
+  }
+  confirmDialog("更新 Pi 扩展(packages)?将执行 pi update --extensions,不更新 pi 本体,过程日志实时显示在底部面板。", () => {
+    void runPiExtensionsUpdate(piPath);
+  });
+}
+
+/** 执行 pi update --extensions:角标进入 loading 脉冲,完成后重检。 */
+async function runPiExtensionsUpdate(piPath: string): Promise<void> {
+  if (updating) return;
+  updating = true;
+  const badge = document.getElementById("agent-ext-pi");
+  badge?.classList.add("updating");
+  badge?.setAttribute("disabled", "disabled");
+  try {
+    await bridge.piExtensionsUpdate(piPath);
+    notify("Pi 扩展更新完成,详见底部日志", "info");
+  } catch (e) {
+    notify(`Pi 扩展更新失败: ${e}`, "error");
+  }
+  updating = false;
+  badge?.classList.remove("updating");
+  badge?.removeAttribute("disabled");
   await checkAgentUpdates();
 }
 

@@ -126,6 +126,11 @@ export function agentInstall(name: string, methodId: string): Promise<void> {
   return invoke("agent_install", { name, methodId });
 }
 
+/** 仅更新 Pi 扩展(packages;pi update --extensions),不更新 pi 本体,日志经 agent-update-log 实时推送。 */
+export function piExtensionsUpdate(piPath: string): Promise<void> {
+  return invoke("pi_extensions_update", { piPath });
+}
+
 /** 订阅升级/安装日志流;返回取消订阅函数(浏览器环境无事件时为空实现)。 */
 export async function onAgentUpdateLog(cb: (line: string) => void): Promise<() => void> {
   try {
