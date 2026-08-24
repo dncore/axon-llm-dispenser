@@ -98,7 +98,7 @@ export function extractDshProvider(settingsText: string, credText: string, provi
   if (!block) return { baseUrl: null, apiKey: null };
   const body = settingsText.slice(block.bodyStart, block.bodyEnd);
   const envKey = grabYaml(body, "apiKeyEnv");
-  const rawKey = envKey ? credText.match(new RegExp(`^${escapeRegExp(envKey)}: *(.*)$`, "m"))?.[1]?.trim() : null;
+  const rawKey = envKey ? credText.match(new RegExp(`^\\s*${escapeRegExp(envKey)}: *(.*)$`, "m"))?.[1]?.trim() : null;
   return {
     baseUrl: grabYaml(body, "baseURL"),
     apiKey: rawKey ? unquoteYaml(rawKey) : null,

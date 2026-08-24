@@ -117,6 +117,18 @@ describe("patchDshProvider", () => {
     expect(r.text).toBe("AXON_API_KEY: sk-x\n");
     expect(() => upsertDshCredentialYaml("", "AXON_API_KEY", "")).toThrow();
   });
+
+  it("凭据 upsert 兼容 refs: 包裹(新增 key 按子项缩进)", () => {
+    const existing = "version: 1\nrefs:\n  DEEPSEEK_API_KEY: xxxx\n";
+    const r = upsertDshCredentialYaml(existing, "AXON_API_KEY", "user_xxx");
+    expect(r.text).toBe("version: 1\nrefs:\n  DEEPSEEK_API_KEY: xxxx\n  AXON_API_KEY: user_xxx\n");
+  });
+
+  it("凭据 upsert 修复顶格错位的 key,移到 refs: 之下", () => {
+    const existing = "version: 1\nrefs:\n  DEEPSEEK_API_KEY: xxxx\nAXON_API_KEY: user_xxx\n";
+    const r = upsertDshCredentialYaml(existing, "AXON_API_KEY", "user_xxx");
+    expect(r.text).toBe("version: 1\nrefs:\n  DEEPSEEK_API_KEY: xxxx\n  AXON_API_KEY: user_xxx\n");
+  });
 });
 
 describe("dsh 清理旧版遗留", () => {
@@ -479,6 +491,7 @@ describe("agent 配置一致性检测", () => {
     ].join("\n");
     const cred = "AXON_API_KEY: sk-test\n";
     expect(extractDshProvider(settings, cred, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractDshProvider(settings, "  AXON_API_KEY: sk-test\n", "axon").apiKey).toBe("sk-test");
     expect(extractDshProvider(settings, "", "other").baseUrl).toBe("https://x");
   });
 

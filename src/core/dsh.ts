@@ -195,16 +195,57 @@ export function removeDshDeepseekSection(text: string): { text: string; removed:
 // .credentials.yaml 补丁
 // ---------------------------------------------------------------------------
 
-/** 在 .credentials.yaml 中 upsert 一个凭据(官方格式:纯 `KEY: value` 映射)。 */
+/** 在 .credentials.yaml 中 upsert 一个凭据。兼容两种格式:
+ *  - 顶层裸 `KEY: value`(dsh 官方默认);
+ *  - 顶层 `refs:` 包裹(`refs:\n  KEY: value`,部分 dsh 版本),此时把 key 缩进写到 refs 之下,与已有层级对齐。
+ * 若顶层已有该 key(旧版错位写法),会把它移到 refs 之下。 */
 export function upsertDshCredentialYaml(text: string, key: string, value: string): { text: string; changed: boolean } {
   if (!value) throw new Error("凭据值不能为空(dsh 规范拒绝空字符串)");
+  const refs = findKeyInRegion(text, 0, text.length, "refs", 0);
+  if (refs && !headerHasInlineContent(text, refs.start, refs.end)) {
+    return upsertDshCredentialInRefs(text, refs, key, value);
+  }
+  // 顶层裸 key(官方格式)
   const line = `${key}: ${yamlQuote(value)}`;
-  const keyRe = new RegExp(`^${escapeRegExp(key)}:(?:[ \\t].*)?$`, "m");
+  const keyRe = new RegExp(`^${escapeRegExp(key)}:(?:[ \t].*)?$`, "m");
   if (keyRe.test(text)) {
     const next = text.replace(keyRe, line);
     return { text: next, changed: next !== text };
   }
   return { text: (text.trim() ? text.replace(/\s+$/, "") + "\n" : "") + line + "\n", changed: true };
+}
+
+/** 把凭据写进顶层 `refs:` 块:key 缩进到 refs 子项层级(通常 2 空格)。 */
+function upsertDshCredentialInRefs(
+  text: string,
+  refs: { start: number; end: number; indent: number },
+  key: string,
+  value: string,
+): { text: string; changed: boolean } {
+  const bodyStart = lineAfter(text, refs.end);
+  const bodyEnd = blockBodyEnd(text, bodyStart, refs.indent, text.length);
+  const childIndent = refs.indent + 2;
+  const pad = " ".repeat(childIndent);
+  const childLine = `${pad}${key}: ${yamlQuote(value)}`;
+  const bodyText = text.slice(bodyStart, bodyEnd);
+
+  // 在 refs 块体内 upsert
+  const childKeyRe = new RegExp(`^${escapeRegExp(pad)}${escapeRegExp(key)}:`, "m");
+  let newBody: string;
+  if (childKeyRe.test(bodyText)) {
+    newBody = bodyText.replace(childKeyRe, childLine);
+  } else {
+    const trimmed = bodyText.trim();
+    newBody = trimmed ? `${bodyText.replace(/\s+$/, "")}\n${childLine}\n` : `${childLine}\n`;
+  }
+
+  // 移除顶层(错位)的旧写法,再拼回
+  const topKeyRe = new RegExp(`^${escapeRegExp(key)}:(?:[ \t].*)?$\\n?`, "m");
+  const before = text.slice(0, bodyStart).replace(topKeyRe, "");
+  const after = text.slice(bodyEnd).replace(topKeyRe, "");
+
+  const next = before + newBody + after;
+  return { text: next, changed: next !== text };
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +303,7 @@ export function parseDshStatus(settingsText: string, credText: string, providerN
     providerBaseUrl: grab(/^ *baseURL: *(.*)$/m),
     providerModels: (body.match(/^ *- id:/gm) ?? []).length,
     providerThinkingFormat: grab(/^ *thinkingFormat: *(.*)$/m),
-    credentialStored: new RegExp(`^${escapeRegExp(apiKeyEnv)}:`).test(credText),
+    credentialStored: new RegExp(`^\\s*${escapeRegExp(apiKeyEnv)}:`).test(credText),
     defaultModelProvider: dmBody.match(/^ *provider: *(.*)$/m)?.[1]?.trim() ?? null,
     defaultModelModel: dmBody.match(/^ *model: *(.*)$/m)?.[1]?.trim() ?? null,
   };
