@@ -120,7 +120,8 @@ function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
 
 /** dsh(pi-ai) 内置目录的 DeepSeek 权威 reasoningEfforts(参考 @earendil-works/pi-ai deepseek 目录)。 */
 export function dshDeepseekEfforts(id: string): Record<string, string> {
-  if (id === "deepseek-v4-flash") return { low: "low", high: "high", max: "max" };
+  // flash 族(含 vision-exp 等变体)额外支持 low 档
+  if (/^deepseek-v4-flash/.test(id)) return { low: "low", high: "high", max: "max" };
   return { high: "high", max: "max" };
 }
 

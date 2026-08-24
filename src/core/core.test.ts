@@ -22,6 +22,19 @@ describe("buildResolvedModels", () => {
     expect(unknown.contextWindow).toBe(128000);
     expect(unknown.reasoning).toBe(false);
   });
+
+  it("deepseek-v4-flash-vision-exp 按 flash 同规格 + 图像输入", () => {
+    const [m] = buildResolvedModels(["deepseek-v4-flash-vision-exp"]);
+    expect(m.name).toBe("DeepSeek V4 Flash Vision (Exp)");
+    expect(m.contextWindow).toBe(1000000);
+    expect(m.maxTokens).toBe(384000);
+    expect(m.reasoning).toBe(true);
+    expect(m.input).toEqual(["text", "image"]);
+    expect(m.cost).toEqual({ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 });
+    expect(m.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null, high: "high", xhigh: "max" });
+    expect(m.compat.thinkingFormat).toBe("deepseek");
+    expect(m.compat.requiresReasoningContentOnAssistantMessages).toBe(true);
+  });
 });
 
 describe("patchCodexConfigToml", () => {
@@ -251,6 +264,12 @@ describe("dsh DeepSeek reasoningEfforts 映射", () => {
     expect(dshDeepseekEfforts("deepseek-v4-flash")).toEqual({ low: "low", high: "high", max: "max" });
     // 不含 xhigh:那是 pi 的体系,dsh 会把 max 档映射成 null → 400
     expect(JSON.stringify(dshDeepseekEfforts("deepseek-v4-pro"))).not.toContain("xhigh");
+  });
+
+  it("flash 族前缀匹配:vision-exp 变体拿 low/high/max", () => {
+    expect(dshDeepseekEfforts("deepseek-v4-flash-vision-exp")).toEqual({ low: "low", high: "high", max: "max" });
+    // 非 flash 前缀不受影响
+    expect(dshDeepseekEfforts("deepseek-v4-pro")).toEqual({ high: "high", max: "max" });
   });
 });
 
