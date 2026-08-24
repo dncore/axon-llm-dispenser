@@ -350,31 +350,56 @@ fn clean_output_line(raw: &str) -> Vec<String> {
 
 /// macOS/Linux 从 GUI(LaunchServices)启动的进程 PATH 常为空或极简,
 /// 导致 `#!/usr/bin/env node` 型脚本(pi/npm/pnpm/bun 等)找不到 node。
-/// 将被调用二进制的父目录(通常与 node/npm 同级)前置到 PATH,使子进程
-/// 能解析 node/npm(与 resolve_npm 的 npm 定位逻辑互补)。
-/// 仅对绝对路径生效;裸命令名(如 "npm")交由 PATH 自身解析。
+/// 把含 node/npm 的目录前置到子进程 PATH,使 `env node` 能解析:
+///  - 被调用二进制的父目录(常为 node 全局 bin 目录);
+///  - 若 bin 是 npm/pnpm 全局 realpath(<root>/lib/node_modules/<pkg>/...),
+///    再前置其 node_root 的 bin 目录(<root>/bin)。
+/// 仅对绝对路径生效;裸命令名交由 PATH 自身解析。
 fn ensure_tool_path(cmd: &mut Command, bin: &str) {
-    if bin.is_empty() {
+    if bin.is_empty() || !Path::new(bin).is_absolute() {
         return;
     }
-    let p = Path::new(bin);
-    if !p.is_absolute() {
-        return;
-    }
-    let Some(dir) = p.parent() else {
-        return;
-    };
-    let extra = dir.to_string_lossy().to_string();
     let existing = std::env::var("PATH").unwrap_or_default();
-    if existing.split(':').any(|d| d == extra) {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(parent) = Path::new(bin).parent() {
+        let d = parent.to_string_lossy().to_string();
+        if !d.is_empty() {
+            dirs.push(d);
+        }
+    }
+    if let Some(root) = node_root_from_npm_path(bin) {
+        let d = format!("{}/bin", root);
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    let mut new_dirs: Vec<String> = Vec::new();
+    for d in dirs {
+        if !existing.split(':').any(|e| e == d) && !new_dirs.contains(&d) {
+            new_dirs.push(d);
+        }
+    }
+    if new_dirs.is_empty() {
         return;
     }
+    let prefix = new_dirs.join(":");
     let new_path = if existing.is_empty() {
-        extra
+        prefix
     } else {
-        format!("{}:{}", extra, existing)
+        format!("{}:{}", prefix, existing)
     };
     cmd.env("PATH", new_path);
+}
+
+/// 从 npm/pnpm 全局安装 realpath 提取 node 安装根:<root>/lib/node_modules/<pkg>/... → <root>
+fn node_root_from_npm_path(real: &str) -> Option<String> {
+    let idx = real.find("/lib/node_modules/")?;
+    let root = &real[..idx];
+    if root.is_empty() {
+        None
+    } else {
+        Some(root.to_string())
+    }
 }
 
 /// 把命令行转成 Command:Windows 下 .cmd 工具(npm/pnpm/bun 等)经 cmd /C 执行。
@@ -889,7 +914,7 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
                 });
                 // Pi 本体升级成功后,顺带更新其扩展(packages:pi update --extensions)
                 if det.def.name == "pi" {
-                    update_pi_extensions(app, &det.real_path);
+                    let _ = update_pi_extensions(app, &det.real_path);
                 }
                 UpdateResult { name: det.def.name.into(), status: status.into(), before, after, error: None }
             } else {
@@ -1010,14 +1035,17 @@ fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) ->
 
 /// 更新 Pi 扩展/包(packages):pi update --extensions,不碰 pi 本体。
 /// 通过 pi 官方命令,由 pi 自己处理 npm 锁文件与 git 引用对齐。
-fn update_pi_extensions(app: &AppHandle, pi_bin: &str) {
+fn update_pi_extensions(app: &AppHandle, pi_bin: &str) -> Result<(), String> {
     emit_log(app, "── 更新 Pi 扩展 (pi update --extensions) ──");
     let cmd = vec![pi_bin.to_string(), "update".to_string(), "--extensions".to_string()];
     let _guard = NPM_LOCK.lock().ok(); // pi update 内部跑 npm,串行防锁竞争
-    match run_streaming(app, &cmd, Duration::from_secs(600)) {
-        Ok(0) => emit_log(app, "✔ Pi 扩展更新完成"),
-        Ok(code) => emit_log(app, format!("✘ Pi 扩展更新失败(退出码 {})", code)),
-        Err(e) => emit_log(app, format!("✘ Pi 扩展更新失败: {}", e)),
+    let code = run_streaming(app, &cmd, Duration::from_secs(600))?;
+    if code == 0 {
+        emit_log(app, "✔ Pi 扩展更新完成");
+        Ok(())
+    } else {
+        emit_log(app, format!("✘ Pi 扩展更新失败(退出码 {})", code));
+        Err(format!("pi update --extensions 退出码 {}", code))
     }
 }
 
@@ -1033,9 +1061,9 @@ pub async fn pi_extensions_update(app: AppHandle, pi_path: String) -> Result<(),
         // realpath 会把它解析到 dist/cli.js(其父目录无 node/npm),
         // 导致 GUI 进程缺失 PATH 时子进程 `env: node` 找不到。
         // 传原始 bin 路径,ensure_tool_path 会把其父目录(bin,含 node/npm)前置到 PATH。
-        update_pi_extensions(&app, &pi_path);
+        let res = update_pi_extensions(&app, &pi_path);
         emit_log(&app, "── Pi 扩展更新结束 ──");
-        Ok::<(), String>(())
+        res
     })
     .await
     .map_err(|e| format!("更新任务失败: {}", e))?
