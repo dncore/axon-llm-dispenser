@@ -384,7 +384,7 @@ fn build_command(cmd: &[String]) -> Command {
     #[cfg(windows)]
     {
         if !bin.is_empty() {
-            let is_cmd_tool = ["npm", "npx", "pnpm", "bun", "brew"].iter().any(|t| t == bin)
+            let is_cmd_tool = ["npm", "npx", "pnpm", "bun", "brew"].iter().any(|t| *t == bin)
                 || bin.ends_with(".cmd")
                 || bin.ends_with(".bat");
             if is_cmd_tool {
