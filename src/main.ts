@@ -338,9 +338,10 @@ function toolCard(id: string, name: string, actions: string[]): El {
   return h("div", { class: "tool" }, [
     h("div", { class: "tool-left" }, [
       stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
-      ...(extBadge ? [extBadge] : []),
       stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
       h("span", { class: "tool-name" }, [name]),
+      // Pi 扩展角标放名字之后,避免把 agent 名与其他行横向错位
+      ...(extBadge ? [extBadge] : []),
     ]),
     h("div", { class: "tool-actions" }, buttons),
   ]);
