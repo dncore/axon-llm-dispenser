@@ -348,13 +348,42 @@ fn clean_output_line(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// macOS/Linux 从 GUI(LaunchServices)启动的进程 PATH 常为空或极简,
+/// 导致 `#!/usr/bin/env node` 型脚本(pi/npm/pnpm/bun 等)找不到 node。
+/// 将被调用二进制的父目录(通常与 node/npm 同级)前置到 PATH,使子进程
+/// 能解析 node/npm(与 resolve_npm 的 npm 定位逻辑互补)。
+/// 仅对绝对路径生效;裸命令名(如 "npm")交由 PATH 自身解析。
+fn ensure_tool_path(cmd: &mut Command, bin: &str) {
+    if bin.is_empty() {
+        return;
+    }
+    let p = Path::new(bin);
+    if !p.is_absolute() {
+        return;
+    }
+    let Some(dir) = p.parent() else {
+        return;
+    };
+    let extra = dir.to_string_lossy().to_string();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    if existing.split(':').any(|d| d == extra) {
+        return;
+    }
+    let new_path = if existing.is_empty() {
+        extra
+    } else {
+        format!("{}:{}", extra, existing)
+    };
+    cmd.env("PATH", new_path);
+}
+
 /// 把命令行转成 Command:Windows 下 .cmd 工具(npm/pnpm/bun 等)经 cmd /C 执行。
 fn build_command(cmd: &[String]) -> Command {
+    let bin = cmd.first().map(String::as_str).unwrap_or("");
     let mut c;
     #[cfg(windows)]
     {
-        if !cmd.is_empty() {
-            let bin = &cmd[0];
+        if !bin.is_empty() {
             let is_cmd_tool = ["npm", "npx", "pnpm", "bun", "brew"].iter().any(|t| t == bin)
                 || bin.ends_with(".cmd")
                 || bin.ends_with(".bat");
@@ -362,6 +391,7 @@ fn build_command(cmd: &[String]) -> Command {
                 c = Command::new("cmd");
                 c.arg("/C");
                 c.arg(quote_cmd_line(cmd));
+                ensure_tool_path(&mut c, bin);
                 return c;
             }
         }
@@ -372,6 +402,7 @@ fn build_command(cmd: &[String]) -> Command {
         c = Command::new(cmd.first().cloned().unwrap_or_default());
     }
     c.args(&cmd[1..]);
+    ensure_tool_path(&mut c, bin);
     c
 }
 
@@ -998,7 +1029,11 @@ pub async fn pi_extensions_update(app: AppHandle, pi_path: String) -> Result<(),
             emit_log(&app, "⊘ 未检测到 pi,无法更新扩展".to_string());
             return Err("未检测到 pi,无法更新扩展".to_string());
         }
-        update_pi_extensions(&app, &realpath(&pi_path));
+        // 保留原始(未 realpath)路径:pi 是 `#!/usr/bin/env node` 脚本,
+        // realpath 会把它解析到 dist/cli.js(其父目录无 node/npm),
+        // 导致 GUI 进程缺失 PATH 时子进程 `env: node` 找不到。
+        // 传原始 bin 路径,ensure_tool_path 会把其父目录(bin,含 node/npm)前置到 PATH。
+        update_pi_extensions(&app, &pi_path);
         emit_log(&app, "── Pi 扩展更新结束 ──");
         Ok::<(), String>(())
     })
