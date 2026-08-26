@@ -129,6 +129,7 @@ function build(): void {
       toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
       toolCard("omp", "Oh My Pi", ["配置", "状态", "还原"]),
       toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
+      toolCard("opencode", "OpenCode", ["配置", "状态", "还原"]),
     ]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -1446,6 +1447,32 @@ function bind(): void {
   );
 
   $("btn-omp-还原").addEventListener("click", () => openRestoreModal("omp"));
+
+  $("btn-opencode-配置").addEventListener("click", () =>
+    confirmDialog(
+      "将更新 OpenCode 的接入配置:写入 ~/.config/opencode/opencode.json(provider 块 + 默认 model)与 ~/.local/share/opencode/auth.json(密钥,0600,不备份),保留其它设置;opencode.json 自动备份(.bak-*),确认?",
+      () => {
+        void run("OpenCode 配置", async () => {
+          readFields();
+          if (!validateProvider()) return;
+          const ids = await ensureModels();
+          if (!ids) return;
+          const r = await flows.configureOpenCode(config, ids);
+          log(r.lines);
+          void detectAgentConfigOne("opencode");
+        });
+      },
+    ),
+  );
+
+  $("btn-opencode-状态").addEventListener("click", () =>
+    run("OpenCode 状态", async () => {
+      readFields();
+      log(await flows.opencodeStatus(config));
+    }),
+  );
+
+  $("btn-opencode-还原").addEventListener("click", () => openRestoreModal("opencode"));
 }
 
 // ---------------------------------------------------------------------------

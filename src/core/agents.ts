@@ -58,6 +58,11 @@ export const AGENT_CLIS: Record<string, AgentCli> = {
     // curl 安装器(omp.sh/install)→ ~/.local/bin;brew tap can1357/tap/omp;bun 全局 @oh-my-pi/pi-coding-agent
     dirs: [...COMMON_BINS],
   },
+  opencode: {
+    bin: "opencode",
+    // 官方 curl 安装器 → ~/.opencode/bin;npm 全局;brew tap;Windows winget shim(WinGet Links)
+    dirs: [...COMMON_BINS, "~/.opencode/bin", "~/AppData/Local/Microsoft/WinGet/Links"],
+  },
   reasonix: {
     bin: "reasonix",
     // npm i -g reasonix / brew install esengine/reasonix/reasonix

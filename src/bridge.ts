@@ -197,6 +197,16 @@ export async function dshHome(): Promise<string> {
   return await joinPath(await homeDir(), ".dsh");
 }
 
+/** OpenCode 全局配置目录(xdg config:跨平台均为 ~/.config/opencode——xdg-basedir 5.x 无平台分支)。 */
+export async function opencodeHome(): Promise<string> {
+  return await joinPath(await homeDir(), ".config", "opencode");
+}
+
+/** OpenCode 数据目录(xdg data:跨平台均为 ~/.local/share/opencode),auth.json 所在。 */
+export async function opencodeDataHome(): Promise<string> {
+  return await joinPath(await homeDir(), ".local", "share", "opencode");
+}
+
 // ---------------------------------------------------------------------------
 // 应用自身配置
 // ---------------------------------------------------------------------------
