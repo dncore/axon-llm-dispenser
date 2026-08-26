@@ -537,11 +537,13 @@ fn build_command(cmd: &[String]) -> Command {
                 c = Command::new("cmd");
                 c.arg("/C");
                 c.arg(quote_cmd_line(cmd));
+                hide_console(&mut c);
                 ensure_tool_path(&mut c, bin);
                 return c;
             }
         }
         c = Command::new(cmd.first().cloned().unwrap_or_default());
+        hide_console(&mut c);
     }
     #[cfg(not(windows))]
     {
@@ -550,6 +552,14 @@ fn build_command(cmd: &[String]) -> Command {
     c.args(&cmd[1..]);
     ensure_tool_path(&mut c, bin);
     c
+}
+
+/// Windows 下隐藏子进程控制台窗口(0x08000000 = CREATE_NO_WINDOW),
+/// 避免升级/安装/版本检查时弹出黑色 cmd 窗口(执行完即消失)。
+#[cfg(windows)]
+fn hide_console(c: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x08000000);
 }
 
 #[cfg(windows)]
@@ -576,6 +586,7 @@ fn build_shell_command(script: &str) -> Command {
             .arg("Bypass")
             .arg("-Command")
             .arg(script);
+        hide_console(&mut c);
         c
     }
     #[cfg(not(windows))]
