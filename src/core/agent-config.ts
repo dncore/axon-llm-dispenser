@@ -132,3 +132,24 @@ export function extractOmpProvider(modelsText: string, providerName: string): Fo
   const body = modelsText.slice(bodyStart, bodyEnd);
   return { baseUrl: grabYaml(body, "baseUrl"), apiKey: grabYaml(body, "apiKey") };
 }
+
+/** OpenCode:opencode.json 的 provider.<name>.options.baseURL + auth.json 的 <name>.key。 */
+export function extractOpenCodeProvider(configText: string, authText: string, providerName: string): FoundProvider {
+  let baseUrl: string | null = null;
+  try {
+    const doc = JSON.parse(configText) as { provider?: Record<string, { options?: { baseURL?: unknown } }> };
+    const b = doc.provider?.[providerName]?.options?.baseURL;
+    baseUrl = typeof b === "string" && b ? b : null;
+  } catch {
+    // 非 JSON 视为未配置
+  }
+  let apiKey: string | null = null;
+  try {
+    const auth = JSON.parse(authText) as Record<string, { key?: unknown }>;
+    const k = auth[providerName]?.key;
+    apiKey = typeof k === "string" && k ? k : null;
+  } catch {
+    // 非 JSON 视为未配置
+  }
+  return { baseUrl, apiKey };
+}

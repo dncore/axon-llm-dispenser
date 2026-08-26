@@ -20,6 +20,17 @@ static NPM_LOCK: Mutex<()> = Mutex::new(());
 // 注册表(与 auway KNOWN_AGENTS 对齐 + dsh/reasonix 扩展)
 // ---------------------------------------------------------------------------
 
+/// 安装方式对 npm 的依赖条件(TUI 类 agent:有 npm 时只给 npm 方式)。
+#[derive(Clone, Copy, PartialEq)]
+enum NpmCondition {
+    /// 无条件(brew/cask/curl/winget 等)。
+    Always,
+    /// 需要 npm 才显示(npm 全局方式;无 npm 的机器上装不了)。
+    Requires,
+    /// 仅当本机没有 npm 时显示(TUI 的备用安装方式)。
+    Fallback,
+}
+
 struct InstallMethodDef {
     id: &'static str,
     label: &'static str,
@@ -27,15 +38,59 @@ struct InstallMethodDef {
     command: &'static str,
     /// Windows 变体(powershell -Command 执行);None 表示该方式在 Windows 不可用。
     windows: Option<&'static str>,
+    /// 相对本机是否有 npm 的可见性条件(TUI 类 agent:有 npm 时只给 npm 方式)。
+    npm: NpmCondition,
 }
 
 impl InstallMethodDef {
-    const fn m(id: &'static str, label: &'static str, command: &'static str, windows: Option<&'static str>) -> Self {
-        InstallMethodDef { id, label, command, windows }
+    const fn m(
+        id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        windows: Option<&'static str>,
+    ) -> Self {
+        InstallMethodDef {
+            id,
+            label,
+            command,
+            windows,
+            npm: NpmCondition::Always,
+        }
     }
     /// 纯命令行管理器(npm/bun):Windows 可直接执行,无需变体。
     const fn manager(id: &'static str, label: &'static str, command: &'static str) -> Self {
-        InstallMethodDef { id, label, command, windows: None }
+        InstallMethodDef {
+            id,
+            label,
+            command,
+            windows: None,
+            npm: NpmCondition::Always,
+        }
+    }
+    /// npm 全局方式:无 npm 的机器上不可用。
+    const fn needs_npm(id: &'static str, label: &'static str, command: &'static str) -> Self {
+        InstallMethodDef {
+            id,
+            label,
+            command,
+            windows: None,
+            npm: NpmCondition::Requires,
+        }
+    }
+    /// 备用方式:仅当本机没有 npm 时显示。
+    const fn fallback(
+        id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        windows: Option<&'static str>,
+    ) -> Self {
+        InstallMethodDef {
+            id,
+            label,
+            command,
+            windows,
+            npm: NpmCondition::Fallback,
+        }
     }
 }
 
@@ -45,6 +100,8 @@ struct AgentDef {
     native_update: &'static [&'static str],
     version_args: &'static [&'static str],
     npm_package: Option<&'static str>,
+    /// winget 包 id(WinGet Links shim 路径无法反查包 id 时使用)。
+    winget_package: Option<&'static str>,
     install_methods: &'static [InstallMethodDef],
 }
 
@@ -55,6 +112,7 @@ const AGENTS: &[AgentDef] = &[
         native_update: &["update"],
         version_args: &["--version"],
         npm_package: Some("@anthropic-ai/claude-code"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://claude.ai/install.sh | bash", Some("irm https://claude.ai/install.ps1 | iex")),
             InstallMethodDef::manager("npm", "npm 全局", "npm install -g @anthropic-ai/claude-code"),
@@ -67,6 +125,7 @@ const AGENTS: &[AgentDef] = &[
         native_update: &["update"],
         version_args: &["--version"],
         npm_package: Some("@openai/codex"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::manager("npm", "npm 全局", "npm install -g @openai/codex"),
             InstallMethodDef::m("brew", "Homebrew Cask", "brew install --cask codex", None),
@@ -79,6 +138,7 @@ const AGENTS: &[AgentDef] = &[
         native_update: &[],
         version_args: &["--version"],
         npm_package: Some("@deepseek-ai/dsh"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::manager("npm", "npm 全局", "npm install -g @deepseek-ai/dsh"),
         ],
@@ -89,6 +149,7 @@ const AGENTS: &[AgentDef] = &[
         native_update: &["update", "pi"],
         version_args: &["--version"],
         npm_package: Some("@earendil-works/pi-coding-agent"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::manager("npm", "npm 全局", "npm install -g @earendil-works/pi-coding-agent"),
             InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://pi.dev/install.sh | sh", Some("irm https://pi.dev/install.ps1 | iex")),
@@ -100,6 +161,7 @@ const AGENTS: &[AgentDef] = &[
         native_update: &["update"],
         version_args: &["--version"],
         npm_package: Some("@oh-my-pi/pi-coding-agent"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::manager("bun", "bun 全局 (官方推荐)", "bun add -g @oh-my-pi/pi-coding-agent"),
             InstallMethodDef::m("curl", "官方脚本 (curl)", "curl -fsSL https://omp.sh/install | sh", Some("irm https://omp.sh/install.ps1 | iex")),
@@ -112,9 +174,24 @@ const AGENTS: &[AgentDef] = &[
         native_update: &[],
         version_args: &["--version"],
         npm_package: Some("reasonix"),
+        winget_package: None,
         install_methods: &[
             InstallMethodDef::manager("npm", "npm 全局", "npm install -g reasonix"),
             InstallMethodDef::m("brew", "Homebrew Tap", "brew install esengine/reasonix/reasonix", None),
+        ],
+    },
+    AgentDef {
+        name: "opencode",
+        label: "OpenCode",
+        native_update: &["upgrade"],
+        version_args: &["--version"],
+        npm_package: Some("opencode-ai"),
+        winget_package: Some("SST.opencode"),
+        install_methods: &[
+            // 有 npm 时优先 npm;无 npm 才给 brew / winget
+            InstallMethodDef::needs_npm("npm", "npm 全局 (TUI 首选)", "npm install -g opencode-ai"),
+            InstallMethodDef::fallback("brew", "Homebrew Tap (无 npm 时)", "brew install anomalyco/tap/opencode", None),
+            InstallMethodDef::fallback("winget-tui", "winget (TUI, 无 npm 时)", "winget install --id SST.opencode --accept-source-agreements --accept-package-agreements", None),
         ],
     },
 ];
@@ -172,10 +249,11 @@ pub struct UpdateResult {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Manager {
-    Npm,    // npm 全局(含 fnm/nvm 多版本)
+    Npm, // npm 全局(含 fnm/nvm 多版本)
     Pnpm,
     Bun,
     Brew,   // formula 或 cask
+    Winget, // Windows winget 安装(WinGet Packages)
     User,   // ~/node_modules 用户级
     Native, // 官方安装器/独立二进制
     Local,  // 项目本地依赖,绝不碰
@@ -206,11 +284,11 @@ fn resolve_npm(det: &Detected) -> Option<String> {
         }
     }
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
+        for dir in path_var.split(if cfg!(windows) { ';' } else { ':' }) {
             if dir.is_empty() {
                 continue;
             }
-            let cand = format!("{}/npm", dir);
+            let cand = format!("{}/npm{}", dir, if cfg!(windows) { ".cmd" } else { "" });
             if Path::new(&cand).exists() {
                 return Some(cand);
             }
@@ -219,12 +297,22 @@ fn resolve_npm(det: &Detected) -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    for base in [format!("{}/.local/share/fnm/node-versions", home), format!("{}/.nvm/versions/node", home)] {
+    for base in [
+        format!("{}/.local/share/fnm/node-versions", home),
+        format!("{}/Library/Application Support/fnm/node-versions", home),
+        format!("{}/AppData/Roaming/fnm/node-versions", home),
+        format!("{}/.fnm/node-versions", home),
+        format!("{}/.nvm/versions/node", home),
+    ] {
         if let Ok(rd) = std::fs::read_dir(&base) {
             for e in rd.flatten() {
-                let cand = e.path().join("installation/bin/npm");
-                if cand.exists() {
-                    return Some(cand.to_string_lossy().to_string());
+                for cand in [
+                    e.path().join("installation/bin/npm"),
+                    e.path().join("installation/npm.cmd"),
+                ] {
+                    if cand.exists() {
+                        return Some(cand.to_string_lossy().to_string());
+                    }
                 }
             }
         }
@@ -251,11 +339,18 @@ fn classify(real: &str) -> (Manager, Option<String>, Option<String>, bool) {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
 
-    // 提取 npm 包名:<...>/node_modules/<pkg>(scoped: @scope/pkg 两级)
+    // 提取 npm 包名:<...>/node_modules/<pkg>(scoped: @scope/pkg 两级;支持 Windows 反斜杠)
     let pkg_from_node_modules = || -> Option<String> {
-        let idx = real.find("/node_modules/")?;
-        let rest = &real[idx + "/node_modules/".len()..];
-        let mut parts = rest.split('/');
+        let idx = real
+            .find("/node_modules/")
+            .or_else(|| real.find("\\node_modules\\"))?;
+        let sep = if real.as_bytes().get(idx) == Some(&b'/') {
+            "/node_modules/"
+        } else {
+            "\\node_modules\\"
+        };
+        let rest = &real[idx + sep.len()..];
+        let mut parts = rest.split(['/', '\\']);
         let first = parts.next().unwrap_or("");
         if first.is_empty() {
             return None;
@@ -278,7 +373,7 @@ fn classify(real: &str) -> (Manager, Option<String>, Option<String>, bool) {
     let brew_name = |marker: &str| -> Option<String> {
         let idx = real.find(marker)?;
         let rest = &real[idx + marker.len()..];
-        let name = rest.split('/').next().unwrap_or("");
+        let name = rest.split(['/', '\\']).next().unwrap_or("");
         if name.is_empty() {
             None
         } else {
@@ -286,16 +381,40 @@ fn classify(real: &str) -> (Manager, Option<String>, Option<String>, bool) {
         }
     };
 
-    if has("/lib/node_modules/") {
+    if has("/lib/node_modules/") || has("\\npm\\node_modules\\") {
+        // Windows npm 全局:<prefix>\node_modules\<pkg>(无 lib 层级,prefix 默认 %APPDATA%\npm)
         (Manager::Npm, pkg_from_node_modules(), node_root(), false)
     } else if has("/global/5/") {
         (Manager::Pnpm, pkg_from_node_modules(), None, false)
     } else if has("/.bun/install/global/") || has("/.bun/bin/") {
         (Manager::Bun, pkg_from_node_modules(), None, false)
-    } else if has("/opt/homebrew/Caskroom/") || has("/usr/local/Caskroom/") || has("/home/linuxbrew/.linuxbrew/Caskroom/") {
+    } else if has("/opt/homebrew/Caskroom/")
+        || has("/usr/local/Caskroom/")
+        || has("/home/linuxbrew/.linuxbrew/Caskroom/")
+    {
         (Manager::Brew, brew_name("/Caskroom/"), None, true)
-    } else if has("/opt/homebrew/Cellar/") || has("/usr/local/Cellar/") || has("/home/linuxbrew/.linuxbrew/Cellar/") {
+    } else if has("/opt/homebrew/Cellar/")
+        || has("/usr/local/Cellar/")
+        || has("/home/linuxbrew/.linuxbrew/Cellar/")
+    {
         (Manager::Brew, brew_name("/Cellar/"), None, false)
+    } else if has("WinGet\\Packages") || has("WinGet/Packages") {
+        // winget:Packages/<id>_<source>_<hash>/... 提取包 id(<id> 到首个 _ 为止)
+        let win_id = |marker: &str| -> Option<String> {
+            let idx = real.find(marker)?;
+            let rest = &real[idx + marker.len()..];
+            let name = rest.split(['/', '\\']).next().unwrap_or("");
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.split('_').next().unwrap_or("").to_string())
+            }
+        };
+        let target = win_id("Packages\\").or_else(|| win_id("Packages/"));
+        (Manager::Winget, target, None, false)
+    } else if has("WinGet\\Links") || has("WinGet/Links") {
+        // winget Links shim 目录:realpath 可能不解析硬链接,包 id 由 AgentDef.winget_package 提供
+        (Manager::Winget, None, None, false)
     } else if real.starts_with(&home) && real[home.len()..].starts_with("/node_modules/") {
         // 用户级 ~/node_modules(先于项目本地判定,避免被 /node_modules/ 命中)
         (Manager::User, pkg_from_node_modules(), None, false)
@@ -409,7 +528,9 @@ fn build_command(cmd: &[String]) -> Command {
     #[cfg(windows)]
     {
         if !bin.is_empty() {
-            let is_cmd_tool = ["npm", "npx", "pnpm", "bun", "brew"].iter().any(|t| *t == bin)
+            let is_cmd_tool = ["npm", "npx", "pnpm", "bun", "brew"]
+                .iter()
+                .any(|t| *t == bin)
                 || bin.ends_with(".cmd")
                 || bin.ends_with(".bat");
             if is_cmd_tool {
@@ -434,7 +555,13 @@ fn build_command(cmd: &[String]) -> Command {
 #[cfg(windows)]
 fn quote_cmd_line(args: &[String]) -> String {
     args.iter()
-        .map(|a| if a.contains(' ') && !a.starts_with('"') { format!("\"{}\"", a) } else { a.clone() })
+        .map(|a| {
+            if a.contains(' ') && !a.starts_with('"') {
+                format!("\"{}\"", a)
+            } else {
+                a.clone()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -459,15 +586,78 @@ fn build_shell_command(script: &str) -> Command {
     }
 }
 
-/// 纯命令行管理器命令(npm/bun/pnpm/brew),Windows 下应走 cmd /C 解析
+/// 纯命令行管理器命令(npm/bun/pnpm/brew/winget),Windows 下应走 cmd /C 解析
 /// npm.cmd 而非 PowerShell 解析 npm.ps1(避免 ExecutionPolicy 拦截)。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_manager_cmd(script: &str) -> bool {
-    ["npm ", "bun ", "pnpm ", "brew "].iter().any(|p| script.starts_with(p))
+    ["npm ", "bun ", "pnpm ", "brew ", "winget "]
+        .iter()
+        .any(|p| script.starts_with(p))
 }
 
-/// 该安装方式在当前平台是否可用。
-/// Windows 下:有 PowerShell 变体、或纯 npm/bun 命令行(brew、curl|sh 不可用)。
-fn method_available_on(m: &InstallMethodDef, is_windows: bool) -> bool {
+/// 检测本机是否有 npm(PATH + fnm/nvm 常见位置 + Homebrew),供安装方式可见性判定。
+fn npm_available() -> bool {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(if cfg!(windows) { ';' } else { ':' }) {
+            if dir.is_empty() {
+                continue;
+            }
+            let cand = format!("{}/npm{}", dir, if cfg!(windows) { ".cmd" } else { "" });
+            if Path::new(&cand).exists() {
+                return true;
+            }
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    for base in [
+        format!("{}/.local/share/fnm/node-versions", home),
+        format!("{}/Library/Application Support/fnm/node-versions", home),
+        format!("{}/AppData/Roaming/fnm/node-versions", home),
+        format!("{}/.nvm/versions/node", home),
+        format!("{}/.fnm/node-versions", home),
+    ] {
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            for e in rd.flatten() {
+                for cand in [
+                    e.path().join("installation/bin/npm"),
+                    e.path().join("installation/npm.cmd"),
+                ] {
+                    if cand.exists() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    for d in ["/opt/homebrew/bin/npm", "/usr/local/bin/npm"] {
+        if Path::new(d).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 该安装方式在当前平台是否可用、且满足 npm 可见性条件。
+/// Windows 下:有 PowerShell 变体、或纯 npm/bun/winget 命令行(brew、curl|sh 不可用)。
+fn method_visible(m: &InstallMethodDef, is_windows: bool, has_npm: bool) -> bool {
+    match m.npm {
+        NpmCondition::Requires => {
+            if !has_npm {
+                return false;
+            }
+        }
+        NpmCondition::Fallback => {
+            if has_npm {
+                return false;
+            }
+        }
+        NpmCondition::Always => {}
+    }
+    if m.command.starts_with("winget ") {
+        return is_windows;
+    }
     if !is_windows {
         return true;
     }
@@ -555,14 +745,21 @@ fn run_streaming(app: &AppHandle, cmd: &[String], timeout: Duration) -> Result<i
     // 超时轮询
     let start = std::time::Instant::now();
     loop {
-        if let Some(code) = child.try_wait().map_err(|e| format!("等待 {} 失败: {}", cmd.join(" "), e))? {
+        if let Some(code) = child
+            .try_wait()
+            .map_err(|e| format!("等待 {} 失败: {}", cmd.join(" "), e))?
+        {
             let _ = t1.join();
             let _ = t2.join();
             return Ok(code.code().unwrap_or(0));
         }
         if start.elapsed() > timeout {
             let _ = child.kill();
-            return Err(format!("{} 执行超时({}s)", cmd.join(" "), timeout.as_secs()));
+            return Err(format!(
+                "{} 执行超时({}s)",
+                cmd.join(" "),
+                timeout.as_secs()
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -647,10 +844,15 @@ fn compare_versions(a: &str, b: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn methods_out(def: &'static AgentDef) -> Vec<InstallMethodOut> {
+    let has_npm = npm_available();
     def.install_methods
         .iter()
-        .filter(|m| method_available_on(m, cfg!(windows)))
-        .map(|m| InstallMethodOut { id: m.id.to_string(), label: m.label.to_string(), command: method_script(m).to_string() })
+        .filter(|m| method_visible(m, cfg!(windows), has_npm))
+        .map(|m| InstallMethodOut {
+            id: m.id.to_string(),
+            label: m.label.to_string(),
+            command: method_script(m).to_string(),
+        })
         .collect()
 }
 
@@ -697,7 +899,14 @@ fn check_one(entry: AgentEntry) -> AgentStatus {
 
     let real = realpath(path);
     let (manager, manager_target, node_root, brew_cask) = classify(&real);
-    let det = Detected { def, real_path: real, manager, manager_target, node_root, brew_cask };
+    let det = Detected {
+        def,
+        real_path: real,
+        manager,
+        manager_target,
+        node_root,
+        brew_cask,
+    };
 
     // 版本:用解析出的真实路径执行 --version(避免 GUI PATH 受限)
     let mut version_cmd: Vec<String> = vec![det.real_path.clone()];
@@ -715,7 +924,12 @@ fn check_one(entry: AgentEntry) -> AgentStatus {
         .and_then(|pkg| {
             let _guard = NPM_LOCK.lock().ok(); // 串行:防 ECOMPROMISED
             run_capture(
-                &[npm.clone().unwrap_or_else(|| "npm".into()), "view".to_string(), pkg.to_string(), "version".to_string()],
+                &[
+                    npm.clone().unwrap_or_else(|| "npm".into()),
+                    "view".to_string(),
+                    pkg.to_string(),
+                    "version".to_string(),
+                ],
                 Duration::from_secs(15),
             )
             .ok()
@@ -736,7 +950,14 @@ fn check_one(entry: AgentEntry) -> AgentStatus {
             Manager::Npm => "npm".to_string(),
             Manager::Pnpm => "pnpm".to_string(),
             Manager::Bun => "bun".to_string(),
-            Manager::Brew => if det.brew_cask { "brew-cask".to_string() } else { "brew".to_string() },
+            Manager::Brew => {
+                if det.brew_cask {
+                    "brew-cask".to_string()
+                } else {
+                    "brew".to_string()
+                }
+            }
+            Manager::Winget => "winget".to_string(),
             Manager::User => "user".to_string(),
             Manager::Native => "native".to_string(),
             Manager::Local => "local".to_string(),
@@ -755,29 +976,65 @@ fn check_one(entry: AgentEntry) -> AgentStatus {
 fn build_update_cmd(det: &Detected) -> Option<Vec<String>> {
     match det.manager {
         Manager::Npm => {
-            let pkg = det.manager_target.clone().or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
+            let pkg = det
+                .manager_target
+                .clone()
+                .or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
             let npm = resolve_npm(det).unwrap_or_else(|| "npm".to_string());
             if let Some(root) = &det.node_root {
-                Some(vec![npm, "update".into(), "-g".into(), "--prefix".into(), root.clone(), pkg])
+                Some(vec![
+                    npm,
+                    "update".into(),
+                    "-g".into(),
+                    "--prefix".into(),
+                    root.clone(),
+                    pkg,
+                ])
             } else {
                 Some(vec![npm, "update".into(), "-g".into(), pkg])
             }
         }
         Manager::Pnpm => {
-            let pkg = det.manager_target.clone().or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
+            let pkg = det
+                .manager_target
+                .clone()
+                .or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
             Some(vec!["pnpm".into(), "add".into(), "-g".into(), pkg])
         }
         Manager::Bun => {
-            let pkg = det.manager_target.clone().or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
+            let pkg = det
+                .manager_target
+                .clone()
+                .or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
             Some(vec!["bun".into(), "add".into(), "-g".into(), pkg])
         }
         Manager::Brew => {
             let formula = det.manager_target.clone()?;
             if det.brew_cask {
-                Some(vec!["brew".into(), "upgrade".into(), "--cask".into(), formula])
+                Some(vec![
+                    "brew".into(),
+                    "upgrade".into(),
+                    "--cask".into(),
+                    formula,
+                ])
             } else {
                 Some(vec!["brew".into(), "upgrade".into(), formula])
             }
+        }
+        Manager::Winget => {
+            // Links shim 路径反查不到包 id,回退 AgentDef.winget_package
+            let pkg = det
+                .manager_target
+                .clone()
+                .or_else(|| det.def.winget_package.map(|s| s.to_string()))?;
+            Some(vec![
+                "winget".into(),
+                "upgrade".into(),
+                "--id".into(),
+                pkg,
+                "--accept-source-agreements".into(),
+                "--accept-package-agreements".into(),
+            ])
         }
         Manager::Native => {
             if det.def.native_update.is_empty() {
@@ -794,11 +1051,19 @@ fn build_update_cmd(det: &Detected) -> Option<Vec<String>> {
                 let pkg = det.def.npm_package?;
                 let npx = resolve_npm(det)
                     .map(|npm| {
-                        let dir = std::path::Path::new(&npm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        let dir = std::path::Path::new(&npm)
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         format!("{}/npx", dir)
                     })
                     .unwrap_or_else(|| "npx".to_string());
-                Some(vec![npx, "--yes".into(), format!("{}@latest", pkg), "--version".into()])
+                Some(vec![
+                    npx,
+                    "--yes".into(),
+                    format!("{}@latest", pkg),
+                    "--version".into(),
+                ])
             } else {
                 None
             }
@@ -838,19 +1103,44 @@ fn emit_log(app: &AppHandle, line: impl Into<String>) {
 
 fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
     let Some(def) = find_def(&entry.name) else {
-        return UpdateResult { name: entry.name, status: "failed".into(), before: None, after: None, error: Some("未知 agent".into()) };
+        return UpdateResult {
+            name: entry.name,
+            status: "failed".into(),
+            before: None,
+            after: None,
+            error: Some("未知 agent".into()),
+        };
     };
     let Some(path) = entry.path.as_deref().filter(|p| !p.is_empty()) else {
         emit_log(app, format!("⊘ {}: 未安装,跳过升级", def.label));
-        return UpdateResult { name: def.name.into(), status: "skipped".into(), before: None, after: None, error: None };
+        return UpdateResult {
+            name: def.name.into(),
+            status: "skipped".into(),
+            before: None,
+            after: None,
+            error: None,
+        };
     };
     if !Path::new(path).exists() {
         emit_log(app, format!("⊘ {}: 二进制不存在,跳过升级", def.label));
-        return UpdateResult { name: def.name.into(), status: "skipped".into(), before: None, after: None, error: None };
+        return UpdateResult {
+            name: def.name.into(),
+            status: "skipped".into(),
+            before: None,
+            after: None,
+            error: None,
+        };
     }
     let real = realpath(path);
     let (manager, manager_target, node_root, brew_cask) = classify(&real);
-    let det = Detected { def, real_path: real, manager, manager_target, node_root, brew_cask };
+    let det = Detected {
+        def,
+        real_path: real,
+        manager,
+        manager_target,
+        node_root,
+        brew_cask,
+    };
     let before = run_capture(
         &{
             let mut v = vec![det.real_path.clone()];
@@ -862,7 +1152,10 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
     .ok()
     .and_then(|o| parse_version(&o));
 
-    emit_log(app, format!("── 升级 {} {} ──", det.def.label, det.def.name));
+    emit_log(
+        app,
+        format!("── 升级 {} {} ──", det.def.label, det.def.name),
+    );
 
     // 与启动检查的 npm view 串行,防止 npm 缓存锁竞争(ECOMPROMISED)
     let _npm_guard = NPM_LOCK.lock().ok();
@@ -873,8 +1166,17 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
     }
 
     let Some(cmd) = build_update_cmd(&det) else {
-        emit_log(app, "⊘ 无可用升级命令(项目本地安装不自动升级;其它方式请检查注册表)".to_string());
-        return UpdateResult { name: det.def.name.into(), status: "skipped".into(), after: before.clone(), before, error: None };
+        emit_log(
+            app,
+            "⊘ 无可用升级命令(项目本地安装不自动升级;其它方式请检查注册表)".to_string(),
+        );
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "skipped".into(),
+            after: before.clone(),
+            before,
+            error: None,
+        };
     };
 
     match run_streaming(app, &cmd, Duration::from_secs(300)) {
@@ -885,7 +1187,12 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
                     .npm_package
                     .and_then(|pkg| {
                         run_capture(
-                            &["npx".into(), "--yes".into(), format!("{}@latest", pkg), "--version".into()],
+                            &[
+                                "npx".into(),
+                                "--yes".into(),
+                                format!("{}@latest", pkg),
+                                "--version".into(),
+                            ],
                             Duration::from_secs(60),
                         )
                         .ok()
@@ -908,60 +1215,129 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
                     (Some(b), Some(a)) if a != b => "updated",
                     _ => "up-to-date",
                 };
-                emit_log(app, match status {
-                    "updated" => format!("✔ {}: {} → {}", det.def.label, before.as_deref().unwrap_or("?"), after.as_deref().unwrap_or("?")),
-                    _ => format!("✔ {}: 已是最新 ({})", det.def.label, after.as_deref().unwrap_or("?")),
-                });
+                emit_log(
+                    app,
+                    match status {
+                        "updated" => format!(
+                            "✔ {}: {} → {}",
+                            det.def.label,
+                            before.as_deref().unwrap_or("?"),
+                            after.as_deref().unwrap_or("?")
+                        ),
+                        _ => format!(
+                            "✔ {}: 已是最新 ({})",
+                            det.def.label,
+                            after.as_deref().unwrap_or("?")
+                        ),
+                    },
+                );
                 // Pi 本体升级成功后,顺带更新其扩展(packages:pi update --extensions)
                 if det.def.name == "pi" {
                     let _ = update_pi_extensions(app, &det.real_path);
                 }
-                UpdateResult { name: det.def.name.into(), status: status.into(), before, after, error: None }
+                UpdateResult {
+                    name: det.def.name.into(),
+                    status: status.into(),
+                    before,
+                    after,
+                    error: None,
+                }
             } else {
-                emit_log(app, format!("✘ {}: 升级失败(退出码 {})", det.def.label, code));
-                UpdateResult { name: det.def.name.into(), status: "failed".into(), before, after, error: Some(format!("退出码 {}", code)) }
+                emit_log(
+                    app,
+                    format!("✘ {}: 升级失败(退出码 {})", det.def.label, code),
+                );
+                UpdateResult {
+                    name: det.def.name.into(),
+                    status: "failed".into(),
+                    before,
+                    after,
+                    error: Some(format!("退出码 {}", code)),
+                }
             }
         }
         Err(e) => {
             emit_log(app, format!("✘ {}: {}", det.def.label, e));
-            UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) }
+            UpdateResult {
+                name: det.def.name.into(),
+                status: "failed".into(),
+                after: before.clone(),
+                before,
+                error: Some(e),
+            }
         }
     }
 }
 
 /// 用户级安装(~/.node_modules/<pkg>)的精确更新:npm view → npm pack → 原子替换 → 嵌套装依赖。
 fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) -> UpdateResult {
-    let pkg = det.manager_target.clone().or_else(|| det.def.npm_package.map(|s| s.to_string()));
+    let pkg = det
+        .manager_target
+        .clone()
+        .or_else(|| det.def.npm_package.map(|s| s.to_string()));
     let Some(pkg) = pkg else {
         emit_log(app, "⊘ 用户级安装缺少包名,跳过".to_string());
-        return UpdateResult { name: det.def.name.into(), status: "skipped".into(), after: before.clone(), before, error: None };
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "skipped".into(),
+            after: before.clone(),
+            before,
+            error: None,
+        };
     };
     let nm_idx = match det.real_path.find("/node_modules/") {
         Some(i) => i,
         None => {
             emit_log(app, "⊘ 无法定位 node_modules 根,跳过".to_string());
-            return UpdateResult { name: det.def.name.into(), status: "skipped".into(), after: before.clone(), before, error: None };
+            return UpdateResult {
+                name: det.def.name.into(),
+                status: "skipped".into(),
+                after: before.clone(),
+                before,
+                error: None,
+            };
         }
     };
     let nm_root = det.real_path[..nm_idx].to_string();
     let target_dir = format!("{}/node_modules/{}", nm_root, pkg);
 
     let npm = resolve_npm(det).unwrap_or_else(|| "npm".to_string());
-    let latest = match run_capture(&[npm.clone(), "view".into(), pkg.clone(), "version".into()], Duration::from_secs(15)) {
+    let latest = match run_capture(
+        &[npm.clone(), "view".into(), pkg.clone(), "version".into()],
+        Duration::from_secs(15),
+    ) {
         Ok(v) if !v.is_empty() => v,
         Ok(_) => {
             emit_log(app, "⊘ npm view 无版本信息,跳过".to_string());
-            return UpdateResult { name: det.def.name.into(), status: "skipped".into(), after: before.clone(), before, error: None };
+            return UpdateResult {
+                name: det.def.name.into(),
+                status: "skipped".into(),
+                after: before.clone(),
+                before,
+                error: None,
+            };
         }
         Err(e) => {
             emit_log(app, format!("✘ npm view 失败: {}", e));
-            return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) };
+            return UpdateResult {
+                name: det.def.name.into(),
+                status: "failed".into(),
+                after: before.clone(),
+                before,
+                error: Some(e),
+            };
         }
     };
     if let Some(b) = &before {
         if compare_versions(&latest, b) <= 0 {
             emit_log(app, format!("✔ {}: 已是最新 ({})", det.def.label, b));
-            return UpdateResult { name: det.def.name.into(), status: "up-to-date".into(), after: before.clone(), before, error: None };
+            return UpdateResult {
+                name: det.def.name.into(),
+                status: "up-to-date".into(),
+                after: before.clone(),
+                before,
+                error: None,
+            };
         }
     }
 
@@ -969,31 +1345,61 @@ fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) ->
     let tmp = std::env::temp_dir().join(format!("axup-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     let pack = run_capture(
-        &[npm.clone(), "pack".into(), format!("{}@{}", pkg, latest), "--pack-destination".into(), tmp.to_string_lossy().to_string()],
+        &[
+            npm.clone(),
+            "pack".into(),
+            format!("{}@{}", pkg, latest),
+            "--pack-destination".into(),
+            tmp.to_string_lossy().to_string(),
+        ],
         Duration::from_secs(120),
     );
     let Ok(tarball_name) = pack else {
         let e = pack.unwrap_err();
         emit_log(app, format!("✘ npm pack 失败: {}", e));
-        return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) };
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "failed".into(),
+            after: before.clone(),
+            before,
+            error: Some(e),
+        };
     };
     let tarball = tmp.join(tarball_name);
     let extract_dir = tmp.join("pkg");
     let _ = std::fs::create_dir_all(&extract_dir);
     let tar_ok = run_capture(
-        &["tar".into(), "-xzf".into(), tarball.to_string_lossy().to_string(), "-C".into(), extract_dir.to_string_lossy().to_string()],
+        &[
+            "tar".into(),
+            "-xzf".into(),
+            tarball.to_string_lossy().to_string(),
+            "-C".into(),
+            extract_dir.to_string_lossy().to_string(),
+        ],
         Duration::from_secs(60),
     );
     if tar_ok.is_err() {
         let e = tar_ok.unwrap_err();
         emit_log(app, format!("✘ 解包失败: {}", e));
-        return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) };
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "failed".into(),
+            after: before.clone(),
+            before,
+            error: Some(e),
+        };
     }
     // 提取出的目录名 = package/ (npm pack 固定)
     let pkg_dir = extract_dir.join("package");
     if !pkg_dir.exists() {
         emit_log(app, "✘ 解包结果缺少 package 目录".to_string());
-        return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: None };
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "failed".into(),
+            after: before.clone(),
+            before,
+            error: None,
+        };
     }
     // 原子替换:旧目录 → .bak-<pid>,新目录 → 目标
     let bak = format!("{}.bak-update", target_dir);
@@ -1001,34 +1407,82 @@ fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) ->
     if Path::new(&target_dir).exists() {
         if std::fs::rename(&target_dir, &bak).is_err() {
             emit_log(app, "✘ 无法备份旧目录,跳过".to_string());
-            return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: None };
+            return UpdateResult {
+                name: det.def.name.into(),
+                status: "failed".into(),
+                after: before.clone(),
+                before,
+                error: None,
+            };
         }
     }
     if std::fs::rename(&pkg_dir, &target_dir).is_err() {
         let _ = std::fs::rename(&bak, &target_dir); // 回滚
         emit_log(app, "✘ 替换失败,已回滚".to_string());
-        return UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: None };
+        return UpdateResult {
+            name: det.def.name.into(),
+            status: "failed".into(),
+            after: before.clone(),
+            before,
+            error: None,
+        };
     }
     emit_log(app, "安装依赖(嵌套于包目录内,不触碰其它包)...".to_string());
     let install = run_streaming(
         app,
-        &[npm.clone(), "install".into(), "--prefix".into(), target_dir.clone(), "--omit=dev".into(), "--no-save".into()],
+        &[
+            npm.clone(),
+            "install".into(),
+            "--prefix".into(),
+            target_dir.clone(),
+            "--omit=dev".into(),
+            "--no-save".into(),
+        ],
         Duration::from_secs(300),
     );
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_dir_all(&bak);
     match install {
         Ok(0) => {
-            emit_log(app, format!("✔ {}: {} → {}", det.def.label, before.as_deref().unwrap_or("?"), latest));
-            UpdateResult { name: det.def.name.into(), status: "updated".into(), before, after: Some(latest), error: None }
+            emit_log(
+                app,
+                format!(
+                    "✔ {}: {} → {}",
+                    det.def.label,
+                    before.as_deref().unwrap_or("?"),
+                    latest
+                ),
+            );
+            UpdateResult {
+                name: det.def.name.into(),
+                status: "updated".into(),
+                before,
+                after: Some(latest),
+                error: None,
+            }
         }
         Ok(code) => {
-            emit_log(app, format!("✘ {}: 依赖安装失败(退出码 {})", det.def.label, code));
-            UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(format!("退出码 {}", code)) }
+            emit_log(
+                app,
+                format!("✘ {}: 依赖安装失败(退出码 {})", det.def.label, code),
+            );
+            UpdateResult {
+                name: det.def.name.into(),
+                status: "failed".into(),
+                after: before.clone(),
+                before,
+                error: Some(format!("退出码 {}", code)),
+            }
         }
         Err(e) => {
             emit_log(app, format!("✘ {}: {}", det.def.label, e));
-            UpdateResult { name: det.def.name.into(), status: "failed".into(), after: before.clone(), before, error: Some(e) }
+            UpdateResult {
+                name: det.def.name.into(),
+                status: "failed".into(),
+                after: before.clone(),
+                before,
+                error: Some(e),
+            }
         }
     }
 }
@@ -1037,7 +1491,11 @@ fn update_user_level(app: &AppHandle, det: &Detected, before: Option<String>) ->
 /// 通过 pi 官方命令,由 pi 自己处理 npm 锁文件与 git 引用对齐。
 fn update_pi_extensions(app: &AppHandle, pi_bin: &str) -> Result<(), String> {
     emit_log(app, "── 更新 Pi 扩展 (pi update --extensions) ──");
-    let cmd = vec![pi_bin.to_string(), "update".to_string(), "--extensions".to_string()];
+    let cmd = vec![
+        pi_bin.to_string(),
+        "update".to_string(),
+        "--extensions".to_string(),
+    ];
     let _guard = NPM_LOCK.lock().ok(); // pi update 内部跑 npm,串行防锁竞争
     let code = run_streaming(app, &cmd, Duration::from_secs(600))?;
     if code == 0 {
@@ -1071,7 +1529,10 @@ pub async fn pi_extensions_update(app: AppHandle, pi_path: String) -> Result<(),
 
 /// 逐个升级(顺序执行,日志清晰);返回各 agent 结果摘要。
 #[tauri::command]
-pub async fn agent_update(app: AppHandle, entries: Vec<AgentEntry>) -> Result<Vec<UpdateResult>, String> {
+pub async fn agent_update(
+    app: AppHandle,
+    entries: Vec<AgentEntry>,
+) -> Result<Vec<UpdateResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut results = Vec::new();
         for e in entries {
@@ -1094,7 +1555,7 @@ pub async fn agent_install(app: AppHandle, name: String, method_id: String) -> R
         let Some(method) = def.install_methods.iter().find(|m| m.id == method_id) else {
             return Err(format!("未知安装方式: {}", method_id));
         };
-        if !method_available_on(method, cfg!(windows)) {
+        if !method_visible(method, cfg!(windows), npm_available()) {
             return Err(format!("安装方式 {} 在当前平台不可用", method.label));
         }
         let script = method_script(method);
@@ -1178,18 +1639,30 @@ mod tests {
 
     fn det_for(def: &'static AgentDef, real: &str) -> Detected {
         let (manager, manager_target, node_root, brew_cask) = classify(real);
-        Detected { def, real_path: real.to_string(), manager, manager_target, node_root, brew_cask }
+        Detected {
+            def,
+            real_path: real.to_string(),
+            manager,
+            manager_target,
+            node_root,
+            brew_cask,
+        }
     }
 
     #[test]
     fn classify_managers_by_path_markers() {
         let (m, target, root, cask) = classify("/Users/x/.local/share/fnm/node-versions/v24.13.0/installation/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
         assert_eq!(m, Manager::Npm);
-        assert_eq!(root.as_deref(), Some("/Users/x/.local/share/fnm/node-versions/v24.13.0/installation"));
+        assert_eq!(
+            root.as_deref(),
+            Some("/Users/x/.local/share/fnm/node-versions/v24.13.0/installation")
+        );
         assert_eq!(target.as_deref(), Some("@earendil-works/pi-coding-agent"));
         assert!(!cask);
 
-        let (m, target, _, _) = classify("/Users/x/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js");
+        let (m, target, _, _) = classify(
+            "/Users/x/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+        );
         assert_eq!(m, Manager::Bun);
         assert_eq!(target.as_deref(), Some("@oh-my-pi/pi-coding-agent"));
 
@@ -1209,8 +1682,13 @@ mod tests {
         assert_eq!(m, Manager::Local);
 
         // 用户级 ~/node_modules(用真实 HOME,classify 依赖环境变量)
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap();
-        let (m, _, _, _) = classify(&format!("{}/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", home));
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap();
+        let (m, _, _, _) = classify(&format!(
+            "{}/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+            home
+        ));
         assert_eq!(m, Manager::User);
     }
 
@@ -1220,15 +1698,33 @@ mod tests {
         let cmd = build_update_cmd(&npm).unwrap();
         // npm 可执行文件按环境解析(真实路径/ PATH),断言用结尾匹配
         assert!(cmd[0].ends_with("npm"), "cmd[0] = {}", cmd[0]);
-        assert_eq!(&cmd[1..], &["update", "-g", "--prefix", "/Users/x/.local/share/fnm/node-versions/v24/installation", "@earendil-works/pi-coding-agent"]);
+        assert_eq!(
+            &cmd[1..],
+            &[
+                "update",
+                "-g",
+                "--prefix",
+                "/Users/x/.local/share/fnm/node-versions/v24/installation",
+                "@earendil-works/pi-coding-agent"
+            ]
+        );
 
         let brew_cask = det_for(&AGENTS[1], "/opt/homebrew/Caskroom/codex/0.1/bin/codex");
         let cmd = build_update_cmd(&brew_cask).unwrap();
         assert_eq!(cmd, vec!["brew", "upgrade", "--cask", "codex"]);
 
-        let native = det_for(&AGENTS[0], "/Users/x/.local/share/claude/versions/2.1.228/claude");
+        let native = det_for(
+            &AGENTS[0],
+            "/Users/x/.local/share/claude/versions/2.1.228/claude",
+        );
         let cmd = build_update_cmd(&native).unwrap();
-        assert_eq!(cmd, vec!["/Users/x/.local/share/claude/versions/2.1.228/claude", "update"]);
+        assert_eq!(
+            cmd,
+            vec![
+                "/Users/x/.local/share/claude/versions/2.1.228/claude",
+                "update"
+            ]
+        );
 
         let local = det_for(&AGENTS[3], "/Users/x/proj/node_modules/.bin/pi");
         assert!(build_update_cmd(&local).is_none());
@@ -1237,7 +1733,10 @@ mod tests {
         let dsh = det_for(&AGENTS[2], "/Users/x/.npm/_npx/abc/node_modules/.bin/dsh");
         let cmd = build_update_cmd(&dsh).unwrap();
         assert!(cmd[0].ends_with("npx"), "cmd[0] = {}", cmd[0]);
-        assert_eq!(&cmd[1..], &["--yes", "@deepseek-ai/dsh@latest", "--version"]);
+        assert_eq!(
+            &cmd[1..],
+            &["--yes", "@deepseek-ai/dsh@latest", "--version"]
+        );
 
         // 项目本地依赖:跳过
         let local = det_for(&AGENTS[3], "/Users/x/proj/node_modules/.bin/pi");
@@ -1246,7 +1745,10 @@ mod tests {
 
     #[test]
     fn version_parse_and_compare() {
-        assert_eq!(parse_version("2.1.228 (Claude Code)").as_deref(), Some("2.1.228"));
+        assert_eq!(
+            parse_version("2.1.228 (Claude Code)").as_deref(),
+            Some("2.1.228")
+        );
         assert_eq!(parse_version("omp/17.2.15").as_deref(), Some("17.2.15"));
         assert_eq!(parse_version("0.84.1").as_deref(), Some("0.84.1"));
         assert_eq!(parse_version("0.1.0-rc.6").as_deref(), Some("0.1.0-rc.6"));
@@ -1264,7 +1766,11 @@ mod tests {
     fn registry_has_install_methods_for_all_agents() {
         for a in AGENTS {
             assert!(!a.install_methods.is_empty(), "{} 缺安装方式", a.name);
-            assert!(a.npm_package.is_some(), "{} 缺 npm 包(用于 latest 检查)", a.name);
+            assert!(
+                a.npm_package.is_some(),
+                "{} 缺 npm 包(用于 latest 检查)",
+                a.name
+            );
         }
     }
 
@@ -1275,7 +1781,10 @@ mod tests {
         assert_eq!(l, vec!["✔ done".to_string()]);
         // 进度条 \r 刷新切分为独立行
         let l = clean_output_line("\u{1b}[2K\u{1b}[1G[####] 50%\r[########] 100%");
-        assert_eq!(l, vec!["[####] 50%".to_string(), "[########] 100%".to_string()]);
+        assert_eq!(
+            l,
+            vec!["[####] 50%".to_string(), "[########] 100%".to_string()]
+        );
         // 空白行过滤
         assert!(clean_output_line("   \r  ").is_empty());
     }
@@ -1286,30 +1795,186 @@ mod tests {
         assert!(is_manager_cmd("bun add -g foo"));
         assert!(is_manager_cmd("pnpm add -g foo"));
         assert!(is_manager_cmd("brew install foo"));
+        assert!(is_manager_cmd("winget install --id SST.opencode"));
         assert!(!is_manager_cmd("irm https://x/install.ps1 | iex"));
         assert!(!is_manager_cmd("curl -fsSL https://x | sh"));
     }
 
     #[test]
     fn windows_filters_out_brew_and_uses_powershell_variants() {
-        // Windows 下:brew 不可用;curl 脚本换 PowerShell 变体;npm/bun 保留
+        // Windows 下:brew 不可用;curl 脚本换 PowerShell 变体;npm/bun/winget 保留
         for a in AGENTS {
-            let methods: Vec<_> = a.install_methods.iter().filter(|m| method_available_on(m, true)).collect();
+            let methods: Vec<_> = a
+                .install_methods
+                .iter()
+                .filter(|m| method_visible(m, true, true))
+                .collect();
             assert!(!methods.is_empty(), "{} 在 Windows 无可用安装方式", a.name);
             for m in methods {
-                assert!(!m.command.starts_with("brew "), "{}: brew 不应出现在 Windows", a.name);
+                assert!(
+                    !m.command.starts_with("brew "),
+                    "{}: brew 不应出现在 Windows",
+                    a.name
+                );
                 if m.command.contains("| sh") || m.command.contains("| bash") {
-                    assert!(m.windows.is_some(), "{}: curl|sh 方式缺 Windows 变体", a.name);
+                    assert!(
+                        m.windows.is_some(),
+                        "{}: curl|sh 方式缺 Windows 变体",
+                        a.name
+                    );
                 }
             }
         }
         // claude 的 curl 方式在 Windows 走 PowerShell 变体
         let claude = &AGENTS[0];
-        let curl = claude.install_methods.iter().find(|m| m.id == "curl").unwrap();
-        assert_eq!(curl.windows, Some("irm https://claude.ai/install.ps1 | iex"));
-        // unix 下全部可用
+        let curl = claude
+            .install_methods
+            .iter()
+            .find(|m| m.id == "curl")
+            .unwrap();
+        assert_eq!(
+            curl.windows,
+            Some("irm https://claude.ai/install.ps1 | iex")
+        );
+        // unix + 有 npm:Requires 可见、Fallback 隐藏;无 npm 相反;Always 恒可见
         for a in AGENTS {
-            assert_eq!(a.install_methods.iter().filter(|m| method_available_on(m, false)).count(), a.install_methods.len());
+            for m in a.install_methods {
+                let with_npm = method_visible(m, false, true);
+                let without_npm = method_visible(m, false, false);
+                match m.npm {
+                    NpmCondition::Always => {
+                        if m.command.starts_with("winget ") {
+                            // winget 仅 Windows:unix 下恒不可见,与 npm 条件无关
+                            assert!(
+                                !with_npm && !without_npm,
+                                "{}: winget 在 unix 下不可见",
+                                a.name
+                            );
+                        } else {
+                            assert!(with_npm && without_npm, "{}: Always 方式应恒可见", a.name);
+                        }
+                    }
+                    NpmCondition::Requires => {
+                        assert!(
+                            with_npm && !without_npm,
+                            "{}: Requires 方式仅在有 npm 时可见",
+                            a.name
+                        );
+                    }
+                    NpmCondition::Fallback => {
+                        if m.command.starts_with("winget ") {
+                            // winget 仅 Windows:unix 下恒不可见,与 npm 条件无关
+                            assert!(
+                                !with_npm && !without_npm,
+                                "{}: winget 在 unix 下不可见",
+                                a.name
+                            );
+                        } else {
+                            assert!(
+                                !with_npm && without_npm,
+                                "{}: Fallback 方式仅在无 npm 时可见",
+                                a.name
+                            );
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    fn opencode_classify_and_update_commands() {
+        let def = find_def("opencode").unwrap();
+        // winget 安装(TUI):Packages/<id>_<source>_<hash>/ 提取包 id
+        let (m, target, _, _) = classify("C:\\Users\\x\\AppData\\Local\\Microsoft\\WinGet\\Packages\\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\\opencode.exe");
+        assert_eq!(m, Manager::Winget);
+        assert_eq!(target.as_deref(), Some("SST.opencode"));
+
+        // Windows npm 全局:<prefix>\node_modules\<pkg>(无 lib 层级)
+        let (m, target, _, _) = classify(
+            "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode",
+        );
+        assert_eq!(m, Manager::Npm);
+        assert_eq!(target.as_deref(), Some("opencode-ai"));
+        let win_npm = det_for(
+            def,
+            "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode",
+        );
+        let cmd = build_update_cmd(&win_npm).unwrap();
+        assert!(cmd[0].ends_with("npm"), "cmd[0] = {}", cmd[0]);
+        assert_eq!(&cmd[1..], &["update", "-g", "opencode-ai"]);
+
+        // winget Links shim(realpath 可能不解硬链接):包 id 回退 AgentDef.winget_package
+        let (m, target, _, _) =
+            classify("C:\\Users\\x\\AppData\\Local\\Microsoft\\WinGet\\Links\\opencode.exe");
+        assert_eq!(m, Manager::Winget);
+        assert_eq!(target, None);
+        let links = det_for(
+            def,
+            "C:\\Users\\x\\AppData\\Local\\Microsoft\\WinGet\\Links\\opencode.exe",
+        );
+        let cmd = build_update_cmd(&links).unwrap();
+        assert_eq!(&cmd[..3], &["winget", "upgrade", "--id"]);
+        assert_eq!(&cmd[3], "SST.opencode");
+
+        // winget 升级命令
+        let det = det_for(def, "C:\\Users\\x\\AppData\\Local\\Microsoft\\WinGet\\Packages\\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\\opencode.exe");
+        let cmd = build_update_cmd(&det).unwrap();
+        assert_eq!(&cmd[..3], &["winget", "upgrade", "--id"]);
+        assert_eq!(&cmd[3], "SST.opencode");
+
+        // brew 安装(官方 tap formula):Cellar 路径 → brew upgrade
+        let brew = det_for(def, "/opt/homebrew/Cellar/opencode/1.18.16/bin/opencode");
+        let cmd = build_update_cmd(&brew).unwrap();
+        assert_eq!(cmd, vec!["brew", "upgrade", "opencode"]);
+
+        // 原生安装 → opencode upgrade 自更新
+        let native = det_for(def, "/Users/x/.opencode/bin/opencode");
+        let cmd = build_update_cmd(&native).unwrap();
+        assert_eq!(cmd, vec!["/Users/x/.opencode/bin/opencode", "upgrade"]);
+
+        // npm 全局安装 → npm update -g opencode-ai
+        let npm = det_for(def, "/Users/x/.local/share/fnm/node-versions/v24/installation/lib/node_modules/opencode-ai/bin/opencode");
+        let cmd = build_update_cmd(&npm).unwrap();
+        assert!(cmd[0].ends_with("npm"), "cmd[0] = {}", cmd[0]);
+        assert_eq!(
+            &cmd[1..],
+            &[
+                "update",
+                "-g",
+                "--prefix",
+                "/Users/x/.local/share/fnm/node-versions/v24/installation",
+                "opencode-ai"
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_install_methods_follow_npm_availability() {
+        let oc = find_def("opencode").unwrap();
+        // unix + 有 npm:只给 npm 全局(TUI 首选)
+        let with: Vec<_> = oc
+            .install_methods
+            .iter()
+            .filter(|m| method_visible(m, false, true))
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(with, vec!["npm"]);
+        // unix + 无 npm:brew 补位;winget 仅 Windows
+        let without: Vec<_> = oc
+            .install_methods
+            .iter()
+            .filter(|m| method_visible(m, false, false))
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(without, vec!["brew"]);
+        // Windows + 无 npm:winget TUI
+        let win: Vec<_> = oc
+            .install_methods
+            .iter()
+            .filter(|m| method_visible(m, true, false))
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(win, vec!["winget-tui"]);
     }
 }

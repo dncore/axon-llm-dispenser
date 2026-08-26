@@ -518,3 +518,89 @@ describe("agent 配置一致性检测", () => {
     expect(extractOmpProvider(models, "nope").baseUrl).toBeNull();
   });
 });
+
+import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./opencode";
+import { extractOpenCodeProvider } from "./agent-config";
+
+describe("opencode", () => {
+  const base = {
+    providerName: "axon",
+    displayName: "Axon",
+    baseUrl: "https://gateway.example/v1",
+    defaultModel: "deepseek-v4-flash",
+    models: buildResolvedModels(["deepseek-v4-flash", "qwen3-coder-plus"]),
+  };
+
+  it("空文件创建 provider 块 + 顶层 model,模型 key=id", () => {
+    const r = patchOpenCodeConfig("", base);
+    const doc = JSON.parse(r.text) as {
+      provider: Record<string, { name: string; npm: string; options: { baseURL: string }; models: Record<string, { name?: string }> }>;
+      model: string;
+    };
+    expect(doc.provider.axon.name).toBe("Axon");
+    expect(doc.provider.axon.npm).toBe("@ai-sdk/openai-compatible");
+    expect(doc.provider.axon.options.baseURL).toBe("https://gateway.example/v1");
+    expect(Object.keys(doc.provider.axon.models)).toEqual(["deepseek-v4-flash", "qwen3-coder-plus"]);
+    expect(doc.provider.axon.models["deepseek-v4-flash"]).toEqual({ name: "DeepSeek V4 Flash" });
+    expect(doc.model).toBe("axon/deepseek-v4-flash");
+    expect(r.changes.join(",")).toContain("新增 provider axon");
+    expect(r.changes.join(",")).toContain("baseURL=https://gateway.example/v1");
+  });
+
+  it("保留其它 provider 与顶层键,model 已设时不重复报变更", () => {
+    const existing = JSON.stringify({
+      model: "other/model",
+      provider: { ollama: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "http://localhost:11434/v1" }, models: {} } },
+    });
+    const r = patchOpenCodeConfig(existing, base);
+    const doc = JSON.parse(r.text) as { model: string; provider: Record<string, unknown> };
+    expect(doc.provider.ollama).toBeDefined();
+    expect(doc.model).toBe("axon/deepseek-v4-flash");
+    expect(r.changes.some((c) => c.startsWith("model="))).toBe(true);
+  });
+
+  it("幂等:同参数重复应用输出稳定", () => {
+    const r1 = patchOpenCodeConfig("", base);
+    const r2 = patchOpenCodeConfig(r1.text, base);
+    expect(r2.text).toBe(r1.text);
+    const a1 = patchOpenCodeAuth("", "axon", "sk-x");
+    const a2 = patchOpenCodeAuth(a1.text, "axon", "sk-x");
+    expect(a2.text).toBe(a1.text);
+  });
+
+  it("auth.json 保留其它条目,同名覆盖 type/key", () => {
+    const r = patchOpenCodeAuth(JSON.stringify({ anthropic: { type: "oauth", access: "tok", refresh: "r", expires: 1 } }), "axon", "sk-new");
+    const doc = JSON.parse(r.text) as Record<string, { type: string; key?: string; access?: string }>;
+    expect(doc.anthropic.type).toBe("oauth"); // 其它条目不动
+    expect(doc.axon).toEqual({ type: "api", key: "sk-new" });
+
+    const r2 = patchOpenCodeAuth(r.text, "axon", "sk-rotated");
+    const doc2 = JSON.parse(r2.text) as Record<string, { type: string; key: string }>;
+    expect(doc2.axon).toEqual({ type: "api", key: "sk-rotated" });
+  });
+
+  it("状态解析:provider 模型数、密钥、model", () => {
+    const config = patchOpenCodeConfig("", base).text;
+    const auth = patchOpenCodeAuth("", "axon", "sk-x").text;
+    const s = parseOpenCodeStatus(config, auth, "axon");
+    expect(s.configExists).toBe(true);
+    expect(s.authExists).toBe(true);
+    expect(s.providerConfigured).toBe(true);
+    expect(s.providerBaseUrl).toBe("https://gateway.example/v1");
+    expect(s.providerModels).toBe(2);
+    expect(s.keySet).toBe(true);
+    expect(s.model).toBe("axon/deepseek-v4-flash");
+
+    const empty = parseOpenCodeStatus("", "", "axon");
+    expect(empty.providerConfigured).toBe(false);
+    expect(empty.keySet).toBe(false);
+  });
+
+  it("提取一致性检测:opencode.json baseURL + auth.json key", () => {
+    const config = patchOpenCodeConfig("", base).text;
+    const auth = patchOpenCodeAuth("", "axon", "sk-test").text;
+    expect(extractOpenCodeProvider(config, auth, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
+    expect(extractOpenCodeProvider(config, auth, "nope").baseUrl).toBeNull();
+    expect(extractOpenCodeProvider("bad json", "bad json", "axon")).toEqual({ baseUrl: null, apiKey: null });
+  });
+});

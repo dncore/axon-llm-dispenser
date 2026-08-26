@@ -7,6 +7,7 @@ import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
+import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
 import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
 import {
   compareAgentConfig,
@@ -16,6 +17,7 @@ import {
   extractOmpProvider,
   extractPiProvider,
   extractReasonixProvider,
+  extractOpenCodeProvider,
   type AgentConfigCheck,
 } from "./core/agent-config";
 
@@ -81,6 +83,14 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
     case "pi": {
       const modelsPath = await bridge.joinPath(piH, "models.json");
       found = extractPiProvider(await bridge.readFileOrEmpty(modelsPath), cfg.provider);
+      break;
+    }
+    case "opencode": {
+      const home = await bridge.opencodeHome();
+      const dataHome = await bridge.opencodeDataHome();
+      const configPath = await bridge.joinPath(home, "opencode.json");
+      const authPath = await bridge.joinPath(dataHome, "auth.json");
+      found = extractOpenCodeProvider(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(authPath), cfg.provider);
       break;
     }
     case "omp": {
@@ -528,6 +538,57 @@ export async function ompStatus(cfg: bridge.AppConfig): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// OpenCode
+// ---------------------------------------------------------------------------
+
+export async function configureOpenCode(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.opencodeHome();
+  const dataHome = await bridge.opencodeDataHome();
+  const configPath = await bridge.joinPath(home, "opencode.json");
+  const authPath = await bridge.joinPath(dataHome, "auth.json");
+  const resolved = buildResolvedModels(modelIds);
+  const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
+
+  const p1 = patchOpenCodeConfig(await bridge.readFileOrEmpty(configPath), {
+    providerName: cfg.provider,
+    displayName: cfg.displayName,
+    baseUrl: cfg.baseUrl,
+    models: resolved,
+    defaultModel,
+  });
+  const p2 = patchOpenCodeAuth(await bridge.readFileOrEmpty(authPath), cfg.provider, cfg.apiKey);
+  const w1 = await bridge.writeWithBackup(configPath, p1.text);
+  const w2 = await bridge.writeSecret(authPath, p2.text);
+
+  const lines = [
+    `opencode.json: ${w1.path}`,
+    `  ${p1.changes.join(", ") || "无变化"}`,
+    `auth.json: ${w2}`,
+    `  ${p2.changes.join(", ") || "无变化"}`,
+    `使用: opencode 内 /models 选 ${cfg.provider}/<模型>(默认 ${cfg.provider}/${defaultModel}),重启 opencode 生效`,
+  ];
+  if (w1.backup) lines.push(`备份: ${w1.backup}`);
+  return { changes: [...p1.changes, ...p2.changes], lines };
+}
+
+export async function opencodeStatus(cfg: bridge.AppConfig): Promise<string[]> {
+  const home = await bridge.opencodeHome();
+  const dataHome = await bridge.opencodeDataHome();
+  const configPath = await bridge.joinPath(home, "opencode.json");
+  const authPath = await bridge.joinPath(dataHome, "auth.json");
+  const s = parseOpenCodeStatus(await bridge.readFileOrEmpty(configPath), await bridge.readFileOrEmpty(authPath), cfg.provider);
+  const cli = await detectAgentCli("opencode");
+  return [
+    `OpenCode 配置目录: ${home}`,
+    `opencode.json: ${s.configExists ? "存在" : "缺失"}`,
+    `provider ${cfg.provider}: ${s.providerConfigured ? `已配置(${s.providerModels} 个模型, baseURL=${s.providerBaseUrl})` : "未配置"}`,
+    `auth.json: ${s.authExists ? "存在" : "缺失"}(${s.keySet ? "密钥已写入" : "密钥缺失"})`,
+    `model: ${s.model ?? "(未设置)"}`,
+    `opencode CLI: ${cli ?? "未检测到"}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // 备份还原(所有工具)
 // ---------------------------------------------------------------------------
 
@@ -566,6 +627,11 @@ export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> 
           { id: "omp-models", label: "omp models.yml", path: await bridge.joinPath(ompH, "models.yml") },
           { id: "omp-config", label: "omp config.yml", path: await bridge.joinPath(ompH, "config.yml") },
         ];
+      }
+    case "opencode":
+      {
+        const opencodeH = await bridge.opencodeHome();
+        return [{ id: "opencode-config", label: "OpenCode opencode.json", path: await bridge.joinPath(opencodeH, "opencode.json") }];
       }
     default:
       return [];
