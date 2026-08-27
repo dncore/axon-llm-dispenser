@@ -83,6 +83,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "qwen3.7-max": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen3.7-plus": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen3.8-max": { name: "Qwen 3.8 Max Preview", contextWindow: 983616, maxTokens: 131072, reasoning: true, input: ["text", "image"], compat: { thinkingFormat: "qwen" }, thinkingLevelMap: { off: null } },
+  "qwen3.8-flash": { name: "Qwen 3.8 Flash", contextWindow: 983616, maxTokens: 131072, reasoning: true, input: ["text", "image"], cost: { input: 1, output: 3, cacheRead: 0, cacheWrite: 0 }, compat: { thinkingFormat: "qwen" }, thinkingLevelMap: { off: null } },
   "qwen3-30b-a3b": { name: "Qwen3-30B-A3B (MoE)", contextWindow: 131072, maxTokens: 8192, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwq-32b": { contextWindow: 131072, maxTokens: 8192, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen3.5-flash": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
@@ -107,6 +108,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "glm-5": { contextWindow: 200000, maxTokens: 131072, reasoning: true },
   "glm-5.1": { contextWindow: 200000, maxTokens: 131072, reasoning: true },
   "glm-5.2": { contextWindow: 1000000, maxTokens: 131072, reasoning: true },
+  "glm-5.3-flash": { name: "GLM 5.3 Flash", contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"], cost: { input: 0.8, output: 2.8, cacheRead: 0, cacheWrite: 0 }, thinkingLevelMap: { off: null } },
   "glm-lastest": { contextWindow: 1000000, maxTokens: 131072, reasoning: true },
 
   // ---- Doubao (ByteDance) ----

@@ -35,6 +35,29 @@ describe("buildResolvedModels", () => {
     expect(m.compat.thinkingFormat).toBe("deepseek");
     expect(m.compat.requiresReasoningContentOnAssistantMessages).toBe(true);
   });
+
+  it("qwen3.8-flash 官方规格: 1M 上下文(思考档 983616) + 131K 输出 + 多模态", () => {
+    const [m] = buildResolvedModels(["qwen3.8-flash"]);
+    expect(m.name).toBe("Qwen 3.8 Flash");
+    expect(m.contextWindow).toBe(983616);
+    expect(m.maxTokens).toBe(131072);
+    expect(m.reasoning).toBe(true);
+    expect(m.input).toEqual(["text", "image"]);
+    expect(m.cost).toEqual({ input: 1, output: 3, cacheRead: 0, cacheWrite: 0 });
+    expect(m.thinkingLevelMap).toEqual({ off: null });
+    expect(m.compat.thinkingFormat).toBe("qwen");
+  });
+
+  it("glm-5.3-flash 官方规格: 1M 上下文 + 131K 输出 + 原生多模态", () => {
+    const [m] = buildResolvedModels(["glm-5.3-flash"]);
+    expect(m.name).toBe("GLM 5.3 Flash");
+    expect(m.contextWindow).toBe(1000000);
+    expect(m.maxTokens).toBe(131072);
+    expect(m.reasoning).toBe(true);
+    expect(m.input).toEqual(["text", "image"]);
+    expect(m.cost).toEqual({ input: 0.8, output: 2.8, cacheRead: 0, cacheWrite: 0 });
+    expect(m.thinkingLevelMap).toEqual({ off: null });
+  });
 });
 
 describe("patchCodexConfigToml", () => {
@@ -220,6 +243,8 @@ describe("claude 后缀映射", () => {
   it("按真实上下文窗口加官方后缀", () => {
     expect(formatClaudeModel("deepseek-v4-flash", 1000000)).toBe("deepseek-v4-flash[1m]");
     expect(formatClaudeModel("qwen3.8-max", 983616)).toBe("qwen3.8-max[1m]");
+    expect(formatClaudeModel("qwen3.8-flash", 983616)).toBe("qwen3.8-flash[1m]");
+    expect(formatClaudeModel("glm-5.3-flash", 1000000)).toBe("glm-5.3-flash[1m]");
     expect(formatClaudeModel("glm-5", 200000)).toBe("glm-5[200k]");
     expect(formatClaudeModel("small-model", 128000)).toBe("small-model");
   });
