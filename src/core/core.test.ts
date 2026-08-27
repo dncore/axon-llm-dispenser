@@ -64,11 +64,22 @@ describe("patchCodexConfigToml", () => {
   it("codex 转换代理 helper:base_url 默认 localhost(绕过代理劫持),可指定主机", () => {
     expect(codexProxyBaseUrl(CODX_PROXY_DEFAULT_PORT)).toBe("http://localhost:17321/api/v1");
     expect(codexProxyBaseUrl(18000, "192.168.32.64")).toBe("http://192.168.32.64:18000/api/v1");
-    expect(codexProxyNeeded(["deepseek-v4-flash"])).toBe(false);
-    expect(codexProxyNeeded(["qwen3.8-max"])).toBe(false);
     expect(codexProxyNeeded(["openai/gpt-5.6-sol"])).toBe(true);
     expect(codexProxyNeeded(["GPT-5.6-TERRA"])).toBe(true);
     expect(codexProxyNeeded([])).toBe(false);
+  });
+
+  it("codex 转换代理静态规则:网关卡 /responses 不可用的模型走转换,原生可用的透传", () => {
+    // 转换(chat-only / 网关 responses 损坏):gpt-5.6 / glm / kimi / step / mimo / claude / gemini / deepseek-v4-flash
+    for (const id of ["gpt-5.6-luna", "glm-5.3-flash", "glm-5.2", "glm-4.6v", "kimi-k3", "kimi-k2.6", "kimi-lastest", "step-3.7-flash", "MiMo-V2.5", "grok-4.6", "claude-sonnet-5", "claude-opus-5", "gemini-3.7-flash", "gemini-3.1-pro-preview", "deepseek-v4-flash"]) {
+      expect(codexProxyNeeded([id])).toBe(true);
+    }
+    // 透传(原生 responses 可用):qwen 系 / hy3 / MiniMax / deepseek-v4-pro / kimi-k2.7-code / Recommend
+    for (const id of ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus", "qwen-lastest", "hy3", "MiniMax-M3", "MiniMax-lastest", "deepseek-v4-pro", "kimi-k2.7-code", "Recommend"]) {
+      expect(codexProxyNeeded([id])).toBe(false);
+    }
+    // deepseek-v4-flash 子串同时命中 vision-exp(其 chat 路径可用,统一走转换)
+    expect(codexProxyNeeded(["deepseek-v4-flash-vision-exp"])).toBe(true);
   });
 
   it("空文件创建 provider 段", () => {

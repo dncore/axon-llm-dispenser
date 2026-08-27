@@ -6,8 +6,12 @@ import { escapeRegExp } from "./util";
 
 /** Codex Responses 转换代理:默认监听端口。 */
 export const CODX_PROXY_DEFAULT_PORT = 17321;
-/** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。 */
-export const CODX_PROXY_CONVERT_PATTERN = "gpt-5.6";
+/** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。
+ * 静态规则由当前网关卡预探测生成(2026-08-27):网关对这些模型的原生 /responses
+ * 不可用(502/参数错误),chat/completions 可用;其余模型(qwen 系/hy3/MiniMax/
+ * deepseek-v4-pro/kimi-k2.7-code 等)原生 responses 可用,走透传。 */
+export const CODX_PROXY_CONVERT_PATTERN =
+  "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
 /** 转换代理的 base_url 主机与端口(Codex 配置指向它)。默认 localhost 天然绕过系统/环境代理劫持;
  * 被劫持且 localhost 不可达时,Rust 侧自动改用本机 LAN IP 并返回 codexHost。 */
@@ -15,10 +19,16 @@ export function codexProxyBaseUrl(port: number, host = "localhost"): string {
   return `http://${host}:${port}/api/v1`;
 }
 
-/** 模型列表里是否存在需要走转换代理的模型。 */
+/** 模型列表里是否存在需要走转换代理的模型(按 | 分隔的规则子串匹配,与 Rust 端一致)。 */
 export function codexProxyNeeded(modelIds: string[]): boolean {
-  const p = CODX_PROXY_CONVERT_PATTERN.toLowerCase();
-  return modelIds.some((id) => id.toLowerCase().includes(p));
+  const patterns = CODX_PROXY_CONVERT_PATTERN.toLowerCase()
+    .split("|")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return modelIds.some((id) => {
+    const ml = id.toLowerCase();
+    return patterns.some((p) => ml.includes(p));
+  });
 }
 
 export type CodexConfigInput = {

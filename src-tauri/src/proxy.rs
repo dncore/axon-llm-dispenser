@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const DEFAULT_PORT: u16 = 17321;
-pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6";
+pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_id(prefix: &str) -> String {
