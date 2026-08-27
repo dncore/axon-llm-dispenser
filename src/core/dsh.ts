@@ -116,21 +116,27 @@ export function patchDshProvider(text: string, opts: DshProviderInput): { text: 
   return { text: next, changes: next === text ? [] : [`providers.${opts.providerName} 已更新(${modelCount} 个模型)`] };
 }
 
-/** 在 settings.yaml 中 upsert 顶层 `agent-default-model:` 段。 */
+/** 在 settings.yaml 中 upsert 顶层 `agent-default-model:` 段。
+ * 该段由 dsh 设置界面管理(用户可在 UI 里选择默认 provider/model 与
+ * reasoningEffort):dsh 已配置时 axon 不覆盖,避免改掉用户选择、丢失
+ * 已有字段;仅当缺失(或空段)时才写入指向本网关的默认值。 */
 export function patchDshDefaultModel(text: string, provider: string, model: string): { text: string; changes: string[] } {
   const NS = "agent-default-model";
   const block = findKeyInRegion(text, 0, text.length, NS, 0);
-  if (!block) {
-    const section = `${NS}:\n  provider: ${yamlQuote(provider)}\n  model: ${yamlQuote(model)}\n`;
-    const next = (text.trim() ? text.replace(/\s+$/, "") + "\n\n" : "") + section;
-    return { text: next, changes: [`新建 ${NS}: 段(provider=${provider}, model=${model})`] };
+  if (block && headerHasInlineContent(text, block.start, block.end)) throw new Error(`${NS}: 使用内联样式(flow style),请手动编辑 settings.yaml`);
+  if (block) {
+    const bodyStart = lineAfter(text, block.end);
+    const bodyEnd = blockBodyEnd(text, bodyStart, block.indent, text.length);
+    // dsh 已配置(块体非空):尊重用户选择,不覆盖
+    if (text.slice(bodyStart, bodyEnd).trim().length > 0) return { text, changes: [] };
+    // 空段(仅 `agent-default-model:`):补默认值
+    const section = `  provider: ${yamlQuote(provider)}\n  model: ${yamlQuote(model)}\n`;
+    const next = text.slice(0, bodyStart) + section + text.slice(bodyEnd);
+    return { text: next, changes: [`${NS}: 空段补默认(provider=${provider}, model=${model})`] };
   }
-  if (headerHasInlineContent(text, block.start, block.end)) throw new Error(`${NS}: 使用内联样式(flow style),请手动编辑 settings.yaml`);
-  const bodyStart = lineAfter(text, block.end);
-  const bodyEnd = blockBodyEnd(text, bodyStart, block.indent, text.length);
-  const body = `  provider: ${yamlQuote(provider)}\n  model: ${yamlQuote(model)}\n`;
-  const next = text.slice(0, bodyStart) + body + text.slice(bodyEnd);
-  return { text: next, changes: next === text ? [] : [`${NS} 已更新(provider=${provider}, model=${model})`] };
+  const section = `${NS}:\n  provider: ${yamlQuote(provider)}\n  model: ${yamlQuote(model)}\n`;
+  const next = (text.trim() ? text.replace(/\s+$/, "") + "\n\n" : "") + section;
+  return { text: next, changes: [`新建 ${NS}: 段(provider=${provider}, model=${model})`] };
 }
 
 /** 删除 llm-pi-ai.providers 下除 target 外的所有 provider 路由(改 provider 名后清理旧路由残留)。 */
@@ -177,18 +183,6 @@ export function removeDshOtherProviders(text: string, target: string): { text: s
     }
   }
   return { text: out, removed };
-}
-
-/** 删除废弃的 `llm-deepseek` 段(新版不再生成,清理旧版遗留)。 */
-export function removeDshDeepseekSection(text: string): { text: string; removed: boolean } {
-  const NS = "llm-deepseek";
-  const block = findKeyInRegion(text, 0, text.length, NS, 0);
-  if (!block) return { text, removed: false };
-  const bodyStart = lineAfter(text, block.end);
-  const bodyEnd = blockBodyEnd(text, bodyStart, block.indent, text.length);
-  // 连同前面的空行一起删,避免留下孤立空行
-  const next = text.slice(0, block.start).replace(/\n{2,}$/, "\n") + text.slice(bodyEnd);
-  return { text: next, removed: true };
 }
 
 // ---------------------------------------------------------------------------

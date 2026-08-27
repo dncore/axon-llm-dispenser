@@ -6,7 +6,7 @@ import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel 
 import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
-import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
+import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
 import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
 import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
 import {
@@ -330,12 +330,7 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
 
   let settingsText = await bridge.readFileOrEmpty(settingsPath);
   const cleanup: string[] = [];
-  // 清理旧版遗留:废弃的 llm-deepseek 段 + 改 provider 名后残留的旧 provider 路由
-  const rmDs = removeDshDeepseekSection(settingsText);
-  if (rmDs.removed) {
-    settingsText = rmDs.text;
-    cleanup.push("移除废弃的 llm-deepseek 段");
-  }
+  // 只清理改 provider 名后残留的旧 provider 路由;llm-deepseek 段由 dsh 自己维护,不动
   const rmProv = removeDshOtherProviders(settingsText, cfg.provider);
   if (rmProv.removed.length > 0) {
     settingsText = rmProv.text;
