@@ -79,7 +79,7 @@ export function patchCodexConfigToml(text: string, input: CodexConfigInput): { t
 
 function buildCodexEntry(m: ResolvedModel, providerName: string, priority: number) {
   const cw = m.contextWindow || 128000;
-  return {
+  const entry: Record<string, unknown> = {
     base_instructions: "",
     context_window: cw,
     description: `${providerName}: ${m.name} — openai-compatible gateway`,
@@ -97,8 +97,20 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
     supports_reasoning_summaries: false,
     supports_tools: true,
     truncation_policy: { limit: cw, mode: "tokens" },
+    // 网关模型一律关掉 Responses Lite:Codex 内置目录对 gpt-5.6 系硬编码
+    // use_responses_lite=true,会把工具定义塞进请求 input[0].additional_tools,
+    // 自建网关翻译成 Chat Completions 时误当 messages[0].content 的 content item,
+    // 上游只认标准 tools 参数 → 400/500 → 网关汇总 502。显式 false 强制标准请求。
+    use_responses_lite: false,
     visibility: "list",
   };
+  // GPT-5.6 家族额外关掉内置 code_mode_only / multi_agent v2(同样只在局域网网关后端可用,
+  // 自建 OpenAI 兼容网关不支持 → 解除工具模式与多智能体相关请求形状)。
+  if (/gpt-5\.6/i.test(m.id)) {
+    entry.tool_mode = "direct";
+    entry.multi_agent_version = null;
+  }
+  return entry;
 }
 
 /** 生成 codex models.json 内容(所有模型 visibility=list)。 */

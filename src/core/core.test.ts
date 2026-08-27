@@ -83,6 +83,22 @@ describe("patchCodexConfigToml", () => {
     expect(parsed.models.length).toBe(2);
     expect(parsed.models.every((m) => m.visibility === "list")).toBe(true);
   });
+
+  it("models.json 网关条目关闭 Responses Lite;gpt-5.6 家族额外覆盖内置 code_mode", () => {
+    const models = buildResolvedModels(["openai/gpt-5.6-sol", "deepseek-v4-flash"]);
+    const json = renderCodexModelsJson(models, "axon");
+    const doc = JSON.parse(json) as { models: Array<Record<string, unknown> & { slug: string }> };
+    const sol = doc.models.find((m) => m.slug === "openai/gpt-5.6-sol")!;
+    const ds = doc.models.find((m) => m.slug === "deepseek-v4-flash")!;
+    // 全部网关模型:禁用 Responses Lite,避免工具定义被塞进 messages[].content 的 additional_tools
+    expect(sol.use_responses_lite).toBe(false);
+    expect(ds.use_responses_lite).toBe(false);
+    // gpt-5.6 家族:覆盖 Codex 内置硬编码 tool_mode=code_mode_only / multi_agent v2
+    expect(sol.tool_mode).toBe("direct");
+    expect(sol.multi_agent_version).toBeNull();
+    expect("tool_mode" in ds).toBe(false);
+    expect("multi_agent_version" in ds).toBe(false);
+  });
 });
 
 describe("patchReasonix", () => {
