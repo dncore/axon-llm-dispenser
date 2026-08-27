@@ -16,6 +16,8 @@ export type AppConfig = {
   anthropicBaseUrl: string;
   /** 全局过滤 Doubao 系模型(默认开启,生成配置不含 doubao)。 */
   excludeDoubao: boolean;
+  /** Codex Responses 转换代理(网关 /responses 对部分模型如 gpt-5.6 转换不可用时开启)。 */
+  codexProxy?: { enabled: boolean; port: number };
   /** 上次拉取的模型列表(持久化,避免刷新/升级后模型项丢失)。 */
   models?: { id: string; ownedBy?: string }[];
 };
@@ -28,6 +30,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultModel: "",
   anthropicBaseUrl: "",
   excludeDoubao: true,
+  codexProxy: { enabled: true, port: 17321 },
   models: [],
 };
 
@@ -146,6 +149,31 @@ export function fetchModels(baseUrl: string, apiKey: string): Promise<ModelInfo[
   return invoke<ModelInfo[]>("fetch_models", { baseUrl, apiKey });
 }
 
+// ---------------------------------------------------------------------------
+// Codex Responses 转换代理
+// ---------------------------------------------------------------------------
+
+export type CodexProxyInfo = {
+  running: boolean;
+  port?: number;
+  pid?: number;
+  upstream?: string;
+  pattern?: string;
+};
+
+/** 启动/复用代理进程(独立常驻),返回实际端口。 */
+export function proxyStart(port: number, upstreamBaseUrl: string, convertPattern: string): Promise<{ port: number; pid: number; upstream: string; pattern: string }> {
+  return invoke("proxy_start", { port, upstreamBaseUrl, convertPattern });
+}
+
+export function proxyStatus(): Promise<CodexProxyInfo> {
+  return invoke<CodexProxyInfo>("proxy_status");
+}
+
+export function proxyStop(): Promise<void> {
+  return invoke("proxy_stop");
+}
+
 export function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
@@ -225,6 +253,10 @@ export async function loadAppConfig(): Promise<AppConfig> {
       defaultModel: parsed.defaultModel || "",
       anthropicBaseUrl: parsed.anthropicBaseUrl || "",
       excludeDoubao: parsed.excludeDoubao ?? true,
+      codexProxy: {
+        enabled: parsed.codexProxy?.enabled ?? true,
+        port: parsed.codexProxy?.port ?? 17321,
+      },
       models: Array.isArray(parsed.models) ? parsed.models : [],
     };
   } catch {

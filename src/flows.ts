@@ -4,7 +4,7 @@ import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { generateToken, timestamp } from "./core/util";
-import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus } from "./core/codex";
+import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
 import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
@@ -66,6 +66,10 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
     case "codex": {
       const configPath = await bridge.joinPath(codexH, "config.toml");
       found = extractCodexProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
+      // 代理模式:Codex 配置写的是本机代理地址,比对目标用该地址
+      if (cfg.codexProxy?.enabled ?? true) {
+        wantUrl = codexProxyBaseUrl(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT);
+      }
       break;
     }
     case "reasonix": {
@@ -145,10 +149,26 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
   const modelsPath = await bridge.joinPath(home, "models.json");
   const resolved = buildResolvedModels(modelIds);
 
+  // Codex 转换代理:开启时把 Codex 的 base_url 指向本机代理(独立常驻进程),
+  // 代理按模型规则把 Responses 翻译成 Chat 打到网关(网关对 gpt-5.6 家族
+  // /responses 转换不可用);其它模型代理原样透传。
+  let baseUrl = cfg.baseUrl;
+  const proxyLines: string[] = [];
+  if (cfg.codexProxy?.enabled ?? true) {
+    const st = await bridge.proxyStart(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, cfg.baseUrl, CODX_PROXY_CONVERT_PATTERN);
+    baseUrl = codexProxyBaseUrl(st.port);
+    proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}`);
+    if (codexProxyNeeded(modelIds)) {
+      proxyLines.push(`  ${CODX_PROXY_CONVERT_PATTERN} 家族经代理转 Chat Completions(网关 /responses 不可用)`);
+    } else {
+      proxyLines.push(`  当前模型列表无 ${CODX_PROXY_CONVERT_PATTERN} 家族,代理纯透传`);
+    }
+  }
+
   const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchCodexConfigToml(cfgText, {
     providerName: cfg.provider,
-    baseUrl: cfg.baseUrl,
+    baseUrl,
     apiKey: cfg.apiKey,
     defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
     modelsJsonPath: modelsPath,
@@ -164,6 +184,7 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
     `config.toml: ${written.path}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
     `models.json: ${modelsWritten.path}(${resolved.length} 个模型)`,
+    ...proxyLines,
   ];
   if (written.backup) lines.push(`备份: ${written.backup}`);
   return { changes: patched.changes, lines };
@@ -179,6 +200,15 @@ export async function codexStatus(): Promise<string[]> {
     authJsonExists: await bridge.exists(authPath),
   });
   const cli = await detectAgentCli("codex");
+  let proxyLine = `转换代理: 未启用`;
+  try {
+    const p = await bridge.proxyStatus();
+    proxyLine = p.running
+      ? `转换代理: 运行中 (127.0.0.1:${p.port},规则 ${p.pattern ?? "-"},→ ${p.upstream ?? "?"})`
+      : `转换代理: 未运行(代理模式开启但进程不在,Codex 请求会失败,请重跑「配置」)`;
+  } catch {
+    proxyLine = `转换代理: 状态查询失败`;
+  }
   return [
     `Codex home: ${home}`,
     `config.toml: ${s.configExists ? "存在" : "缺失"}`,
@@ -188,6 +218,7 @@ export async function codexStatus(): Promise<string[]> {
     `model_catalog_json: ${s.modelCatalogJson ?? "(未设置!)"}`,
     `provider 段: ${s.providerConfigured ? "已配置" : "未配置"}`,
     `models.json: ${s.catalogCount} 条(list ${s.catalogList} / hide ${s.catalogHide})`,
+    proxyLine,
     `codex CLI: ${cli ?? "未检测到"}`,
   ];
 }

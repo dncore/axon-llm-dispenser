@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels } from "./models";
-import { patchCodexConfigToml, renderCodexModelsJson } from "./codex";
+import { patchCodexConfigToml, renderCodexModelsJson, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
 
@@ -61,6 +61,16 @@ describe("buildResolvedModels", () => {
 });
 
 describe("patchCodexConfigToml", () => {
+  it("codex 转换代理 helper:本地 base_url 与 gpt-5.6 家族匹配", () => {
+    expect(codexProxyBaseUrl(CODX_PROXY_DEFAULT_PORT)).toBe("http://127.0.0.1:17321/api/v1");
+    expect(codexProxyBaseUrl(18000)).toBe("http://127.0.0.1:18000/api/v1");
+    expect(codexProxyNeeded(["deepseek-v4-flash"])).toBe(false);
+    expect(codexProxyNeeded(["qwen3.8-max"])).toBe(false);
+    expect(codexProxyNeeded(["openai/gpt-5.6-sol"])).toBe(true);
+    expect(codexProxyNeeded(["GPT-5.6-TERRA"])).toBe(true);
+    expect(codexProxyNeeded([])).toBe(false);
+  });
+
   it("空文件创建 provider 段", () => {
     const r = patchCodexConfigToml("", {
       providerName: "axon",

@@ -110,6 +110,14 @@ function build(): void {
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
       h("span", {}, ["过滤 Doubao 系模型"]),
     ]),
+    h("label", { class: "row toggle", title: "网关 /responses 对 gpt-5.6 家族转换不可用(502)时,把 Codex 指向本机代理转 Chat Completions;其它模型代理纯透传" }, [
+      h("input", { id: "chk-codex-proxy", type: "checkbox", checked: "checked" }),
+      h("span", {}, ["Codex 转换代理(修复 gpt-5.6 系 502)"]),
+    ]),
+    h("div", { class: "row proxy-port-row" }, [
+      h("span", { class: "field-label" }, ["代理端口"]),
+      h("input", { id: "input-proxy-port", class: "input port-input", type: "number", value: "17321", min: "1024", max: "65535" }),
+    ]),
     h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["填写网关后点 ↻ 拉取模型列表"])]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -677,6 +685,10 @@ function readFields(): void {
   config.apiKey = ($("input-key") as HTMLInputElement).value.trim();
   config.anthropicBaseUrl = ($("input-anthropic") as HTMLInputElement).value.trim();
   config.excludeDoubao = ($("chk-exclude-doubao") as HTMLInputElement).checked;
+  config.codexProxy = {
+    enabled: ($("chk-codex-proxy") as HTMLInputElement).checked,
+    port: Math.min(65535, Math.max(1024, Number(($("input-proxy-port") as HTMLInputElement).value) || 17321)),
+  };
 }
 
 /** 把配置填进表单(启动加载与「删除配置」重置共用)。 */
@@ -687,6 +699,8 @@ function fillForm(cfg: bridge.AppConfig): void {
   ($("input-key") as HTMLInputElement).value = cfg.apiKey;
   ($("input-anthropic") as HTMLInputElement).value = cfg.anthropicBaseUrl;
   ($("chk-exclude-doubao") as HTMLInputElement).checked = cfg.excludeDoubao;
+  ($("chk-codex-proxy") as HTMLInputElement).checked = cfg.codexProxy?.enabled ?? true;
+  ($("input-proxy-port") as HTMLInputElement).value = String(cfg.codexProxy?.port ?? 17321);
 }
 
 /** 表单恢复刚安装时的初始状态(含 API Key 眼睛与模型列表)。 */

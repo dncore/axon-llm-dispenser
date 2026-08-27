@@ -272,6 +272,11 @@ body {
 .row { display: flex; align-items: center; gap: 10px; }
 .hint { color: var(--muted); font-size: 12px; }
 
+/* Codex 转换代理:开关行 + 端口输入行 */
+.proxy-port-row { margin-top: 4px; gap: 8px; }
+.proxy-port-row .field-label { flex-shrink: 0; }
+.port-input { width: 90px; }
+
 /* 模型目录/工具接入/连接设置:标题行左右分布(右侧放计数+按钮/帮助图标/状态点) */
 .card h2.models-title,
 .card h2.tools-title,
