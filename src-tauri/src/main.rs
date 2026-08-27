@@ -15,11 +15,17 @@ fn main() {
             .get(4)
             .cloned()
             .unwrap_or_else(|| axon_llm_dispenser_lib::proxy::DEFAULT_CONVERT_PATTERN.to_string());
-        let bind_ip = args
+        // 监听地址列表(逗号分隔,默认 127.0.0.1)与 codex 主机名(默认 localhost)
+        let bind_ips = args
             .get(5)
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        axon_llm_dispenser_lib::proxy::run_server_blocking(port, bind_ip, upstream, pattern);
+            .unwrap_or_else(|| "127.0.0.1".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        let _codex_host = args.get(6).cloned().unwrap_or_else(|| "localhost".to_string());
+        axon_llm_dispenser_lib::proxy::run_server_blocking(port, bind_ips, upstream, pattern);
         return;
     }
     axon_llm_dispenser_lib::run();

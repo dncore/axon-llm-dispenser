@@ -61,9 +61,9 @@ describe("buildResolvedModels", () => {
 });
 
 describe("patchCodexConfigToml", () => {
-  it("codex 转换代理 helper:本地 base_url 与 gpt-5.6 家族匹配", () => {
-    expect(codexProxyBaseUrl(CODX_PROXY_DEFAULT_PORT)).toBe("http://127.0.0.1:17321/api/v1");
-    expect(codexProxyBaseUrl(18000)).toBe("http://127.0.0.1:18000/api/v1");
+  it("codex 转换代理 helper:base_url 默认 localhost(绕过代理劫持),可指定主机", () => {
+    expect(codexProxyBaseUrl(CODX_PROXY_DEFAULT_PORT)).toBe("http://localhost:17321/api/v1");
+    expect(codexProxyBaseUrl(18000, "192.168.32.64")).toBe("http://192.168.32.64:18000/api/v1");
     expect(codexProxyNeeded(["deepseek-v4-flash"])).toBe(false);
     expect(codexProxyNeeded(["qwen3.8-max"])).toBe(false);
     expect(codexProxyNeeded(["openai/gpt-5.6-sol"])).toBe(true);

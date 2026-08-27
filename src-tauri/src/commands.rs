@@ -124,11 +124,12 @@ pub async fn proxy_start(
 ) -> Result<serde_json::Value, String> {
     let cfg_dir = app.path().app_config_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let (st, note) = crate::proxy::start_with_hijack_fallback(&cfg_dir, port, &upstream_base_url, &convert_pattern)?;
+        let (st, note) = crate::proxy::start_auto(&cfg_dir, port, &upstream_base_url, &convert_pattern)?;
         Ok(serde_json::json!({
             "port": st.port, "pid": st.pid,
             "upstream": st.upstream, "pattern": st.pattern,
-            "bindIp": st.bind_ip, "hijackWarning": note,
+            "bindIps": st.bind_ips, "codexHost": st.codex_host,
+            "hijackWarning": note,
         }))
     })
     .await
@@ -140,16 +141,16 @@ pub async fn proxy_status(app: tauri::AppHandle) -> Result<serde_json::Value, St
     let cfg_dir = app.path().app_config_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let state = crate::proxy::read_state(&cfg_dir);
-        let running = state.as_ref().map(|s| crate::proxy::health_check(&s.bind_ip, s.port)).unwrap_or(false);
-        let hijack = if running { crate::proxy::detect_loopback_hijack(state.as_ref().map(|s| s.port).unwrap_or(0)) } else { None };
+        let running = state.as_ref().map(|s| crate::proxy::health_check(&s.codex_host, s.port)).unwrap_or(false);
+        let hijack = if running { !crate::proxy::probe_with_default_proxy(&format!("http://localhost:{}/healthz", state.as_ref().map(|s| s.port).unwrap_or(0))) } else { false };
         Ok(serde_json::json!({
             "running": running,
             "port": state.as_ref().map(|s| s.port),
             "pid": state.as_ref().map(|s| s.pid),
             "upstream": state.as_ref().map(|s| s.upstream.clone()),
             "pattern": state.as_ref().map(|s| s.pattern.clone()),
-            "bindIp": state.as_ref().map(|s| s.bind_ip.clone()),
-            "hijackWarning": hijack,
+            "codexHost": state.as_ref().map(|s| s.codex_host.clone()),
+            "hijackWarning": if hijack { state.as_ref().map(|s| format!("检测到系统/环境代理劫持 localhost,Codex 可能无法连接本机代理(当前地址 {}:{})", s.codex_host, s.port)) } else { None },
         }))
     })
     .await

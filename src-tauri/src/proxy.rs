@@ -829,12 +829,20 @@ pub struct ProxyRunState {
     pub pid: u32,
     pub upstream: String,
     pub pattern: String,
-    #[serde(default = "default_bind_ip")]
-    pub bind_ip: String,
+    /// 代理进程监听的地址列表(如 127.0.0.1 + ::1 或本机 LAN IP)。
+    #[serde(default = "default_bind_ips")]
+    pub bind_ips: Vec<String>,
+    /// 写入 Codex 配置的 base_url 主机名(localhost | 127.0.0.1 | LAN IP)。
+    #[serde(default = "default_codex_host")]
+    pub codex_host: String,
 }
 
-fn default_bind_ip() -> String {
-    "127.0.0.1".to_string()
+fn default_bind_ips() -> Vec<String> {
+    vec!["127.0.0.1".to_string()]
+}
+
+fn default_codex_host() -> String {
+    "localhost".to_string()
 }
 
 pub fn state_file_path(config_dir: &str) -> String {
@@ -861,14 +869,15 @@ pub fn clear_state(config_dir: &str) {
 }
 
 /// 拉起独立代理进程(当前可执行文件 + --proxy-server,脱离 GUI 独立运行)。
-pub fn spawn_proxy(port: u16, bind_ip: &str, upstream: &str, pattern: &str) -> Result<u32, String> {
+pub fn spawn_proxy(port: u16, bind_ips: &[String], codex_host: &str, upstream: &str, pattern: &str) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位自身可执行文件失败: {e}"))?;
     let mut cmd = Command::new(exe);
     cmd.arg("--proxy-server")
         .arg(port.to_string())
         .arg(upstream.to_string())
         .arg(pattern.to_string())
-        .arg(bind_ip.to_string());
+        .arg(bind_ips.join(","))
+        .arg(codex_host.to_string());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -921,13 +930,15 @@ pub fn health_check(ip: &str, port: u16) -> bool {
 pub fn ensure_running(
     config_dir: &str,
     port: u16,
-    bind_ip: &str,
+    bind_ips: &[String],
+    codex_host: &str,
     upstream: &str,
     pattern: &str,
 ) -> Result<ProxyRunState, String> {
-    if health_check(bind_ip, port) {
+    let health_target = if codex_host == "localhost" { "localhost" } else { codex_host };
+    if health_check(health_target, port) {
         if let Some(st) = read_state(config_dir) {
-            if st.upstream == upstream && st.pattern == pattern && st.bind_ip == bind_ip {
+            if st.upstream == upstream && st.pattern == pattern && st.codex_host == codex_host && st.bind_ips == bind_ips {
                 return Ok(st);
             }
         }
@@ -938,8 +949,8 @@ pub fn ensure_running(
         if is_pid_alive(st.pid) && st.port == port {
             // 进程在但健康检查失败(启动中?)再等一会
             for _ in 0..25 {
-                if health_check(&st.bind_ip, port) {
-                    if st.upstream == upstream && st.pattern == pattern && st.bind_ip == bind_ip {
+                if health_check(&st.codex_host, port) {
+                    if st.upstream == upstream && st.pattern == pattern && st.codex_host == codex_host && st.bind_ips == bind_ips {
                         return Ok(st);
                     }
                     break;
@@ -949,12 +960,12 @@ pub fn ensure_running(
         }
         let _ = stop(config_dir);
     }
-    let pid = spawn_proxy(port, bind_ip, upstream, pattern)?;
-    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ip: bind_ip.to_string() };
+    let pid = spawn_proxy(port, bind_ips, codex_host, upstream, pattern)?;
+    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ips: bind_ips.to_vec(), codex_host: codex_host.to_string() };
     write_state(config_dir, &st)?;
     // 等就绪(最多 6s)
     for _ in 0..30 {
-        if health_check(bind_ip, port) {
+        if health_check(health_target, port) {
             return Ok(st);
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -975,19 +986,31 @@ pub fn stop(config_dir: &str) -> Result<(), String> {
 }
 
 /// 独立运行模式入口(由 main.rs 在 --proxy-server 时调用,常驻)。
-pub fn run_server_blocking(port: u16, bind_ip: String, upstream: String, pattern: String) {
+pub fn run_server_blocking(port: u16, bind_ips: Vec<String>, upstream: String, pattern: String) {
     let rt = tokio::runtime::Runtime::new().expect("failed to init tokio runtime");
     rt.block_on(async move {
         let app = build_app(upstream, pattern);
-        let addr: SocketAddr = format!("{bind_ip}:{port}")
-            .parse()
-            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => {
-                let _ = axum::serve(listener, app).await;
+        let mut listeners = Vec::new();
+        for ip in bind_ips {
+            let addr: SocketAddr = format!("{ip}:{port}")
+                .parse()
+                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => listeners.push(l),
+                Err(e) => eprintln!("proxy bind {addr} failed: {e}"),
             }
-            Err(e) => eprintln!("proxy bind {addr} failed: {e}"),
         }
+        if listeners.is_empty() {
+            return;
+        }
+        let mut futs = Vec::new();
+        for l in listeners {
+            let app = app.clone();
+            futs.push(async move {
+                let _ = axum::serve(l, app).await;
+            });
+        }
+        futures_util::future::join_all(futs).await;
     });
 }
 
@@ -1027,61 +1050,94 @@ fn current_proxy_url() -> Option<String> {
     None
 }
 
-/// 用 codex 同款方式(默认 reqwest,含 macOS 系统代理自动检测)探测回环代理是否被劫持。
-pub fn detect_loopback_hijack(port: u16) -> Option<String> {
-    // 系统代理劫持回环只发生在 macOS(reqwest system-proxy 特性);Windows 回环默认放行
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
+/// 用 codex 同款方式(默认 reqwest,含 env + macOS 系统代理自动检测)探测某地址可达性。
+/// 结果反映「codex 进程视角」:若该地址被系统/环境代理劫持则探测失败。
+pub fn probe_with_default_proxy(url: &str) -> bool {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
-        Err(_) => return None,
+        Err(_) => return false,
     };
-    let hijacked = rt.block_on(async {
+    rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(4))
             .build()
             .unwrap_or_default();
-        // 不带 .no_proxy():与 codex 一样会走系统代理
-        match client.get(format!("http://127.0.0.1:{port}/healthz")).send().await {
-            Ok(r) => r.status().as_u16() != 200,
-            Err(_) => true,
+        match client.get(url).send().await {
+            Ok(r) => r.status().as_u16() == 200,
+            Err(_) => false,
         }
-    });
-    if hijacked {
-        current_proxy_url()
-    } else {
-        None
-    }
+    })
 }
 
-/// 协调入口:先按回环起代理;若被系统代理劫持,自动写入 launchd 用户域 no_proxy,
-/// 使新启动的 Codex/终端绕开系统代理对回环的劫持(无需 LAN 暴露)。
-pub fn start_with_hijack_fallback(
+/// 本机 LAN IPv4(优先 en0/en1;失败返回 None)。
+fn lan_ip() -> Option<String> {
+    for iface in ["en0", "en1", "en2", "eth0", "eth1"] {
+        if let Ok(out) = Command::new("ipconfig").arg("getifaddr").arg(iface).output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() && !s.starts_with("127.") {
+                return Some(s);
+            }
+        }
+    }
+    // Windows 兜底:取第一个非回环 IPv4(v4 优先)
+    #[cfg(windows)]
+    {
+        if let Ok(out) = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown'} | Select-Object -First 1).IPAddress"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() && !s.starts_with("127.") {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// 通用自动选择(对任意代理端点/IP 有效):
+/// 1. 默认用 `localhost` 主机名(标准环境 no_proxy 均含 localhost,天然绕过系统/环境代理劫持;
+///    代理监听 127.0.0.1 + ::1 双栈回环);
+/// 2. 若 localhost 也被劫持(罕见:no_proxy 连 localhost 都没有)→ 自动改绑本机 LAN IP,并把
+///    base_url 写到 LAN 地址(劫持代理通常可达同网段本机);
+/// 3. 仍不可达 → 返回可操作提示。
+pub fn start_auto(
     config_dir: &str,
     port: u16,
     upstream: &str,
     pattern: &str,
 ) -> Result<(ProxyRunState, Option<String>), String> {
-    let st = ensure_running(config_dir, port, "127.0.0.1", upstream, pattern)?;
+    let loopback: Vec<String> = vec!["127.0.0.1".to_string(), "::1".to_string()];
+    let st = ensure_running(config_dir, port, &loopback, "localhost", upstream, pattern)?;
     let mut note: Option<String> = None;
-    if let Some(proxy) = detect_loopback_hijack(port) {
-        let applied = std::process::Command::new("launchctl")
-            .arg("setenv")
-            .arg("no_proxy")
-            .arg("127.0.0.1,localhost")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        note = Some(if applied {
-            format!(
-                "检测到系统代理 {proxy} 劫持本地回环,已自动设置 no_proxy=127.0.0.1,localhost(launchctl);请重启 Codex/终端后生效"
-            )
-        } else {
-            format!(
-                "检测到系统代理 {proxy} 劫持本地回环;请在系统代理设置中放行 127.0.0.1 与 localhost,或执行: launchctl setenv no_proxy 127.0.0.1,localhost"
-            )
-        });
+    if !probe_with_default_proxy(&format!("http://localhost:{port}/healthz")) {
+        // localhost 被劫持:macOS 顺手写入 launchd no_proxy(新进程生效),再试 LAN 兜底
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("launchctl")
+                .arg("setenv").arg("no_proxy").arg("127.0.0.1,localhost")
+                .status();
+        }
+        if let Some(ip) = lan_ip() {
+            let lan: Vec<String> = vec![ip.clone()];
+            if probe_with_default_proxy(&format!("http://{ip}:{port}/healthz")) {
+                let st2 = ensure_running(config_dir, port, &lan, &ip, upstream, pattern)?;
+                note = Some(format!(
+                    "检测到系统/环境代理劫持 localhost,已自动改用本机地址 {ip}:{port} 供 Codex 连接"
+                ));
+                return Ok((st2, note));
+            }
+        }
+        note = Some(
+            current_proxy_url()
+                .map(|proxy| {
+                    format!(
+                        "检测到代理 {proxy} 劫持本地连接且无法自动兜底;请在系统代理设置中放行 127.0.0.1 与 localhost,或设置环境变量 no_proxy=127.0.0.1,localhost"
+                    )
+                })
+                .unwrap_or_else(|| "本地代理探测异常,请检查端口占用".to_string()),
+        );
     }
     Ok((st, note))
 }

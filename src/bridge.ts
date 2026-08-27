@@ -159,9 +159,11 @@ export type CodexProxyInfo = {
   pid?: number;
   upstream?: string;
   pattern?: string;
-  /** 代理实际绑定地址:默认 127.0.0.1。 */
-  bindIp?: string;
-  /** 检测到系统/环境代理劫持本地回环时的提示。 */
+  /** 代理进程监听的地址列表(如 127.0.0.1 + ::1,或本机 LAN IP)。 */
+  bindIps?: string[];
+  /** 写入 Codex 配置的 base_url 主机名:localhost(默认) | 127.0.0.1 | LAN IP。 */
+  codexHost?: string;
+  /** 检测到系统/环境代理劫持本地连接时的提示。 */
   hijackWarning?: string;
 };
 
@@ -170,12 +172,12 @@ export type CodexProxyStartResult = {
   pid: number;
   upstream: string;
   pattern: string;
-  bindIp: string;
+  codexHost: string;
   /** 检测到系统/环境代理劫持时的提示(含自动兜底说明)。 */
   hijackWarning?: string;
 };
 
-/** 启动/复用代理进程(独立常驻),返回实际端口与绑定地址。 */
+/** 启动/复用代理进程(独立常驻),返回实际端口与 codex 主机名。 */
 export function proxyStart(port: number, upstreamBaseUrl: string, convertPattern: string): Promise<CodexProxyStartResult> {
   return invoke<CodexProxyStartResult>("proxy_start", { port, upstreamBaseUrl, convertPattern });
 }

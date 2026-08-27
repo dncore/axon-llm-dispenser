@@ -9,9 +9,10 @@ export const CODX_PROXY_DEFAULT_PORT = 17321;
 /** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。 */
 export const CODX_PROXY_CONVERT_PATTERN = "gpt-5.6";
 
-/** 转换代理的本地 base_url(Codex 的 base_url 指向它);ip 默认回环,被系统代理劫持时改用 LAN IP。 */
-export function codexProxyBaseUrl(port: number, ip = "127.0.0.1"): string {
-  return `http://${ip}:${port}/api/v1`;
+/** 转换代理的 base_url 主机与端口(Codex 配置指向它)。默认 localhost 天然绕过系统/环境代理劫持;
+ * 被劫持且 localhost 不可达时,Rust 侧自动改用本机 LAN IP 并返回 codexHost。 */
+export function codexProxyBaseUrl(port: number, host = "localhost"): string {
+  return `http://${host}:${port}/api/v1`;
 }
 
 /** 模型列表里是否存在需要走转换代理的模型。 */
