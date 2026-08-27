@@ -178,6 +178,13 @@ describe("patchDshProvider", () => {
     const r = upsertDshCredentialYaml(existing, "AXON_API_KEY", "user_xxx");
     expect(r.text).toBe("version: 1\nrefs:\n  DEEPSEEK_API_KEY: xxxx\n  AXON_API_KEY: user_xxx\n");
   });
+  it("凭据 upsert 重复配置 refs 内已存在的 key 时覆盖而非追加", () => {
+    const existing = "version: 1\nrefs:\n  AXON_API_KEY: user_xxx\n";
+    const r = upsertDshCredentialYaml(existing, "AXON_API_KEY", "user_xxx");
+    expect(r.text).toBe("version: 1\nrefs:\n  AXON_API_KEY: user_xxx\n");
+    const r2 = upsertDshCredentialYaml(r.text, "AXON_API_KEY", "user_xxx");
+    expect(r2.text).toBe("version: 1\nrefs:\n  AXON_API_KEY: user_xxx\n");
+  });
 });
 
 describe("dsh 清理旧版遗留", () => {

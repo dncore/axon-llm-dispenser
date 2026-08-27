@@ -230,7 +230,7 @@ function upsertDshCredentialInRefs(
   const bodyText = text.slice(bodyStart, bodyEnd);
 
   // 在 refs 块体内 upsert
-  const childKeyRe = new RegExp(`^${escapeRegExp(pad)}${escapeRegExp(key)}:`, "m");
+  const childKeyRe = new RegExp(`^${escapeRegExp(pad)}${escapeRegExp(key)}:(?:[ \t].*)?$`, "m");
   let newBody: string;
   if (childKeyRe.test(bodyText)) {
     newBody = bodyText.replace(childKeyRe, childLine);
