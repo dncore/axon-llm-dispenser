@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels } from "./models";
 import { patchCodexConfigToml, renderCodexModelsJson } from "./codex";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
-import { patchDshProvider, patchDshDefaultModel, removeDshDeepseekSection, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
+import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
 
 describe("deriveKeyRef", () => {
   it("大写并去非法字符,追加 _API_KEY", () => {
@@ -145,10 +145,15 @@ describe("patchDshProvider", () => {
     expect(r.text).toContain("reasoning: high");
   });
 
-  it("默认模型段", () => {
+  it("默认模型段:缺失时创建,dsh 已配置时不覆盖", () => {
     const r = patchDshDefaultModel("", "axon", "deepseek-v4-flash");
     expect(r.text).toContain("agent-default-model:");
     expect(r.text).toContain("provider: axon");
+    // dsh 设置界面已配置(含 reasoningEffort 等字段):不覆盖,原样保留
+    const existing = "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash-vision-exp\n  reasoningEffort: high\n";
+    const r2 = patchDshDefaultModel(existing, "axon", "deepseek-v4-flash");
+    expect(r2.text).toBe(existing);
+    expect(r2.changes).toEqual([]);
   });
 
   it("凭据 upsert 用 0600 语义(空值拒绝)", () => {
@@ -196,24 +201,6 @@ describe("dsh 清理旧版遗留", () => {
     expect(r.text).not.toContain("other:");
   });
 
-  it("removeDshDeepseekSection 删除废弃段", () => {
-    const yaml = [
-      "llm-pi-ai:",
-      "  providers:",
-      "    axon:",
-      "      baseURL: https://a",
-      "",
-      "llm-deepseek:",
-      "  apiKeyEnv: AXON_API_KEY",
-      "  baseURL: https://x",
-      "  models: []",
-      "",
-    ].join("\n");
-    const r = removeDshDeepseekSection(yaml);
-    expect(r.removed).toBe(true);
-    expect(r.text).not.toContain("llm-deepseek:");
-    expect(r.text).toContain("llm-pi-ai:");
-  });
 });
 
 import { deriveAnthropicUrl, formatClaudeModel, patchClaudeSettings, parseClaudeStatus } from "./claude";

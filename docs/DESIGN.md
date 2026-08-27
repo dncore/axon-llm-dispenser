@@ -104,7 +104,7 @@ axon-llm-dispenser/
 
 ### 5.3 DeepSeek Harness（`~/.dsh/`，可 `DSH_HOME` 覆盖）
 
-- `settings.yaml`：`llm-pi-ai.providers.<provider>`（`apiKeyEnv` 引用 + `api: openai-completions` + `baseURL` + `compat.thinkingFormat` 可选 + `models` 带 contextWindow/maxTokens/reasoningEfforts）+ `agent-default-model`（默认模型指向该 provider）。
+- `settings.yaml`：`llm-pi-ai.providers.<provider>`（`apiKeyEnv` 引用 + `api: openai-completions` + `baseURL` + `compat.thinkingFormat` 可选 + `models` 带 contextWindow/maxTokens/reasoningEfforts）；`agent-default-model` 与 `llm-deepseek` 段由 dsh 设置界面管理，axon 仅在缺失时写入默认模型、绝不覆盖或删除。
 - `.credentials.yaml`：`<deriveKeyRef>: <api_key>`（0600）。
 - `reasoningEfforts` 只取非 `off` 且值非空的等级（规避 dsh 校验：仅含 off 会被整体拒绝——已在上游踩过坑）。
 
