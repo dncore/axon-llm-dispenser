@@ -6,7 +6,7 @@ import * as flows from "./flows";
 import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
-import { CODX_PROXY_CONVERT_PATTERN } from "./core/codex";
+import { CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 
 
 type El = HTMLElement;
@@ -111,14 +111,6 @@ function build(): void {
       h("input", { id: "chk-exclude-doubao", type: "checkbox", checked: "checked" }),
       h("span", {}, ["过滤 Doubao 系模型"]),
     ]),
-    h("label", { class: "row toggle", title: "网关 /responses 对 gpt-5.6 家族转换不可用(502)时,把 Codex 指向本机代理转 Chat Completions;其它模型代理纯透传" }, [
-      h("input", { id: "chk-codex-proxy", type: "checkbox", checked: "checked" }),
-      h("span", {}, ["Codex 转换代理(修复 gpt-5.6 系 502)"]),
-    ]),
-    h("div", { class: "row proxy-port-row" }, [
-      h("span", { class: "field-label" }, ["代理端口"]),
-      h("input", { id: "input-proxy-port", class: "input port-input", type: "number", value: "17321", min: "1024", max: "65535" }),
-    ]),
     h("div", { id: "models-list", class: "models-list" }, [h("div", { class: "log-empty" }, ["填写网关后点 ↻ 拉取模型列表"])]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -156,6 +148,7 @@ function build(): void {
           h("span", { class: "subtitle" }, ["把自有的 OpenAI 兼容网关配置到各 Agent 工具"]),
         ]),
       ]),
+      proxyWidget(),
     ]),
 
     h("div", { id: "guide-banner", class: "guide-banner" }, [
@@ -272,6 +265,98 @@ function helpTipIcon(): El {
   tip.addEventListener("mouseenter", () => showTip(tip, toolsHelpContent()));
   tip.addEventListener("mouseleave", hideTip);
   return tip;
+}
+
+// ---------------------------------------------------------------------------
+// Header 右侧:Codex 转换代理(端口固定展示 + 开关 + 帮助悬浮说明)
+// ---------------------------------------------------------------------------
+
+/** 代理帮助悬浮内容。 */
+function proxyHelpContent(): El {
+  const wrap = h("div", {}, []);
+  wrap.append(
+    h("div", { class: "tip-row" }, [
+      h("span", {}, ["Codex 转换代理:把 Codex 的 Responses 请求经本机代理转成 Chat Completions 发给网关"]),
+    ]),
+    h("div", { class: "tip-note" }, [
+      "解决网关卡 gpt-5.6 家族 /responses 不可用导致的 502;其它模型代理纯透传。",
+      "端口固定为 17321,仅供查看;默认开启。关闭后 Codex 直连网关,gpt-5.6 家族可能报 502/不可用。",
+    ]),
+  );
+  return wrap;
+}
+
+/** 代理端口展示(固定,不可修改;实际主机随代理状态刷新)。 */
+function proxyPortLabel(): El {
+  return h("span", { class: "proxy-port", id: "proxy-port" }, [`localhost:${CODX_PROXY_DEFAULT_PORT}`]);
+}
+
+/** 开关:默认开启;关闭需二次确认(影响 Codex 运行)。 */
+function proxyToggle(): El {
+  const sw = h("input", { type: "checkbox", id: "chk-proxy-switch", checked: "checked" });
+  sw.addEventListener("change", () => {
+    const box = sw as HTMLInputElement;
+    if (box.checked) {
+      void proxySwitchOn(box);
+      return;
+    }
+    // 关闭:先弹二次确认;未确认时把开关恢复为开
+    confirmDialog(
+      "关闭 Codex 转换代理后,Codex 将直接连接网关。若网关卡 /responses 不可用(如 gpt-5.6 家族),请求会报 502 或「Model resources are currently busy」。确定关闭?",
+      () => void proxySwitchOff(box),
+      "关闭代理",
+      "取消",
+      "btn-danger-solid",
+    );
+    box.checked = true; // 确认后才真正关闭
+  });
+  return h("label", { class: "switch" }, [sw, h("span", { class: "slider" }, [])]);
+}
+
+async function proxySwitchOn(box: HTMLInputElement): Promise<void> {
+  config.codexProxy = { enabled: true, port: CODX_PROXY_DEFAULT_PORT };
+  await bridge.saveAppConfig(config).catch(() => {});
+  try {
+    const st = await bridge.proxyStart(CODX_PROXY_DEFAULT_PORT, config.baseUrl, CODX_PROXY_CONVERT_PATTERN);
+    updateProxyBadge(st.codexHost, st.port);
+    notify(`Codex 转换代理已开启(${st.codexHost}:${st.port})${st.hijackWarning ? ",注意:" + st.hijackWarning : ""}`, "info");
+  } catch (e) {
+    notify(`代理启动失败: ${e}`, "error");
+    box.checked = false;
+    config.codexProxy = { enabled: false, port: CODX_PROXY_DEFAULT_PORT };
+    void bridge.saveAppConfig(config).catch(() => {});
+  }
+}
+
+async function proxySwitchOff(box: HTMLInputElement): Promise<void> {
+  try {
+    await bridge.proxyStop();
+  } catch {
+    // 停止失败不阻塞;状态可能已死
+  }
+  box.checked = false;
+  config.codexProxy = { enabled: false, port: CODX_PROXY_DEFAULT_PORT };
+  await bridge.saveAppConfig(config).catch(() => {});
+  notify("Codex 转换代理已关闭(Codex 将直连网关)", "info");
+}
+
+/** 刷新 header 端口展示(实时主机/端口)。 */
+function updateProxyBadge(host: string | undefined, port: number | undefined): void {
+  const el = document.getElementById("proxy-port");
+  if (el) el.textContent = `${host ?? "localhost"}:${port ?? CODX_PROXY_DEFAULT_PORT}`;
+}
+
+/** Header 右侧组件:端口 + 开关 + 帮助。 */
+function proxyWidget(): El {
+  const help = h("span", { class: "help-tip", id: "proxy-help" }, ["?"]);
+  help.addEventListener("mouseenter", () => showTip(help, proxyHelpContent()));
+  help.addEventListener("mouseleave", hideTip);
+  return h("div", { class: "header-right" }, [
+    h("span", { class: "proxy-title" }, ["Codex 转换代理"]),
+    proxyPortLabel(),
+    proxyToggle(),
+    help,
+  ]);
 }
 
 /** 自定义下拉选择器(替代原生 select,匹配应用视觉)。 */
@@ -686,10 +771,6 @@ function readFields(): void {
   config.apiKey = ($("input-key") as HTMLInputElement).value.trim();
   config.anthropicBaseUrl = ($("input-anthropic") as HTMLInputElement).value.trim();
   config.excludeDoubao = ($("chk-exclude-doubao") as HTMLInputElement).checked;
-  config.codexProxy = {
-    enabled: ($("chk-codex-proxy") as HTMLInputElement).checked,
-    port: Math.min(65535, Math.max(1024, Number(($("input-proxy-port") as HTMLInputElement).value) || 17321)),
-  };
 }
 
 /** 把配置填进表单(启动加载与「删除配置」重置共用)。 */
@@ -700,8 +781,6 @@ function fillForm(cfg: bridge.AppConfig): void {
   ($("input-key") as HTMLInputElement).value = cfg.apiKey;
   ($("input-anthropic") as HTMLInputElement).value = cfg.anthropicBaseUrl;
   ($("chk-exclude-doubao") as HTMLInputElement).checked = cfg.excludeDoubao;
-  ($("chk-codex-proxy") as HTMLInputElement).checked = cfg.codexProxy?.enabled ?? true;
-  ($("input-proxy-port") as HTMLInputElement).value = String(cfg.codexProxy?.port ?? 17321);
 }
 
 /** 表单恢复刚安装时的初始状态(含 API Key 眼睛与模型列表)。 */
@@ -834,22 +913,23 @@ async function ensureModels(): Promise<string[] | null> {
 
 let tipEl: El | null = null;
 
-/** JS tooltip:fixed 定位逃逸弹窗 overflow:hidden,自动贴边。内容支持文本或 DOM 节点。 */
+/** JS tooltip:fixed 定位逃逸弹窗 overflow:hidden,自动贴边不截断。内容支持文本或 DOM 节点。 */
 function showTip(target: El, text: string | El): void {
   hideTip();
   const el = h("div", { class: "tip-popup" }, [text instanceof Node ? text : document.createTextNode(text)]);
   document.body.append(el);
   const r = target.getBoundingClientRect();
   const er = el.getBoundingClientRect();
-  // 默认显示在图标上方,视口顶部放不下时放下方
+  // 垂直:默认显示在目标上方;顶部放不下时放下方;仍放不下时贴底
   let top = r.top - er.height - 6;
   if (top < 8) top = r.bottom + 6;
-  el.style.top = `${top}px`;
-  el.style.left = `${r.left + r.width / 2}px`;
-  el.style.transform = "translateX(-50%)";
-  const fr = el.getBoundingClientRect();
-  if (fr.left < 8) el.style.left = "8px";
-  else if (fr.right > window.innerWidth - 8) el.style.left = `${window.innerWidth - fr.width - 8}px`;
+  if (top + er.height > window.innerHeight - 8) top = window.innerHeight - er.height - 8;
+  el.style.top = `${Math.max(8, top)}px`;
+  // 水平:居中于目标,整体钳制在视口内(不超出/截断);不用 transform,避免钳制后偏移
+  const wantLeft = r.left + r.width / 2 - er.width / 2;
+  const left = Math.min(Math.max(8, wantLeft), window.innerWidth - er.width - 8);
+  el.style.left = `${Math.max(8, left)}px`;
+  el.style.transform = "none";
   tipEl = el;
 }
 
@@ -1537,12 +1617,22 @@ async function boot(): Promise<void> {
   } catch {
     // 使用默认配置
   }
+  // Header 开关/端口与配置同步(默认开启;端口固定展示)
+  const proxySw = document.getElementById("chk-proxy-switch") as HTMLInputElement | null;
+  if (proxySw) proxySw.checked = config.codexProxy?.enabled ?? true;
+  void bridge
+    .proxyStatus()
+    .then((p) => {
+      if (p.running && p.codexHost) updateProxyBadge(p.codexHost, p.port);
+    })
+    .catch(() => {});
   // Codex 转换代理自愈:开启代理模式时,若上次拉起的代理进程已退出(重启机器/异常退出),
   // 启动本 app 即自动按当前网关配置重新拉起,保证 Codex 随时可用。
   if ((config.codexProxy?.enabled ?? true) && config.baseUrl) {
     void bridge
       .proxyStart(config.codexProxy?.port ?? 17321, config.baseUrl, CODX_PROXY_CONVERT_PATTERN)
       .then((st) => {
+        updateProxyBadge(st.codexHost, st.port);
         if (st.hijackWarning) console.warn("[codex-proxy]", st.hijackWarning);
       })
       .catch(() => {

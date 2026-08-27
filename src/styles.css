@@ -272,10 +272,43 @@ body {
 .row { display: flex; align-items: center; gap: 10px; }
 .hint { color: var(--muted); font-size: 12px; }
 
-/* Codex 转换代理:开关行 + 端口输入行 */
-.proxy-port-row { margin-top: 4px; gap: 8px; }
-.proxy-port-row .field-label { flex-shrink: 0; }
-.port-input { width: 90px; }
+/* Header 右侧:Codex 转换代理(端口固定展示 + 开关 + 帮助) */
+.header-right { display: flex; align-items: center; gap: 10px; }
+.proxy-title { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.proxy-port {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  background: #eef1f5;
+  border-radius: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+/* 开关(checkbox 样式化为滑动开关) */
+.switch { position: relative; display: inline-block; width: 38px; height: 20px; cursor: pointer; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  inset: 0;
+  background: #cbd5e1;
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+.slider::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.switch input:checked + .slider { background: var(--ok); }
+.switch input:checked + .slider::before { transform: translateX(18px); }
+.switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 模型目录/工具接入/连接设置:标题行左右分布(右侧放计数+按钮/帮助图标/状态点) */
 .card h2.models-title,
