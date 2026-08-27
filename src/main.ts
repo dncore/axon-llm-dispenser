@@ -6,6 +6,7 @@ import * as flows from "./flows";
 import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
+import { CODX_PROXY_CONVERT_PATTERN } from "./core/codex";
 
 
 type El = HTMLElement;
@@ -1535,6 +1536,18 @@ async function boot(): Promise<void> {
     fillForm(config);
   } catch {
     // 使用默认配置
+  }
+  // Codex 转换代理自愈:开启代理模式时,若上次拉起的代理进程已退出(重启机器/异常退出),
+  // 启动本 app 即自动按当前网关配置重新拉起,保证 Codex 随时可用。
+  if ((config.codexProxy?.enabled ?? true) && config.baseUrl) {
+    void bridge
+      .proxyStart(config.codexProxy?.port ?? 17321, config.baseUrl, CODX_PROXY_CONVERT_PATTERN)
+      .then((st) => {
+        if (st.hijackWarning) console.warn("[codex-proxy]", st.hijackWarning);
+      })
+      .catch(() => {
+        // 静默:启动期代理拉起失败不阻塞 UI,重跑「配置」时会再次尝试并报错
+      });
   }
   // 上次保存的模型列表先恢复(升级/刷新后不丢),随后再自动拉取刷新
   if (config.models && config.models.length > 0) {

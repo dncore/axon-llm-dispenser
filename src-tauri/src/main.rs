@@ -15,7 +15,11 @@ fn main() {
             .get(4)
             .cloned()
             .unwrap_or_else(|| axon_llm_dispenser_lib::proxy::DEFAULT_CONVERT_PATTERN.to_string());
-        axon_llm_dispenser_lib::proxy::run_server_blocking(port, upstream, pattern);
+        let bind_ip = args
+            .get(5)
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        axon_llm_dispenser_lib::proxy::run_server_blocking(port, bind_ip, upstream, pattern);
         return;
     }
     axon_llm_dispenser_lib::run();

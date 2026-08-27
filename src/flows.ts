@@ -66,9 +66,16 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
     case "codex": {
       const configPath = await bridge.joinPath(codexH, "config.toml");
       found = extractCodexProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
-      // 代理模式:Codex 配置写的是本机代理地址,比对目标用该地址
+      // 代理模式:Codex 配置写的是本机代理地址(可能因系统代理劫持用 LAN IP),比对目标用同一地址
       if (cfg.codexProxy?.enabled ?? true) {
-        wantUrl = codexProxyBaseUrl(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT);
+        let bindIp = "127.0.0.1";
+        try {
+          const p = await bridge.proxyStatus();
+          if (p.running && p.bindIp) bindIp = p.bindIp;
+        } catch {
+          // 状态不可得时用默认回环
+        }
+        wantUrl = codexProxyBaseUrl(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, bindIp);
       }
       break;
     }
@@ -156,8 +163,9 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
   const proxyLines: string[] = [];
   if (cfg.codexProxy?.enabled ?? true) {
     const st = await bridge.proxyStart(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, cfg.baseUrl, CODX_PROXY_CONVERT_PATTERN);
-    baseUrl = codexProxyBaseUrl(st.port);
-    proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}`);
+    baseUrl = codexProxyBaseUrl(st.port, st.bindIp);
+    proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}${st.bindIp !== "127.0.0.1" ? `(本机地址 ${st.bindIp})` : ""}`);
+    if (st.hijackWarning) proxyLines.push(`⚠️ ${st.hijackWarning}`);
     if (codexProxyNeeded(modelIds)) {
       proxyLines.push(`  ${CODX_PROXY_CONVERT_PATTERN} 家族经代理转 Chat Completions(网关 /responses 不可用)`);
     } else {
@@ -203,9 +211,12 @@ export async function codexStatus(): Promise<string[]> {
   let proxyLine = `转换代理: 未启用`;
   try {
     const p = await bridge.proxyStatus();
-    proxyLine = p.running
-      ? `转换代理: 运行中 (127.0.0.1:${p.port},规则 ${p.pattern ?? "-"},→ ${p.upstream ?? "?"})`
-      : `转换代理: 未运行(代理模式开启但进程不在,Codex 请求会失败,请重跑「配置」)`;
+    if (p.running) {
+      proxyLine = `转换代理: 运行中 (${p.bindIp ?? "127.0.0.1"}:${p.port},规则 ${p.pattern ?? "-"},→ ${p.upstream ?? "?"})`;
+      if (p.hijackWarning) proxyLine += `\n⚠️ ${p.hijackWarning}`;
+    } else {
+      proxyLine = `转换代理: 未运行(代理模式开启但进程不在,Codex 请求会失败,请重跑「配置」)`;
+    }
   } catch {
     proxyLine = `转换代理: 状态查询失败`;
   }

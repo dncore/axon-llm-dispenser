@@ -829,6 +829,12 @@ pub struct ProxyRunState {
     pub pid: u32,
     pub upstream: String,
     pub pattern: String,
+    #[serde(default = "default_bind_ip")]
+    pub bind_ip: String,
+}
+
+fn default_bind_ip() -> String {
+    "127.0.0.1".to_string()
 }
 
 pub fn state_file_path(config_dir: &str) -> String {
@@ -855,13 +861,14 @@ pub fn clear_state(config_dir: &str) {
 }
 
 /// 拉起独立代理进程(当前可执行文件 + --proxy-server,脱离 GUI 独立运行)。
-pub fn spawn_proxy(port: u16, upstream: &str, pattern: &str) -> Result<u32, String> {
+pub fn spawn_proxy(port: u16, bind_ip: &str, upstream: &str, pattern: &str) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位自身可执行文件失败: {e}"))?;
     let mut cmd = Command::new(exe);
     cmd.arg("--proxy-server")
         .arg(port.to_string())
         .arg(upstream.to_string())
-        .arg(pattern.to_string());
+        .arg(pattern.to_string())
+        .arg(bind_ip.to_string());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -901,8 +908,8 @@ pub fn kill_proc(pid: u32) -> bool {
 }
 
 /// 健康检查:GET http://127.0.0.1:{port}/healthz。
-pub fn health_check(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/healthz");
+pub fn health_check(ip: &str, port: u16) -> bool {
+    let url = format!("http://{ip}:{port}/healthz");
     let agent = ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
         .timeout(std::time::Duration::from_secs(2))
@@ -911,10 +918,16 @@ pub fn health_check(port: u16) -> bool {
 }
 
 /// 启动并等待就绪;若已有健康实例直接复用。
-pub fn ensure_running(config_dir: &str, port: u16, upstream: &str, pattern: &str) -> Result<ProxyRunState, String> {
-    if health_check(port) {
+pub fn ensure_running(
+    config_dir: &str,
+    port: u16,
+    bind_ip: &str,
+    upstream: &str,
+    pattern: &str,
+) -> Result<ProxyRunState, String> {
+    if health_check(bind_ip, port) {
         if let Some(st) = read_state(config_dir) {
-            if st.upstream == upstream && st.pattern == pattern {
+            if st.upstream == upstream && st.pattern == pattern && st.bind_ip == bind_ip {
                 return Ok(st);
             }
         }
@@ -925,8 +938,8 @@ pub fn ensure_running(config_dir: &str, port: u16, upstream: &str, pattern: &str
         if is_pid_alive(st.pid) && st.port == port {
             // 进程在但健康检查失败(启动中?)再等一会
             for _ in 0..25 {
-                if health_check(port) {
-                    if st.upstream == upstream && st.pattern == pattern {
+                if health_check(&st.bind_ip, port) {
+                    if st.upstream == upstream && st.pattern == pattern && st.bind_ip == bind_ip {
                         return Ok(st);
                     }
                     break;
@@ -936,12 +949,12 @@ pub fn ensure_running(config_dir: &str, port: u16, upstream: &str, pattern: &str
         }
         let _ = stop(config_dir);
     }
-    let pid = spawn_proxy(port, upstream, pattern)?;
-    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string() };
+    let pid = spawn_proxy(port, bind_ip, upstream, pattern)?;
+    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ip: bind_ip.to_string() };
     write_state(config_dir, &st)?;
     // 等就绪(最多 6s)
     for _ in 0..30 {
-        if health_check(port) {
+        if health_check(bind_ip, port) {
             return Ok(st);
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -962,11 +975,13 @@ pub fn stop(config_dir: &str) -> Result<(), String> {
 }
 
 /// 独立运行模式入口(由 main.rs 在 --proxy-server 时调用,常驻)。
-pub fn run_server_blocking(port: u16, upstream: String, pattern: String) {
+pub fn run_server_blocking(port: u16, bind_ip: String, upstream: String, pattern: String) {
     let rt = tokio::runtime::Runtime::new().expect("failed to init tokio runtime");
     rt.block_on(async move {
         let app = build_app(upstream, pattern);
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr: SocketAddr = format!("{bind_ip}:{port}")
+            .parse()
+            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 let _ = axum::serve(listener, app).await;
@@ -974,6 +989,101 @@ pub fn run_server_blocking(port: u16, upstream: String, pattern: String) {
             Err(e) => eprintln!("proxy bind {addr} failed: {e}"),
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// 系统代理劫持检测与兜底(仅 macOS;Windows 系统代理默认放行回环)
+// ---------------------------------------------------------------------------
+
+/// 当前生效的代理地址(env 优先,macOS 退到系统代理)。
+fn current_proxy_url() -> Option<String> {
+    for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"] {
+        if let Ok(v) = std::env::var(k) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    // macOS 系统代理(scutil --proxy)
+    if let Ok(out) = Command::new("scutil").arg("--proxy").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut host: Option<String> = None;
+        let mut port: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("HTTPProxy : ") {
+                host = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("HTTPPort : ") {
+                port = Some(v.trim().to_string());
+            }
+        }
+        if let (Some(h), Some(p)) = (host, port) {
+            if !h.is_empty() {
+                return Some(format!("{h}:{p}"));
+            }
+        }
+    }
+    None
+}
+
+/// 用 codex 同款方式(默认 reqwest,含 macOS 系统代理自动检测)探测回环代理是否被劫持。
+pub fn detect_loopback_hijack(port: u16) -> Option<String> {
+    // 系统代理劫持回环只发生在 macOS(reqwest system-proxy 特性);Windows 回环默认放行
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+    let hijacked = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default();
+        // 不带 .no_proxy():与 codex 一样会走系统代理
+        match client.get(format!("http://127.0.0.1:{port}/healthz")).send().await {
+            Ok(r) => r.status().as_u16() != 200,
+            Err(_) => true,
+        }
+    });
+    if hijacked {
+        current_proxy_url()
+    } else {
+        None
+    }
+}
+
+/// 协调入口:先按回环起代理;若被系统代理劫持,自动写入 launchd 用户域 no_proxy,
+/// 使新启动的 Codex/终端绕开系统代理对回环的劫持(无需 LAN 暴露)。
+pub fn start_with_hijack_fallback(
+    config_dir: &str,
+    port: u16,
+    upstream: &str,
+    pattern: &str,
+) -> Result<(ProxyRunState, Option<String>), String> {
+    let st = ensure_running(config_dir, port, "127.0.0.1", upstream, pattern)?;
+    let mut note: Option<String> = None;
+    if let Some(proxy) = detect_loopback_hijack(port) {
+        let applied = std::process::Command::new("launchctl")
+            .arg("setenv")
+            .arg("no_proxy")
+            .arg("127.0.0.1,localhost")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        note = Some(if applied {
+            format!(
+                "检测到系统代理 {proxy} 劫持本地回环,已自动设置 no_proxy=127.0.0.1,localhost(launchctl);请重启 Codex/终端后生效"
+            )
+        } else {
+            format!(
+                "检测到系统代理 {proxy} 劫持本地回环;请在系统代理设置中放行 127.0.0.1 与 localhost,或执行: launchctl setenv no_proxy 127.0.0.1,localhost"
+            )
+        });
+    }
+    Ok((st, note))
 }
 
 // ---------------------------------------------------------------------------
