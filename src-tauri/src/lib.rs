@@ -5,9 +5,14 @@ pub mod proxy;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 
 /// 托盘「打开主界面」:显示并聚焦主窗口。
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    // macOS:恢复 Dock 图标(关窗时已隐藏),窗口可见时表现为正常应用。
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -56,9 +61,16 @@ pub fn run() {
             // 关闭按钮仅隐藏到托盘;真正退出走托盘「退出并停止代理」。
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
+                // macOS:窗口隐藏后移除 Dock 运行态,只留菜单栏图标。
+                #[cfg(target_os = "macos")]
+                let _ = window.app_handle().set_dock_visibility(false);
                 api.prevent_close();
             }
         })
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 二次启动:通知已在运行的实例显示主窗口,本进程随即退出。
+            show_main_window(app);
+        }))
         .setup(|app| {
             setup_tray(app.handle())?;
             Ok(())
@@ -88,7 +100,13 @@ pub fn run() {
             agent_update::agent_update,
             agent_update::agent_install,
             agent_update::pi_extensions_update,
-                                                                                            ])
-        .run(tauri::generate_context!())
-        .expect("error while running axon-llm-dispenser");
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building axon-llm-dispenser")
+        .run(|_app_handle, event| match event {
+            // macOS:点击 Dock 图标 / Finder 重新打开应用时恢复主窗口。
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_main_window(_app_handle),
+            _ => {}
+        });
 }
