@@ -55,6 +55,11 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
     Ok(())
 }
 
+/// 是否为开机自启后台启动(自启启动项带 --background;手动启动不带本参数)。
+fn is_background_launch<I: IntoIterator<Item = String>>(args: I) -> bool {
+    args.into_iter().any(|a| a == "--background")
+}
+
 pub fn run() {
     tauri::Builder::default()
         .on_window_event(|window, event| {
@@ -71,8 +76,23 @@ pub fn run() {
             // 二次启动:通知已在运行的实例显示主窗口,本进程随即退出。
             show_main_window(app);
         }))
+        // 开机自启:macOS 用 LaunchAgent(~/Library/LaunchAgents),Windows 用注册表 HKCU\...\Run。
+        // 启动项注入 --background:自启时后台运行(不弹主窗口,只留托盘),手动启动不受影响。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--background"]),
+        ))
         .setup(|app| {
             setup_tray(app.handle())?;
+            // 主窗口默认隐藏(visible:false,避免自启后台时闪烁)。
+            // 开机自启(带 --background)→ 后台运行只留托盘图标;手动启动 → 显示主窗口。
+            if is_background_launch(std::env::args()) {
+                // macOS:与关窗行为一致,移除 Dock 运行态,只留菜单栏图标。
+                #[cfg(target_os = "macos")]
+                app.set_dock_visibility(false);
+            } else if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -109,4 +129,32 @@ pub fn run() {
             RunEvent::Reopen { .. } => show_main_window(_app_handle),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_background_launch;
+
+    fn args<'a>(v: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
+        v.iter().map(|s| s.to_string())
+    }
+
+    #[test]
+    fn manual_launch_without_background_shows_window() {
+        assert!(!is_background_launch(args(&["/Applications/Axon.app/Contents/MacOS/axon-llm-dispenser"])));
+        assert!(!is_background_launch(args(&[])));
+    }
+
+    #[test]
+    fn autostart_launch_with_background_hides_window() {
+        assert!(is_background_launch(args(&[
+            "C:\\Users\\shw93\\Desktop\\Axon.exe",
+            "--background"
+        ])));
+    }
+
+    #[test]
+    fn other_args_do_not_match() {
+        assert!(!is_background_launch(args(&["app", "--help", "--proxy-server", "17321"])));
+    }
 }

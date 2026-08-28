@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels } from "./models";
 import { patchCodexConfigToml, renderCodexModelsJson, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_DEFAULT_PORT } from "./codex";
+import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
 
@@ -658,5 +659,28 @@ describe("opencode", () => {
     expect(extractOpenCodeProvider(config, auth, "axon")).toEqual({ baseUrl: "https://gateway.example/v1", apiKey: "sk-test" });
     expect(extractOpenCodeProvider(config, auth, "nope").baseUrl).toBeNull();
     expect(extractOpenCodeProvider("bad json", "bad json", "axon")).toEqual({ baseUrl: null, apiKey: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 开机自启
+// ---------------------------------------------------------------------------
+
+describe("fallbackAutostartChecked", () => {
+  it("切换失败时回滚到系统真实状态(请求开启但系统仍关闭 → false)", async () => {
+    const checked = await fallbackAutostartChecked(true, async () => false);
+    expect(checked).toBe(false);
+  });
+
+  it("切换失败时回滚到系统真实状态(请求关闭但系统仍开启 → true)", async () => {
+    const checked = await fallbackAutostartChecked(false, async () => true);
+    expect(checked).toBe(true);
+  });
+
+  it("系统查询也失败时维持用户请求值,避免「点了没反应」", async () => {
+    const checked = await fallbackAutostartChecked(true, async () => {
+      throw new Error("not supported");
+    });
+    expect(checked).toBe(true);
   });
 });

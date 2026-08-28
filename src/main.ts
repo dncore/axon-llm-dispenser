@@ -7,6 +7,9 @@ import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels } from "./core/models";
 import { CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
+import { fallbackAutostartChecked } from "./core/autostart";
+// 开机自启(macOS LaunchAgent / Windows 注册表),状态由系统侧查询,不入 AppConfig。
+import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from "@tauri-apps/plugin-autostart";
 
 
 type El = HTMLElement;
@@ -357,7 +360,32 @@ function proxyWidget(): El {
     proxyPortLabel(),
     proxyToggle(),
     help,
+    h("span", { class: "header-divider" }, []),
+    h("span", { class: "proxy-title" }, ["开机自启"]),
+    autostartToggle(),
   ]);
+}
+
+/** 开机自启开关(header):状态由 OS 侧(LaunchAgent/注册表)真实回填。 */
+function autostartToggle(): El {
+  const sw = h("input", { type: "checkbox", id: "chk-autostart" });
+  sw.addEventListener("change", () => void toggleAutostart(sw as HTMLInputElement));
+  return h("label", { class: "switch" }, [sw, h("span", { class: "slider" }, [])]);
+}
+
+async function toggleAutostart(box: HTMLInputElement): Promise<void> {
+  try {
+    if (box.checked) {
+      await autostartEnable();
+      notify("已开启开机自启:登录时自动打开 Axon", "info");
+    } else {
+      await autostartDisable();
+      notify("已关闭开机自启", "info");
+    }
+  } catch (e) {
+    notify(`设置开机自启失败: ${e}`, "error");
+    box.checked = await fallbackAutostartChecked(box.checked, autostartIsEnabled); // 回滚到真实状态
+  }
 }
 
 /** 自定义下拉选择器(替代原生 select,匹配应用视觉)。 */
@@ -1575,6 +1603,16 @@ function bind(): void {
 // 启动
 // ---------------------------------------------------------------------------
 
+/** 开机自启初始化:查询系统侧真实状态回填 header 开关。自启由 OS 持有(LaunchAgent/注册表),不入 AppConfig。 */
+async function initAutostart(): Promise<void> {
+  const box = $("chk-autostart") as HTMLInputElement;
+  try {
+    box.checked = await autostartIsEnabled();
+  } catch {
+    // 查询失败(如平台不支持):保持关闭,切换时会再次报错
+  }
+}
+
 async function boot(): Promise<void> {
   // 全局兜底:任何未捕获的异步错误都在输出面板可见
   window.addEventListener("unhandledrejection", (ev) => {
@@ -1599,6 +1637,7 @@ async function boot(): Promise<void> {
   build();
   bind();
   syncCardLock(); // 初始锁定模型列表/工具接入(避免加载配置前可交互)
+  initAutostart(); // 开机自启开关:回填系统侧真实状态
   // 升级/安装日志流:逐行写入底部日志面板
   void bridge.onAgentUpdateLog((line) => log([line], "info"));
   // 启动后异步检测各 agent CLI 安装情况(徽标)
