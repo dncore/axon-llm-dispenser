@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const DEFAULT_PORT: u16 = 17321;
+/// OpenAI-compatible function name 最大长度(chat 上游校验 ^[a-zA-Z0-9_-]+$,且有长度上限)。
+const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -124,25 +126,8 @@ fn responses_tool_to_chat_tool(tool: &Value) -> Option<Value> {
             Some(json!({"type": "function", "function": json!(f)}))
         }
         "custom" => {
-            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name.is_empty() {
-                return None;
-            }
-            // custom 工具 → 单 input 字段的 function(与 cc-switch 一致)。
-            Some(json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": tool.get("description").cloned().unwrap_or(json!("")),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string", "description": "Custom tool input."}
-                        },
-                        "required": ["input"]
-                    }
-                }
-            }))
+            // Codex 的 freeform(apply_patch 等)在 chat 通道无法使用,丢弃(与顶层 type 过滤一致)。
+            None
         }
         "namespace" => {
             // 命名空间工具 → 每个子 function 拍平为 `namespace.name`,
@@ -242,6 +227,11 @@ pub fn responses_to_chat(body: &Value) -> Value {
         let mut out_tools: Vec<Value> = Vec::new();
         for t in tools {
             let typ = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            // chat 上游只接受 function；Codex 的 custom(freeform apply_patch)/web_search/
+            // tool_search 在 chat 通道无法使用,直接丢弃(对齐 cc-switch ProxyChat 型档)。
+            if typ != "function" && typ != "namespace" {
+                continue;
+            }
             if typ == "namespace" {
                 let ns = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let children = t
@@ -253,7 +243,13 @@ pub fn responses_to_chat(body: &Value) -> Value {
                 for child in children {
                     if let Some(mut f) = responses_tool_to_chat_tool(&child) {
                         let nm = child.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        f["function"]["name"] = json!(format!("{}.{}", ns, nm));
+                        // OpenAI 兼容 function name 仅允许 ^[a-zA-Z0-9_-]+$ 且 <=64;
+                        // 用 __ 连接(namespace 本身可含 __,如 mcp__x,故反向用最后一个 __ 切分)。
+                        let flat = format!("{}__{}", ns, nm);
+                        if flat.len() > CHAT_TOOL_NAME_MAX_LEN {
+                            continue; // 超长直接丢弃该子工具,避免发畸形工具名导致上游 400
+                        }
+                        f["function"]["name"] = json!(flat);
                         out_tools.push(f);
                     }
                 }
@@ -378,13 +374,9 @@ pub fn chat_message_to_output_items(
             let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = tc.get("function").and_then(|v| v.get("name")).and_then(|v| v.as_str()).unwrap_or("");
             let arguments = tc.get("function").and_then(|v| v.get("arguments")).and_then(|v| v.as_str()).unwrap_or("{}");
-            let (final_name, ns) = {
-                let mut parts_iter = name.splitn(2, '.');
-                let first = parts_iter.next().unwrap_or(name);
-                match parts_iter.next() {
-                    Some(rest) => (rest.to_string(), first.to_string()),
-                    None => (name.to_string(), String::new()),
-                }
+            let (final_name, ns) = match name.rfind("__") {
+                Some(sep) => (name[sep + 2..].to_string(), name[..sep].to_string()),
+                None => (name.to_string(), String::new()),
             };
             let mut item = json!({
                 "type": "function_call",
@@ -568,10 +560,10 @@ where
                                         "call_id": if id.is_empty() { next_id("fc") } else { id.to_string() },
                                         "arguments": "", "status": "in_progress", "name": name
                                     });
-                                    // 拍平名字还原 namespace:chat 名 "ns.func" → responses namespace 项
-                                    if let Some(dot) = name.rfind('.') {
-                                        item["name"] = json!(name[dot + 1..].to_string());
-                                        item["namespace"] = json!(name[..dot].to_string());
+                                    // 拍平名字还原 namespace:chat 名 "ns__func" → responses namespace 项
+                                    if let Some(sep) = name.rfind("__") {
+                                        item["name"] = json!(name[sep + 2..].to_string());
+                                        item["namespace"] = json!(name[..sep].to_string());
                                     }
                                     tool_items.insert(idx, item.clone());
                                     tool_args.insert(idx, String::new());
@@ -1303,7 +1295,7 @@ mod tests {
         });
         let chat = responses_to_chat(&body);
         let tools = chat["tools"].as_array().unwrap();
-        assert_eq!(tools[0]["function"]["name"], "mcp__git.status");
+        assert_eq!(tools[0]["function"]["name"], "mcp__git__status");
     }
 
     #[test]
@@ -1333,7 +1325,7 @@ mod tests {
                     "role": "assistant",
                     "content": null,
                     "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "mcp__git.status", "arguments": "{}"}}
+                        {"id": "call_1", "type": "function", "function": {"name": "mcp__git__status", "arguments": "{}"}}
                     ]
                 },
                 "finish_reason": "tool_calls"
@@ -1345,6 +1337,34 @@ mod tests {
         assert_eq!(item["name"], "status");
         assert_eq!(item["namespace"], "mcp__git");
         assert_eq!(item["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chat_conversion_strips_custom_and_guards_long_names() {
+        let long_name = "a".repeat(70);
+        let body = json!({
+            "model": "glm-5.3-flash",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "tools": [
+                {"type": "function", "name": "ok_tool", "description": "d", "parameters": {"type": "object", "properties": {}}},
+                {"type": "custom", "name": "apply_patch", "description": "freeform", "input_schema": {"type": "object"}},
+                {"type": "web_search", "external_web_access": false},
+                {"type": "tool_search", "name": "ts", "description": "x"},
+                {"type": "namespace", "name": "mcp__git", "tools": [
+                    {"type": "function", "name": "status", "description": "git status", "parameters": {"type": "object", "properties": {}}},
+                    {"type": "function", "name": &long_name, "description": "too long", "parameters": {"type": "object", "properties": {}}}
+                ]}
+            ]
+        });
+        let chat = responses_to_chat(&body);
+        let tools = chat["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+        assert!(names.contains(&"ok_tool"));
+        assert!(names.contains(&"mcp__git__status"));
+        // custom / web_search / tool_search 一律丢弃;超长命名空间子工具丢弃
+        assert!(!names.iter().any(|n| n.contains(&"apply_patch")));
+        assert!(!names.iter().any(|n| n.contains(&&long_name[..10])));
+        assert_eq!(tools.len(), 2);
     }
 
     #[tokio::test]
