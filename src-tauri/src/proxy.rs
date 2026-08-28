@@ -275,10 +275,10 @@ pub fn responses_to_chat(body: &Value) -> Value {
         out.insert(key.into(), m.clone());
     }
 
-    // reasoning.effort → chat reasoning_effort(若有)
-    if let Some(rs) = body.get("reasoning").and_then(|v| v.get("effort")).and_then(|v| v.as_str()) {
-        out.insert("reasoning_effort".into(), json!(rs));
-    }
+    // 注意:不把 responses 的 reasoning.effort 转成 chat reasoning_effort。
+    // 各上游的"思考档位"参数不同(deepseek/glm 各自 thinking 参数、gemini 用
+    // thinkingConfig,且拒收 "none"→THINKING_LEVEL_MINIMAL),外包会跨厂商报 400;
+    // 让上游走默认思考即可,通用桥接最稳。
 
     for k in ["temperature", "top_p", "stream"] {
         if let Some(v) = body.get(k) {
@@ -1337,6 +1337,18 @@ mod tests {
         assert_eq!(item["name"], "status");
         assert_eq!(item["namespace"], "mcp__git");
         assert_eq!(item["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chat_conversion_omits_reasoning_effort() {
+        let body = json!({
+            "model": "gemini-3.7-flash",
+            "reasoning": {"effort": "none", "summary": "detailed"},
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+        let chat = responses_to_chat(&body);
+        // Gemini 拒收 reasoning_effort:none(转 thinkingConfig 的 MINIMAL),桥接直接不外传
+        assert!(chat.get("reasoning_effort").is_none());
     }
 
     #[test]
