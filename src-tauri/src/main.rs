@@ -25,7 +25,13 @@ fn main() {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         let _codex_host = args.get(6).cloned().unwrap_or_else(|| "localhost".to_string());
-        axon_llm_dispenser_lib::proxy::run_server_blocking(port, bind_ips, upstream, pattern);
+        let models_json_path = args
+            .get(7)
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        axon_llm_dispenser_lib::proxy::run_server_blocking(port, bind_ips, upstream, pattern, models_json_path);
         return;
     }
     axon_llm_dispenser_lib::run();

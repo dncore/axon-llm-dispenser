@@ -173,13 +173,18 @@ export type CodexProxyStartResult = {
   upstream: string;
   pattern: string;
   codexHost: string;
+  /** 代理 GET /models 直接回放的本地模型目录路径(可空)。 */
+  modelsJsonPath?: string;
   /** 检测到系统/环境代理劫持时的提示(含自动兜底说明)。 */
   hijackWarning?: string;
 };
 
-/** 启动/复用代理进程(独立常驻),返回实际端口与 codex 主机名。 */
-export function proxyStart(port: number, upstreamBaseUrl: string, convertPattern: string): Promise<CodexProxyStartResult> {
-  return invoke<CodexProxyStartResult>("proxy_start", { port, upstreamBaseUrl, convertPattern });
+/** 启动/复用代理进程(独立常驻),返回实际端口与 codex 主机名。
+ * modelsJsonPath 指本地 models.json(Codex 内部目录 schema):设置后代理的 GET /models
+ * 直接回放它,保证桌面端模型切换器能列出全部网关模型(网关标准 OpenAI 列表无法被
+ * Codex ModelsResponse 解析,会导致列表只剩内置 gpt 模型)。 */
+export function proxyStart(port: number, upstreamBaseUrl: string, convertPattern: string, modelsJsonPath?: string): Promise<CodexProxyStartResult> {
+  return invoke<CodexProxyStartResult>("proxy_start", { port, upstreamBaseUrl, convertPattern, modelsJsonPath });
 }
 
 export function proxyStatus(): Promise<CodexProxyInfo> {

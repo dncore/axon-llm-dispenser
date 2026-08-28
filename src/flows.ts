@@ -162,7 +162,7 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
   let baseUrl = cfg.baseUrl;
   const proxyLines: string[] = [];
   if (cfg.codexProxy?.enabled ?? true) {
-    const st = await bridge.proxyStart(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, cfg.baseUrl, CODX_PROXY_CONVERT_PATTERN);
+    const st = await bridge.proxyStart(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, cfg.baseUrl, CODX_PROXY_CONVERT_PATTERN, modelsPath);
     baseUrl = codexProxyBaseUrl(st.port, st.codexHost);
     proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}`);
     if (st.hijackWarning) proxyLines.push(`⚠️ ${st.hijackWarning}`);

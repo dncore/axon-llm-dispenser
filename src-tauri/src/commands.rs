@@ -121,14 +121,22 @@ pub async fn proxy_start(
     port: u16,
     upstream_base_url: String,
     convert_pattern: String,
+    models_json_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let cfg_dir = app.path().app_config_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let (st, note) = crate::proxy::start_auto(&cfg_dir, port, &upstream_base_url, &convert_pattern)?;
+        let (st, note) = crate::proxy::start_auto(
+            &cfg_dir,
+            port,
+            &upstream_base_url,
+            &convert_pattern,
+            models_json_path.as_deref(),
+        )?;
         Ok(serde_json::json!({
             "port": st.port, "pid": st.pid,
             "upstream": st.upstream, "pattern": st.pattern,
             "bindIps": st.bind_ips, "codexHost": st.codex_host,
+            "modelsJsonPath": st.models_json_path,
             "hijackWarning": note,
         }))
     })
@@ -150,6 +158,7 @@ pub async fn proxy_status(app: tauri::AppHandle) -> Result<serde_json::Value, St
             "upstream": state.as_ref().map(|s| s.upstream.clone()),
             "pattern": state.as_ref().map(|s| s.pattern.clone()),
             "codexHost": state.as_ref().map(|s| s.codex_host.clone()),
+            "modelsJsonPath": state.as_ref().and_then(|s| s.models_json_path.clone()),
             "hijackWarning": if hijack { state.as_ref().map(|s| format!("检测到系统/环境代理劫持 localhost,Codex 可能无法连接本机代理(当前地址 {}:{})", s.codex_host, s.port)) } else { None },
         }))
     })

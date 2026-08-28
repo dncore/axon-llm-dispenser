@@ -645,16 +645,20 @@ where
 pub struct ProxyState {
     pub upstream_base_url: String,
     pub convert_pattern: String,
+    /// 本地 codex 模型目录(models.json,即 Codex 内部目录 schema)。
+    /// 设置后 GET /models 直接返回它(网关返回的标准 OpenAI 列表不在 Codex
+    /// ModelsResponse 反序列化范围内,会导致模型切换器只剩内置模型)。
+    pub models_json_path: Option<String>,
     pub client: reqwest::Client,
 }
 
-pub fn build_app(upstream_base_url: String, convert_pattern: String) -> Router {
+pub fn build_app(upstream_base_url: String, convert_pattern: String, models_json_path: Option<String>) -> Router {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .unwrap_or_default();
-    let state = ProxyState { upstream_base_url, convert_pattern, client };
+    let state = ProxyState { upstream_base_url, convert_pattern, models_json_path, client };
     Router::new()
         .route("/healthz", get(handle_health))
         .route("/models", get(handle_models))
@@ -668,10 +672,39 @@ async fn handle_health() -> Json<Value> {
     Json(json!({"ok": true}))
 }
 
+/// 读取本地模型目录内容(用于 GET /models 直接回放),返回 (etag, body)。
+fn serve_local_models_catalog(models_json_path: &str) -> Option<(String, String)> {
+    let content = std::fs::read_to_string(models_json_path).ok()?;
+    let body = content.trim().to_string();
+    if body.is_empty() {
+        return None;
+    }
+    // 简单 etag:基于内容长度 + 修改时间的弱哈希,避免每次全量比较
+    let meta = std::fs::metadata(models_json_path).ok();
+    let mtime = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Some((format!("\"{:x}-{mtime:x}\"", body.len()), body))
+}
+
 async fn handle_models(
     State(st): State<ProxyState>,
     headers: HeaderMap,
 ) -> Response {
+    // 首选:本地模型目录(Codex 内部 schema;网关的标准 OpenAI 列表反序列化会静默失败)
+    if let Some(path) = st.models_json_path.as_deref() {
+        if let Some((etag, body)) = serve_local_models_catalog(path) {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ETAG, etag)
+                .header("cache-control", "no-cache")
+                .body(Body::from(body))
+                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
+        }
+    }
     let url = format!("{}/models", st.upstream_base_url.trim_end_matches('/'));
     let mut req = st.client.get(&url);
     if let Some(auth) = headers.get(header::AUTHORIZATION) {
@@ -835,6 +868,9 @@ pub struct ProxyRunState {
     /// 写入 Codex 配置的 base_url 主机名(localhost | 127.0.0.1 | LAN IP)。
     #[serde(default = "default_codex_host")]
     pub codex_host: String,
+    /// 本地模型目录路径(models.json);GET /models 直接回放它。
+    #[serde(default)]
+    pub models_json_path: Option<String>,
 }
 
 fn default_bind_ips() -> Vec<String> {
@@ -869,7 +905,14 @@ pub fn clear_state(config_dir: &str) {
 }
 
 /// 拉起独立代理进程(当前可执行文件 + --proxy-server,脱离 GUI 独立运行)。
-pub fn spawn_proxy(port: u16, bind_ips: &[String], codex_host: &str, upstream: &str, pattern: &str) -> Result<u32, String> {
+pub fn spawn_proxy(
+    port: u16,
+    bind_ips: &[String],
+    codex_host: &str,
+    upstream: &str,
+    pattern: &str,
+    models_json_path: Option<&str>,
+) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位自身可执行文件失败: {e}"))?;
     let mut cmd = Command::new(exe);
     cmd.arg("--proxy-server")
@@ -877,7 +920,8 @@ pub fn spawn_proxy(port: u16, bind_ips: &[String], codex_host: &str, upstream: &
         .arg(upstream.to_string())
         .arg(pattern.to_string())
         .arg(bind_ips.join(","))
-        .arg(codex_host.to_string());
+        .arg(codex_host.to_string())
+        .arg(models_json_path.unwrap_or("").to_string());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -934,11 +978,18 @@ pub fn ensure_running(
     codex_host: &str,
     upstream: &str,
     pattern: &str,
+    models_json_path: Option<&str>,
 ) -> Result<ProxyRunState, String> {
+    let mjp = models_json_path.map(|p| p.to_string());
     let health_target = if codex_host == "localhost" { "localhost" } else { codex_host };
     if health_check(health_target, port) {
         if let Some(st) = read_state(config_dir) {
-            if st.upstream == upstream && st.pattern == pattern && st.codex_host == codex_host && st.bind_ips == bind_ips {
+            if st.upstream == upstream
+                && st.pattern == pattern
+                && st.codex_host == codex_host
+                && st.bind_ips == bind_ips
+                && st.models_json_path == mjp
+            {
                 return Ok(st);
             }
         }
@@ -950,7 +1001,12 @@ pub fn ensure_running(
             // 进程在但健康检查失败(启动中?)再等一会
             for _ in 0..25 {
                 if health_check(&st.codex_host, port) {
-                    if st.upstream == upstream && st.pattern == pattern && st.codex_host == codex_host && st.bind_ips == bind_ips {
+                    if st.upstream == upstream
+                        && st.pattern == pattern
+                        && st.codex_host == codex_host
+                        && st.bind_ips == bind_ips
+                        && st.models_json_path == mjp
+                    {
                         return Ok(st);
                     }
                     break;
@@ -960,8 +1016,8 @@ pub fn ensure_running(
         }
         let _ = stop(config_dir);
     }
-    let pid = spawn_proxy(port, bind_ips, codex_host, upstream, pattern)?;
-    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ips: bind_ips.to_vec(), codex_host: codex_host.to_string() };
+    let pid = spawn_proxy(port, bind_ips, codex_host, upstream, pattern, models_json_path)?;
+    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ips: bind_ips.to_vec(), codex_host: codex_host.to_string(), models_json_path: mjp };
     write_state(config_dir, &st)?;
     // 等就绪(最多 6s)
     for _ in 0..30 {
@@ -986,10 +1042,10 @@ pub fn stop(config_dir: &str) -> Result<(), String> {
 }
 
 /// 独立运行模式入口(由 main.rs 在 --proxy-server 时调用,常驻)。
-pub fn run_server_blocking(port: u16, bind_ips: Vec<String>, upstream: String, pattern: String) {
+pub fn run_server_blocking(port: u16, bind_ips: Vec<String>, upstream: String, pattern: String, models_json_path: Option<String>) {
     let rt = tokio::runtime::Runtime::new().expect("failed to init tokio runtime");
     rt.block_on(async move {
-        let app = build_app(upstream, pattern);
+        let app = build_app(upstream, pattern, models_json_path);
         let mut listeners = Vec::new();
         for ip in bind_ips {
             let addr: SocketAddr = format!("{ip}:{port}")
@@ -1107,9 +1163,10 @@ pub fn start_auto(
     port: u16,
     upstream: &str,
     pattern: &str,
+    models_json_path: Option<&str>,
 ) -> Result<(ProxyRunState, Option<String>), String> {
     let loopback: Vec<String> = vec!["127.0.0.1".to_string(), "::1".to_string()];
-    let st = ensure_running(config_dir, port, &loopback, "localhost", upstream, pattern)?;
+    let st = ensure_running(config_dir, port, &loopback, "localhost", upstream, pattern, models_json_path)?;
     let mut note: Option<String> = None;
     if !probe_with_default_proxy(&format!("http://localhost:{port}/healthz")) {
         // localhost 被劫持:macOS 顺手写入 launchd no_proxy(新进程生效),再试 LAN 兜底
@@ -1122,7 +1179,7 @@ pub fn start_auto(
         if let Some(ip) = lan_ip() {
             let lan: Vec<String> = vec![ip.clone()];
             if probe_with_default_proxy(&format!("http://{ip}:{port}/healthz")) {
-                let st2 = ensure_running(config_dir, port, &lan, &ip, upstream, pattern)?;
+                let st2 = ensure_running(config_dir, port, &lan, &ip, upstream, pattern, models_json_path)?;
                 note = Some(format!(
                     "检测到系统/环境代理劫持 localhost,已自动改用本机地址 {ip}:{port} 供 Codex 连接"
                 ));
@@ -1150,6 +1207,24 @@ pub fn start_auto(
 mod tests {
     use super::*;
     use futures_util::stream::iter;
+
+    #[test]
+    fn serve_local_models_catalog_reads_file() {
+        let dir = std::env::temp_dir().join("axon-proxy-models-test.json");
+        let content = "{\"models\":[{\"slug\":\"glm-5.3-flash\",\"context_window\":1000000}]}";
+        std::fs::write(&dir, content).unwrap();
+        let got = serve_local_models_catalog(dir.to_str().unwrap());
+        assert!(got.is_some());
+        let (etag, body) = got.unwrap();
+        assert!(body.contains("glm-5.3-flash"));
+        assert!(etag.starts_with('"'));
+        // 相同路径再次读取 etag 一致
+        let (etag2, _) = serve_local_models_catalog(dir.to_str().unwrap()).unwrap();
+        assert_eq!(etag, etag2);
+        // 不存在/空路径 → None
+        assert!(serve_local_models_catalog("/nonexistent/xyz.json").is_none());
+        let _ = std::fs::remove_file(&dir);
+    }
 
     #[test]
     fn should_convert_matches_pattern() {
