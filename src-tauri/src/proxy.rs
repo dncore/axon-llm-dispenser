@@ -275,10 +275,21 @@ pub fn responses_to_chat(body: &Value) -> Value {
         out.insert(key.into(), m.clone());
     }
 
-    // 注意:不把 responses 的 reasoning.effort 转成 chat reasoning_effort。
-    // 各上游的"思考档位"参数不同(deepseek/glm 各自 thinking 参数、gemini 用
-    // thinkingConfig,且拒收 "none"→THINKING_LEVEL_MINIMAL),外包会跨厂商报 400;
-    // 让上游走默认思考即可,通用桥接最稳。
+    // reasoning.effort → chat reasoning_effort:网关对各厂商会自行转成对应思考参数
+    // (实测 deepseek/glm/kimi/gemini/gpt-5.6 等全模型接受 low/high/max)。
+    // 唯 "none"/"off"/"disabled" 不作为该参数发送:实测 claude-* / gemini-3.7-flash /
+    // grok-4.6 拒收 "none"(报 Invalid reasoning_effort / THINKING_LEVEL_MINIMAL),
+    // 发送则 400;改用 omit(让上游走默认),安全且不崩。
+    if let Some(effort) = body
+        .get("reasoning")
+        .and_then(|v| v.get("effort"))
+        .and_then(|v| v.as_str())
+    {
+        let e = effort.trim().to_ascii_lowercase();
+        if !matches!(e.as_str(), "none" | "off" | "disabled") {
+            out.insert("reasoning_effort".into(), json!(effort));
+        }
+    }
 
     for k in ["temperature", "top_p", "stream"] {
         if let Some(v) = body.get(k) {
@@ -1358,6 +1369,20 @@ mod tests {
         assert_eq!(item["name"], "status");
         assert_eq!(item["namespace"], "mcp__git");
         assert_eq!(item["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chat_conversion_forwards_effort_but_omits_none() {
+        // high → 转发 reasoning_effort
+        let high = json!({"model":"glm-5.3-flash","reasoning":{"effort":"high"},
+            "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]});
+        let c = responses_to_chat(&high);
+        assert_eq!(c["reasoning_effort"], "high");
+        // none → 不发送(避免 claude/gemini-3.7/grok 的 400)
+        let none = json!({"model":"claude-sonnet-5","reasoning":{"effort":"none"},
+            "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]});
+        let c2 = responses_to_chat(&none);
+        assert!(c2.get("reasoning_effort").is_none());
     }
 
     #[test]

@@ -4,6 +4,14 @@
 import type { ResolvedModel } from "./models";
 import { escapeRegExp } from "./util";
 
+/** Codex 目录 reasoning effort 预设(实测网关对所有模型接受 low/high/max;不含 none,
+ * 因 claude 系 / gemini-3.7-flash / grok-4.6 拒收 none→400,且 none 在转换层不发送)。 */
+export const CODX_REASONING_LEVELS = [
+  { effort: "low", description: "Low" },
+  { effort: "high", description: "High" },
+  { effort: "max", description: "Max" },
+];
+
 /** Codex Responses 转换代理:默认监听端口。 */
 export const CODX_PROXY_DEFAULT_PORT = 17321;
 /** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。
@@ -118,7 +126,7 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
     slug: m.id,
     support_verbosity: false,
     supported_in_api: true,
-    supported_reasoning_levels: [],
+    supported_reasoning_levels: CODX_REASONING_LEVELS.map((x) => ({ ...x })),
     supports_images: m.input.includes("image"),
     supports_parallel_tool_calls: true,
     supports_reasoning_summaries: false,
