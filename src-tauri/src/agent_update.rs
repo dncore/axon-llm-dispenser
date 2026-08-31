@@ -802,7 +802,7 @@ fn run_streaming(app: &AppHandle, cmd: &[String], timeout: Duration) -> Result<i
         if start.elapsed() > timeout {
             let _ = child.kill();
             return Err(format!(
-                "{} 执行超时({}s)",
+                "{} 升级超时({}s) —— 可能是网络/下载缓慢(如 brew 拉取安装包卡住);请检查网络后重试",
                 cmd.join(" "),
                 timeout.as_secs()
             ));
@@ -1221,7 +1221,7 @@ fn update_one(app: &AppHandle, entry: AgentEntry) -> UpdateResult {
         };
     };
 
-    match run_streaming(app, &cmd, Duration::from_secs(300)) {
+    match run_streaming(app, &cmd, Duration::from_secs(120)) {
         Ok(code) => {
             // 升级后重读版本:npx 缓存安装读 latest 缓存版本,其余读真实路径
             let after = if det.manager == Manager::Local {
