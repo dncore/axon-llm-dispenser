@@ -276,6 +276,41 @@ struct Detected {
 /// 2. PATH 查找
 /// 3. fnm/nvm 任意版本的 npm
 /// 4. Homebrew 目录
+fn resolve_brew() -> Option<String> {
+    for b in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "/home/linuxbrew/.linuxbrew/bin/brew"] {
+        if Path::new(b).exists() {
+            return Some(b.to_string());
+        }
+    }
+    None
+}
+
+fn resolve_bun(det: &Detected) -> Option<String> {
+    // bun 常位于 ~/.bun/bin/bun;也看 node_root(若 bun 被同目录管理)
+    if let Some(root) = &det.node_root {
+        let cand = format!("{}/bin/bun", root);
+        if Path::new(&cand).exists() {
+            return Some(cand);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cand = format!("{}/.bun/bin/bun", home);
+    if Path::new(&cand).exists() {
+        return Some(cand);
+    }
+    None
+}
+
+fn resolve_pnpm(det: &Detected) -> Option<String> {
+    if let Some(root) = &det.node_root {
+        let cand = format!("{}/bin/pnpm", root);
+        if Path::new(&cand).exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn resolve_npm(det: &Detected) -> Option<String> {
     if let Some(root) = &det.node_root {
         let cand = format!("{}/bin/npm", root);
@@ -1010,26 +1045,22 @@ fn build_update_cmd(det: &Detected) -> Option<Vec<String>> {
                 .manager_target
                 .clone()
                 .or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
-            Some(vec!["pnpm".into(), "add".into(), "-g".into(), pkg])
+            Some(vec![resolve_pnpm(det).unwrap_or_else(|| "pnpm".into()), "add".into(), "-g".into(), pkg])
         }
         Manager::Bun => {
             let pkg = det
                 .manager_target
                 .clone()
                 .or_else(|| det.def.npm_package.map(|s| s.to_string()))?;
-            Some(vec!["bun".into(), "add".into(), "-g".into(), pkg])
+            Some(vec![resolve_bun(det).unwrap_or_else(|| "bun".into()), "add".into(), "-g".into(), pkg])
         }
         Manager::Brew => {
             let formula = det.manager_target.clone()?;
+            let brew = resolve_brew().unwrap_or_else(|| "brew".into());
             if det.brew_cask {
-                Some(vec![
-                    "brew".into(),
-                    "upgrade".into(),
-                    "--cask".into(),
-                    formula,
-                ])
+                Some(vec![brew, "upgrade".into(), "--cask".into(), formula])
             } else {
-                Some(vec!["brew".into(), "upgrade".into(), formula])
+                Some(vec![brew, "upgrade".into(), formula])
             }
         }
         Manager::Winget => {
@@ -1722,7 +1753,9 @@ mod tests {
 
         let brew_cask = det_for(&AGENTS[1], "/opt/homebrew/Caskroom/codex/0.1/bin/codex");
         let cmd = build_update_cmd(&brew_cask).unwrap();
-        assert_eq!(cmd, vec!["brew", "upgrade", "--cask", "codex"]);
+        // brew 可能被解析为绝对路径(resolve_brew),用以 brew 结尾的判定
+        assert!(cmd[0].ends_with("brew"), "cmd[0] should be brew, got {:?}", cmd[0]);
+        assert_eq!(&cmd[1..], &["upgrade", "--cask", "codex"]);
 
         let native = det_for(
             &AGENTS[0],
@@ -1937,7 +1970,8 @@ mod tests {
         // brew 安装(官方 tap formula):Cellar 路径 → brew upgrade
         let brew = det_for(def, "/opt/homebrew/Cellar/opencode/1.18.16/bin/opencode");
         let cmd = build_update_cmd(&brew).unwrap();
-        assert_eq!(cmd, vec!["brew", "upgrade", "opencode"]);
+        assert!(cmd[0].ends_with("brew"), "cmd[0] should be brew, got {:?}", cmd[0]);
+        assert_eq!(&cmd[1..], &["upgrade", "opencode"]);
 
         // 原生安装 → opencode upgrade 自更新
         let native = det_for(def, "/Users/x/.opencode/bin/opencode");
