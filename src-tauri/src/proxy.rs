@@ -863,6 +863,10 @@ pub struct ProxyRunState {
     /// 本地模型目录路径(models.json);GET /models 直接回放它。
     #[serde(default)]
     pub models_json_path: Option<String>,
+    /// 应用二进制戳(current_exe 的 mtime):app 升级后二进制变化 → 强制重启代理,
+    /// 避免复用旧版二进制的代理进程(新修复不生效)。
+    #[serde(default)]
+    pub bin_stamp: Option<String>,
 }
 
 fn default_bind_ips() -> Vec<String> {
@@ -952,6 +956,19 @@ pub fn kill_proc(pid: u32) -> bool {
     }
 }
 
+/// 当前应用二进制戳(current_exe 的修改时间毫秒)。升级后二进制 mtime 变化,
+/// 用于让代理自愈时感知"代码已更新",强制用新二进制重启代理。
+pub fn current_bin_stamp() -> String {
+    let exe = std::env::current_exe().ok();
+    let mtime = exe
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{mtime}")
+}
+
 /// 健康检查:GET http://127.0.0.1:{port}/healthz。
 pub fn health_check(ip: &str, port: u16) -> bool {
     let url = format!("http://{ip}:{port}/healthz");
@@ -973,6 +990,7 @@ pub fn ensure_running(
     models_json_path: Option<&str>,
 ) -> Result<ProxyRunState, String> {
     let mjp = models_json_path.map(|p| p.to_string());
+    let stamp = Some(current_bin_stamp());
     let health_target = if codex_host == "localhost" { "localhost" } else { codex_host };
     if health_check(health_target, port) {
         if let Some(st) = read_state(config_dir) {
@@ -981,11 +999,12 @@ pub fn ensure_running(
                 && st.codex_host == codex_host
                 && st.bind_ips == bind_ips
                 && st.models_json_path == mjp
+                && st.bin_stamp == stamp
             {
                 return Ok(st);
             }
         }
-        // 有实例但不是我们要的配置:重启
+        // 有实例但不是我们要的配置或二进制已更新:重启
         let _ = stop(config_dir);
     }
     if let Some(st) = read_state(config_dir) {
@@ -998,6 +1017,7 @@ pub fn ensure_running(
                         && st.codex_host == codex_host
                         && st.bind_ips == bind_ips
                         && st.models_json_path == mjp
+                        && st.bin_stamp == stamp
                     {
                         return Ok(st);
                     }
@@ -1009,7 +1029,7 @@ pub fn ensure_running(
         let _ = stop(config_dir);
     }
     let pid = spawn_proxy(port, bind_ips, codex_host, upstream, pattern, models_json_path)?;
-    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ips: bind_ips.to_vec(), codex_host: codex_host.to_string(), models_json_path: mjp };
+    let st = ProxyRunState { port, pid, upstream: upstream.to_string(), pattern: pattern.to_string(), bind_ips: bind_ips.to_vec(), codex_host: codex_host.to_string(), models_json_path: mjp, bin_stamp: stamp };
     write_state(config_dir, &st)?;
     // 等就绪(最多 6s)
     for _ in 0..30 {
