@@ -489,12 +489,11 @@ where
         while let Some(chunk) = input.next().await {
             match chunk {
                 Err(e) => {
-                    yield sse_event("response.failed", json!({
-                        "type": "response.failed",
-                        "response": {"id": meta_id, "object": "response", "status": "failed", "model": model,
-                                      "error": {"type": "upstream_error", "message": format!("upstream stream error: {e}")}}
-                    }));
-                    return;
+                    // 上游 SSE 流中断:设置 failed,并 break 落到收尾,确保响应流
+                    // 总以 response.completed 结束(否则 codex 报
+                    // "stream closed before response.completed",见 Windows 反馈)。
+                    failed = Some(json!({"type": "upstream_error", "message": format!("upstream stream error: {e}")}));
+                    break;
                 }
                 Ok(bytes) => {
                     buf.push_str(&String::from_utf8_lossy(&bytes));
@@ -1003,7 +1002,9 @@ pub fn ensure_running(
 ) -> Result<ProxyRunState, String> {
     let mjp = models_json_path.map(|p| p.to_string());
     let stamp = Some(current_bin_stamp());
-    let health_target = if codex_host == "localhost" { "localhost" } else { codex_host };
+    // 健康检查固定用 127.0.0.1(代理监听回环;不要用 localhost,Windows 下 localhost 可能解析
+    // 到 ::1,而 ::1 绑定常失败(socket 10048),导致健康检查连不上 → 误报端口被占用 → 超时)
+    let health_target = "127.0.0.1";
     if health_check(health_target, port) {
         if let Some(st) = read_state(config_dir) {
             if st.upstream == upstream
@@ -1023,7 +1024,7 @@ pub fn ensure_running(
         if is_pid_alive(st.pid) && st.port == port {
             // 进程在但健康检查失败(启动中?)再等一会
             for _ in 0..25 {
-                if health_check(&st.codex_host, port) {
+                if health_check("127.0.0.1", port) {
                     if st.upstream == upstream
                         && st.pattern == pattern
                         && st.codex_host == codex_host
