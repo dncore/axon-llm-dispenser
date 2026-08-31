@@ -617,11 +617,12 @@ where
         let status = if failed.is_some() { "failed" } else { finish_status(finish_reason.as_deref()) };
         let mut resp = json!({
             "id": meta_id, "object": "response", "created_at": chrono_ts(), "status": status,
-            "model": model, "output": output_items, "usage": json!({})
+            "model": model, "output": output_items
         });
-        if let Some(u) = usage.take() {
-            resp["usage"] = chat_usage_to_responses(Some(&u));
-        }
+        // usage 恒用完整默认(缺失时补 input_tokens 等全字段):部分上游(如 grok/xAI)的
+        // chat SSE 不返回 usage,若不补全,桌面端(内嵌 codex)解析 response.completed 会报
+        // "missing field `input_tokens`"。
+        resp["usage"] = chat_usage_to_responses(usage.as_ref());
         if let Some(err) = failed.take() {
             resp["error"] = err;
         }
@@ -1419,6 +1420,9 @@ mod tests {
         assert!(text.contains("\"delta\":\"Hel\""));
         assert!(text.contains("event: response.completed"));
         assert!(text.contains("\"status\":\"completed\""));
+        // usage 恒带全量字段(上游若未回传 usage,也不得缺 input_tokens 等,否则桌面端解析失败)
+        assert!(text.contains("\"input_tokens\":0"));
+        assert!(text.contains("\"output_tokens\":0"));
         // 工具定义从不进入 messages content
         assert!(!text.contains("additional_tools"));
     }
