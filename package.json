@@ -1,6 +1,6 @@
 {
   "name": "axon-llm-dispenser",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "description": "\u628a\u7528\u6237\u81ea\u6709\u7684 OpenAI \u517c\u5bb9\u7f51\u5173\u4e00\u952e\u914d\u7f6e\u5230\u5404 Agent \u5de5\u5177",
   "private": true,
   "type": "module",
