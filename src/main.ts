@@ -363,7 +363,43 @@ function proxyWidget(): El {
     h("span", { class: "header-divider" }, []),
     h("span", { class: "proxy-title" }, ["开机自启"]),
     autostartToggle(),
+    h("span", { class: "header-divider" }, []),
+    appUpdateWidget(),
   ]);
+}
+
+/** Header 右上:App 自身更新提示(默认隐藏,检测到新版才显示)。 */
+function appUpdateWidget(): El {
+  return h("span", { id: "app-update-chip", class: "app-update-chip", style: "display:none" }, []);
+}
+
+/** 检查 App 更新:有新版则显示更新条;macOS「一键升级」,Windows「去下载」。 */
+async function checkAppUpdate(): Promise<void> {
+  try {
+    const info = await bridge.appCheckUpdate();
+    if (!info.updateAvailable) return;
+    const chip = document.getElementById("app-update-chip");
+    if (!chip) return;
+    chip.replaceChildren();
+    const isMac = navigator.userAgent.includes("Mac");
+    const btn = h("button", { class: "btn btn-small", type: "button", title: isMac ? "执行 brew upgrade axon-llm-dispenser" : "前往 GitHub Release 下载" }, [isMac ? "一键升级" : "去下载"]);
+    btn.addEventListener("click", () => {
+      if (isMac) {
+        confirmDialog(`升级 Axon 到 v${info.latest}?将执行 brew upgrade axon-llm-dispenser,升级会自动重启应用。`, () => {
+          void bridge.appUpdateMacos().then(
+            () => notify("升级命令已执行,应用将自动重启", "info"),
+            (e) => notify(`升级失败: ${e}`, "error"),
+          );
+        });
+      } else {
+        void bridge.openUrl(info.url);
+      }
+    });
+    chip.append(h("span", { class: "proxy-title" }, [`发现新版本 v${info.latest}`]), btn);
+    chip.style.display = "inline-flex";
+  } catch {
+    // 更新检查失败(离线/GitHub 不可达):静默
+  }
 }
 
 /** 开机自启开关(header):状态由 OS 侧(LaunchAgent/注册表)真实回填。 */
@@ -1651,6 +1687,8 @@ async function boot(): Promise<void> {
   } catch {
     // 忽略:版本获取失败时保留占位
   }
+  // 检查 App 自身更新(有新版才显示提示)
+  void checkAppUpdate();
   try {
     config = await bridge.loadAppConfig();
     fillForm(config);

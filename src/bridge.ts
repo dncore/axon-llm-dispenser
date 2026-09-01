@@ -203,6 +203,18 @@ export function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }
 
+export type AppUpdateInfo = { current: string; latest: string; url: string; updateAvailable: boolean };
+
+/** 查询 GitHub Releases 最新版本,与当前 App 版本比对。 */
+export function appCheckUpdate(): Promise<AppUpdateInfo> {
+  return invoke<AppUpdateInfo>("check_update");
+}
+
+/** macOS:执行 brew upgrade axon-llm-dispenser(流式日志)。Windows 请用打开下载页。 */
+export function appUpdateMacos(): Promise<void> {
+  return invoke("update_macos");
+}
+
 export function homeDir(): Promise<string> {
   return invoke<string>("home_dir");
 }

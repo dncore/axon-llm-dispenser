@@ -1,4 +1,5 @@
 mod agent_update;
+mod app_update;
 mod commands;
 pub mod proxy;
 
@@ -120,6 +121,8 @@ pub fn run() {
             agent_update::agent_update,
             agent_update::agent_install,
             agent_update::pi_extensions_update,
+            app_update::check_update,
+            app_update::update_macos,
         ])
         .build(tauri::generate_context!())
         .expect("error while building axon-llm-dispenser")
