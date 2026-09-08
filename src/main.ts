@@ -134,6 +134,7 @@ function build(): void {
       toolCard("omp", "Oh My Pi", ["配置", "状态", "还原"]),
       toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
       toolCard("opencode", "OpenCode", ["配置", "状态", "还原"]),
+      toolCard("grok", "Grok", ["配置", "状态", "还原"]),
     ]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -1551,6 +1552,29 @@ function bind(): void {
   );
 
   $("btn-dsh-还原").addEventListener("click", () => openRestoreModal("dsh"));
+
+  $("btn-grok-配置").addEventListener("click", () =>
+    confirmDialog("将更新 grok 的接入配置:写入 config.toml 的 [model_providers.<name>] 与每模型 [model.<id>] 块,保留其它设置;API Key 以明文写入 provider 块(grok 不加载 home .env,env_key 需 shell 导出故不用);原文件自动备份(.bak-*),确认?", () => {
+      void run("grok 配置", async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const r = await flows.configureGrok(config, ids);
+        log(r.lines);
+        void detectAgentConfigOne("grok");
+      });
+    }),
+  );
+
+  $("btn-grok-状态").addEventListener("click", () =>
+    run("grok 状态", async () => {
+      readFields();
+      log(await flows.grokStatus(config));
+    }),
+  );
+
+  $("btn-grok-还原").addEventListener("click", () => openRestoreModal("grok"));
 
   $("btn-claude-配置").addEventListener("click", () => openClaudeConfigModal());
 

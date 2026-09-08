@@ -65,6 +65,16 @@ export function extractCodexProvider(cfgText: string, providerName: string): Fou
   };
 }
 
+/** Grok:~/.grok/config.toml 的 [model_providers.<name>] 段(api_key 明文存放)。 */
+export function extractGrokProvider(cfgText: string, providerName: string): FoundProvider {
+  const re = new RegExp(`^\\[model_providers\\.${escapeRegExp(providerName)}\\]\\s*$[\\s\\S]*?(?=^\\[|(?![\\s\\S]))`, "m");
+  const block = cfgText.match(re)?.[0] ?? "";
+  return {
+    baseUrl: grabToml(block, "base_url"),
+    apiKey: grabToml(block, "api_key"),
+  };
+}
+
 /** Reasonix:config.toml 的 [[providers]] 块(按 name 匹配)+ .env 里 api_key_env 的值。 */
 export function extractReasonixProvider(cfgText: string, envText: string, providerName: string): FoundProvider {
   const blockRe = /^\[\[providers\]\]\s*$/gm;

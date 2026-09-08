@@ -181,6 +181,26 @@ const AGENTS: &[AgentDef] = &[
         ],
     },
     AgentDef {
+        name: "grok",
+        label: "Grok",
+        native_update: &[],
+        version_args: &["--version"],
+        // 官方仅安装器发行(x.ai/cli/install.sh,装到 ~/.grok/bin),无 npm 包
+        npm_package: None,
+        winget_package: None,
+        install_methods: &[
+            // 无 install.ps1;官方对 Windows 的支持就是同一 curl|sh 流程
+            //(Git for Windows / MSYS2 的 sh)。cmd /C 包一层保证原始字节管道
+            // 直通 sh(绕开 PowerShell 5.1 的 curl 别名与文本管道转码)。
+            InstallMethodDef::m(
+                "curl",
+                "官方脚本 (curl)",
+                "curl -fsSL https://x.ai/cli/install.sh | sh",
+                Some("cmd /C \"curl -fsSL https://x.ai/cli/install.sh | sh\""),
+            ),
+        ],
+    },
+    AgentDef {
         name: "opencode",
         label: "OpenCode",
         native_update: &["upgrade"],
@@ -1806,10 +1826,16 @@ mod tests {
         assert!(compare_versions("0.1.0", "0.1.0-rc.6") > 0); // 正式版 > rc
     }
 
+    /// 无 npm 发行渠道的 agent(官方安装器独占):latest 检查跳过,仅显示本地版本。
+    const NO_NPM_LATEST: &[&str] = &["grok"];
+
     #[test]
     fn registry_has_install_methods_for_all_agents() {
         for a in AGENTS {
             assert!(!a.install_methods.is_empty(), "{} 缺安装方式", a.name);
+            if NO_NPM_LATEST.contains(&a.name) {
+                continue;
+            }
             assert!(
                 a.npm_package.is_some(),
                 "{} 缺 npm 包(用于 latest 检查)",

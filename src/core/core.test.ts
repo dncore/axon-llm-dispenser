@@ -691,3 +691,153 @@ describe("fallbackAutostartChecked", () => {
     expect(checked).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// grok (grok CLI)
+// ---------------------------------------------------------------------------
+
+import { patchGrokConfigToml, parseGrokStatus, type GrokModel } from "./grok";
+import { extractGrokProvider } from "./agent-config";
+
+function grokModel(id: string, overrides?: Partial<GrokModel>): GrokModel {
+  return { id, contextWindow: 128000, maxTokens: 8192, ...overrides };
+}
+
+const GROK_INPUT = {
+  providerName: "axon",
+  label: "Axon",
+  baseUrl: "https://gateway.example/v1",
+  apiKey: "sk-test",
+  defaultModel: "glm-5.3",
+} as const;
+
+describe("patchGrokConfigToml", () => {
+  it("空文件创建 [model_providers.<name>] + [models] default + 模型块(含点号引号键)", () => {
+    const r = patchGrokConfigToml("", {
+      ...GROK_INPUT,
+      models: [
+        grokModel("deepseek-v4-flash", { contextWindow: 1000000, maxTokens: 384000 }),
+        grokModel("glm-5.3", { contextWindow: 1048576, maxTokens: 131072 }),
+      ],
+    });
+    expect(r.text).toContain("[model_providers.axon]");
+    expect(r.text).toContain('base_url = "https://gateway.example/v1"');
+    expect(r.text).toContain('api_backend = "chat_completions"');
+    expect(r.text).toContain('api_key = "sk-test"');
+    expect(r.text).toContain('[models]\ndefault = "glm-5.3"');
+    expect(r.text).toContain("[model.deepseek-v4-flash]"); // 无点号 ID 用裸键
+    expect(r.text).toContain('[model."glm-5.3"]'); // 含点号 ID 必须引号键(裸键会被 TOML 解析成嵌套表)
+    expect(r.text).toContain('model_provider = "axon"');
+    expect(r.text).toContain("context_window = 1048576");
+    expect(r.text).toContain("max_completion_tokens = 131072");
+    expect(r.changes.length).toBe(3);
+  });
+
+  it("幂等:重复 patch 输出不变且无变更", () => {
+    const input = { ...GROK_INPUT, models: [grokModel("deepseek-v4-flash"), grokModel("glm-5.3")] };
+    const r1 = patchGrokConfigToml("", input);
+    const r2 = patchGrokConfigToml(r1.text, input);
+    expect(r2.text).toBe(r1.text);
+    expect(r2.changes).toEqual([]);
+  });
+
+  it("default 不在模型列表时回退到字母序第一个模型", () => {
+    const r = patchGrokConfigToml("", {
+      ...GROK_INPUT,
+      defaultModel: "not-in-list",
+      models: [grokModel("kimi-k3"), grokModel("glm-5.3")],
+    });
+    expect(r.text).toContain('default = "glm-5.3"');
+  });
+
+  it("模型列表为空时原样返回", () => {
+    const r = patchGrokConfigToml("some existing\n", { ...GROK_INPUT, models: [] });
+    expect(r.text).toBe("some existing\n");
+    expect(r.changes).toEqual([]);
+  });
+
+  it("保留 [models] 段其他键、其他 [model.*] 块与顶层注释", () => {
+    const existing = [
+      "# user config",
+      "[models]",
+      'web_search = "grok-4.6"',
+      "",
+      "[model.grok-4.6]",
+      "temperature = 0.5",
+      "",
+    ].join("\n");
+    const r = patchGrokConfigToml(existing, {
+      ...GROK_INPUT,
+      defaultModel: "deepseek-v4-flash",
+      models: [grokModel("deepseek-v4-flash")],
+    });
+    expect(r.text.startsWith("# user config")).toBe(true); // 注释保留
+    expect(r.text).toContain('web_search = "grok-4.6"'); // [models] 其他键保留
+    expect(r.text).toContain("[model.grok-4.6]"); // 其他 [model.*] 块保留
+    expect(r.text).toContain("temperature = 0.5");
+    expect(r.text).toContain('default = "deepseek-v4-flash"'); // [models] default 更新
+  });
+
+  it("重写自有块并移除陈旧块(网关下架模型)", () => {
+    const once = patchGrokConfigToml("", {
+      ...GROK_INPUT,
+      models: [grokModel("deepseek-v4-flash"), grokModel("glm-5.3"), grokModel("qwen3.8-flash")],
+    });
+    expect(once.text.match(/\[model\.[^\]]+\]/g)!.length).toBe(3);
+    const twice = patchGrokConfigToml(once.text, {
+      ...GROK_INPUT,
+      models: [grokModel("deepseek-v4-flash"), grokModel("glm-5.3", { contextWindow: 999 })],
+    });
+    expect(twice.text).not.toContain("qwen3.8-flash"); // 陈旧模型块移除
+    expect(twice.text).toContain("context_window = 999"); // 自有块按新元数据重写
+    expect(twice.changes.some((c) => c.includes("移除 1 个陈旧模型块"))).toBe(true);
+  });
+
+  it("同 key 已存在用户块(非本 provider)时保留并跳过,避免 TOML 重复段", () => {
+    const existing = [
+      "[model.deepseek-v4-flash]",
+      'model = "deepseek-v4-flash"',
+      'model_provider = "official"',
+      'base_url = "http://localhost:8080/v1"',
+      "",
+    ].join("\n");
+    const r = patchGrokConfigToml(existing, {
+      ...GROK_INPUT,
+      models: [grokModel("deepseek-v4-flash"), grokModel("glm-5.3")],
+    });
+    expect(r.text).toContain('base_url = "http://localhost:8080/v1"'); // 用户块保留
+    expect(r.text).toContain('model_provider = "axon"'); // 无冲突的 glm-5.3 正常写入
+    expect((r.text.match(/\[model\.deepseek-v4-flash\]/g) ?? []).length).toBe(1); // 同 key 块不重复
+    expect(r.changes.some((c) => c.includes("跳过 1 个模型"))).toBe(true);
+  });
+
+  it("api_key 更换时 provider 块更新,模型块不动", () => {
+    const once = patchGrokConfigToml("", { ...GROK_INPUT, models: [grokModel("glm-5.3")] });
+    const twice = patchGrokConfigToml(once.text, { ...GROK_INPUT, apiKey: "sk-new", models: [grokModel("glm-5.3")] });
+    expect(twice.text).toContain('api_key = "sk-new"');
+    expect(twice.changes.length).toBe(1); // 仅 provider 块变更
+  });
+});
+
+describe("grok 状态与配置提取", () => {
+  it("parseGrokStatus:已配置/未配置", () => {
+    expect(parseGrokStatus("", "axon").providerConfigured).toBe(false);
+    const configured = patchGrokConfigToml("", { ...GROK_INPUT, models: [grokModel("glm-5.3")] });
+    const s = parseGrokStatus(configured.text, "axon");
+    expect(s.configExists).toBe(true);
+    expect(s.providerConfigured).toBe(true);
+    expect(s.providerBaseUrl).toBe("https://gateway.example/v1");
+    expect(s.providerApiKeySet).toBe(true);
+    expect(s.providerApiKeyMasked).toBe("****"); // maskToken:≤10 位全遮
+    expect(s.providerModels).toBe(1);
+    expect(s.defaultModel).toBe("glm-5.3");
+  });
+
+  it("extractGrokProvider:provider 段的 base_url 与 api_key", () => {
+    const configured = patchGrokConfigToml("", { ...GROK_INPUT, models: [grokModel("glm-5.3")] });
+    const found = extractGrokProvider(configured.text, "axon");
+    expect(found.baseUrl).toBe("https://gateway.example/v1");
+    expect(found.apiKey).toBe("sk-test");
+    expect(extractGrokProvider(configured.text, "other").baseUrl).toBeNull();
+  });
+});

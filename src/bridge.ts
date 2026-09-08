@@ -258,6 +258,10 @@ export async function dshHome(): Promise<string> {
   return await joinPath(await homeDir(), ".dsh");
 }
 
+export async function grokHome(): Promise<string> {
+  return await joinPath(await homeDir(), ".grok");
+}
+
 /** OpenCode 全局配置目录(xdg config:跨平台均为 ~/.config/opencode——xdg-basedir 5.x 无平台分支)。 */
 export async function opencodeHome(): Promise<string> {
   return await joinPath(await homeDir(), ".config", "opencode");

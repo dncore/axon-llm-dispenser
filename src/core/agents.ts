@@ -68,4 +68,10 @@ export const AGENT_CLIS: Record<string, AgentCli> = {
     // npm i -g reasonix / brew install esengine/reasonix/reasonix
     dirs: [...COMMON_BINS],
   },
+  grok: {
+    bin: "grok",
+    // 官方安装器 x.ai/cli/install.sh → ~/.grok/bin(安装器默认目录);npm/brew 全局目录兜底
+    dirs: [...COMMON_BINS, "~/.grok/bin"],
+    note: "官方安装: curl -fsSL https://x.ai/cli/install.sh | sh",
+  },
 };

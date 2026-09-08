@@ -6,6 +6,7 @@ import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel 
 import { generateToken, timestamp } from "./core/util";
 import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
+import { patchGrokConfigToml, parseGrokStatus } from "./core/grok";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
 import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
 import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
@@ -14,6 +15,7 @@ import {
   extractClaudeProvider,
   extractCodexProvider,
   extractDshProvider,
+  extractGrokProvider,
   extractOmpProvider,
   extractPiProvider,
   extractReasonixProvider,
@@ -89,6 +91,12 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
       const settingsPath = await bridge.joinPath(dshH, "settings.yaml");
       const credPath = await bridge.joinPath(dshH, ".credentials.yaml");
       found = extractDshProvider(await bridge.readFileOrEmpty(settingsPath), await bridge.readFileOrEmpty(credPath), cfg.provider);
+      break;
+    }
+    case "grok": {
+      const grokH = await bridge.grokHome();
+      const configPath = await bridge.joinPath(grokH, "config.toml");
+      found = extractGrokProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
       break;
     }
     case "pi": {
@@ -388,6 +396,55 @@ export async function dshStatus(cfg: bridge.AppConfig): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Grok (grok CLI)
+// ---------------------------------------------------------------------------
+
+export async function configureGrok(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.grokHome();
+  const configPath = await bridge.joinPath(home, "config.toml");
+  const resolved = buildResolvedModels(modelIds);
+  const models = resolved.map((m) => ({ id: m.id, contextWindow: m.contextWindow, maxTokens: m.maxTokens }));
+
+  const patched = patchGrokConfigToml(await bridge.readFileOrEmpty(configPath), {
+    providerName: cfg.provider,
+    label: cfg.displayName || cfg.provider,
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
+    models,
+  });
+  const written = await bridge.writeWithBackup(configPath, patched.text);
+
+  const lines = [
+    `config.toml: ${written.path}`,
+    `  ${patched.changes.join(", ") || "无变化"}`,
+    `API Key 以明文写入 [model_providers.${cfg.provider}](同 Codex experimental_bearer_token 先例;grok 不加载 home .env,env_key 需 shell 导出故不用)`,
+    `官方 grok 模型保留走官方通道(grok 内 /model 随时切换,无需 grok logout)`,
+  ];
+  if (written.backup) lines.push(`备份: ${written.backup}`);
+  return { changes: patched.changes, lines };
+}
+
+export async function grokStatus(cfg: bridge.AppConfig): Promise<string[]> {
+  const home = await bridge.grokHome();
+  const configPath = await bridge.joinPath(home, "config.toml");
+  const authPath = await bridge.joinPath(home, "auth.json");
+  const s = parseGrokStatus(await bridge.readFileOrEmpty(configPath), cfg.provider);
+  const cli = await detectAgentCli("grok");
+  return [
+    `Grok home: ${home}`,
+    `config.toml: ${s.configExists ? "存在" : "缺失(使用内置默认)"}`,
+    `auth.json(官方会话): ${(await bridge.exists(authPath)) ? "存在(不影响自定义模型,鉴权优先级低于 per-model api_key)" : "不存在"}`,
+    `provider ${cfg.provider}: ${s.providerConfigured ? `已配置(${s.providerModels} 个模型)` : "未配置"}`,
+    `  base_url: ${s.providerBaseUrl ?? "(无)"}`,
+    `  api_key: ${s.providerApiKeySet ? `${s.providerApiKeyMasked}(明文存放于 config.toml)` : "(未写入)"}`,
+    `[models] default: ${s.defaultModel ?? "(未设置)"}`,
+    `模型块按 [model.<id>] 写入(含点号 ID 用引号键,如 [model."glm-5.3"])`,
+    `grok CLI: ${cli ?? `未在 PATH 中找到(官方安装: curl -fsSL https://x.ai/cli/install.sh | sh)`}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
 
@@ -650,6 +707,11 @@ export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> 
       return [{ id: "reasonix-config", label: "Reasonix config.toml", path: await bridge.joinPath(reasonixH, "config.toml") }];
     case "dsh":
       return [{ id: "dsh-settings", label: "dsh settings.yaml", path: await bridge.joinPath(dshH, "settings.yaml") }];
+    case "grok":
+      {
+        const grokH = await bridge.grokHome();
+        return [{ id: "grok-config", label: "Grok config.toml", path: await bridge.joinPath(grokH, "config.toml") }];
+      }
     case "claude":
       return [{ id: "claude-settings", label: "Claude settings.json", path: await bridge.joinPath(claudeH, "settings.json") }];
     case "pi":

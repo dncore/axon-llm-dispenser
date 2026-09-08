@@ -4,7 +4,7 @@
 
 <h1 align="center">Axon LLM dispenser</h1>
 
-<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix 等,持续扩展)</p>
+<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix、Grok 等,持续扩展)</p>
 
 <p align="center"><em>关于命名：<strong>Axon（轴突）</strong>是神经元的一部分，由神经细胞的细胞本体向外延伸突起，是神经系统中主要的神经信号传递渠道。本项目作为 provider 鉴权分配器，行为非常接近轴突的生物学意义，因此命名 Axon。</em></p>
 
@@ -35,7 +35,7 @@
 - **过滤 Doubao 系模型**开关（默认开启），拉取与生成配置均不含
 - 单行移除、实时数量统计
 
-### 工具接入（7 个 Agent）
+### 工具接入（8 个 Agent）
 
 | 工具 | 写入位置 |
 |------|------|
@@ -46,6 +46,7 @@
 | **Pi agent** | `~/.pi/agent/models.json`（`providers`）+ `settings.json`（defaultProvider/Model） |
 | **Oh My Pi (omp)** | `~/.omp/agent/models.yml`（`providers`）+ `config.yml`（`modelRoles.default`） |
 | **OpenCode** | `~/.config/opencode/opencode.json`（`provider` 块 + 默认 `model`）+ `~/.local/share/opencode/auth.json`（密钥，0600，官方 `opencode auth login` 同款格式） |
+| **Grok** | `~/.grok/config.toml` `[model_providers.<name>]`（api_key 明文、chat_completions）+ 每模型 `[model.<id>]` 块（含点号 ID 引号键，context_window 驱动自动压缩）+ `[models]` default；官方 grok 模型保留走官方通道（混合模式，无需 `grok logout`） |
 
 每个 Agent 有**两个状态图标**（均可点击重检）：
 
