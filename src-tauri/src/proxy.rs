@@ -737,6 +737,47 @@ async fn handle_models(
     }
 }
 
+async fn post_upstream(
+    st: &ProxyState,
+    headers: &HeaderMap,
+    target: &str,
+    body: &Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut req = st.client.post(target).body(body.to_string());
+    if let Some(auth) = headers.get(header::AUTHORIZATION) {
+        if let Ok(v) = auth.to_str() {
+            req = req.header(header::AUTHORIZATION, v);
+        }
+    }
+    req = req
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream");
+    req.send().await
+}
+
+/// 端点拒收 effort 档位时的重试体:剥掉外发请求里的 effort 参数。
+/// convert 路径剥 chat 的顶层 reasoning_effort;透传路径剥 /responses 的
+/// reasoning.effort(reasoning 只剩空对象时连键一起删,部分严格端点拒收空对象)。
+/// 本来就没带 effort 时返回 None,调用方不必重试。
+fn strip_effort_param(body: &Value, convert: bool) -> Option<Value> {
+    let mut out = body.clone();
+    let obj = out.as_object_mut()?;
+    if convert {
+        if obj.remove("reasoning_effort").is_some() {
+            return Some(out);
+        }
+        return None;
+    }
+    let reasoning = obj.get_mut("reasoning")?.as_object_mut()?;
+    if reasoning.remove("effort").is_none() {
+        return None;
+    }
+    if reasoning.is_empty() {
+        obj.remove("reasoning");
+    }
+    Some(out)
+}
+
 fn json_err(status: u16, msg: String) -> Response {
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -760,27 +801,35 @@ async fn handle_responses(
         (format!("{}/responses", st.upstream_base_url.trim_end_matches('/')), body.clone())
     };
 
-    let mut req = st.client.post(&target).body(out_body.to_string());
-    if let Some(auth) = headers.get(header::AUTHORIZATION) {
-        if let Ok(v) = auth.to_str() {
-            req = req.header(header::AUTHORIZATION, v);
-        }
-    }
-    req = req
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "text/event-stream");
-
-    let upstream = match req.send().await {
+    let mut upstream = match post_upstream(&st, &headers, &target, &out_body).await {
         Ok(r) => r,
         Err(e) => return json_err(502, format!("upstream connect failed: {e}")),
     };
-    let status = upstream.status();
-    let content_type = upstream
+    let mut status = upstream.status();
+    let mut content_type = upstream
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+
+    // 端点拒收 effort 档位(400/422,如严格 chat 端点对非推理模型拒收
+    // reasoning_effort 参数本身)时,剥掉 effort 参数重试一次:首次请求已干净
+    // 失败(未生成任何内容),重试安全;再失败则走下方原样透传。
+    if status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY {
+        if let Some(retry_body) = strip_effort_param(&out_body, convert) {
+            if let Ok(r2) = post_upstream(&st, &headers, &target, &retry_body).await {
+                upstream = r2;
+                status = upstream.status();
+                content_type = upstream
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+    }
 
     if !status.is_success() {
         // 非 2xx:原样透传错误(Codex 直接显示)
@@ -1384,6 +1433,33 @@ mod tests {
             "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]});
         let c2 = responses_to_chat(&none);
         assert!(c2.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn strip_effort_param_convert_path() {
+        // convert 路径:剥顶层 reasoning_effort,其余保留
+        let chat = json!({"model":"glm-5.3-flash","reasoning_effort":"max","messages":[]});
+        let stripped = strip_effort_param(&chat, true).unwrap();
+        assert!(stripped.get("reasoning_effort").is_none());
+        assert_eq!(stripped["model"], "glm-5.3-flash");
+        // 本来就没带 → None(不重试)
+        assert!(strip_effort_param(&json!({"model":"x","messages":[]}), true).is_none());
+    }
+
+    #[test]
+    fn strip_effort_param_passthrough_path() {
+        // 透传路径:剥 reasoning.effort,reasoning 其他键保留
+        let body = json!({"model":"x","reasoning":{"effort":"low","summary":"auto"},"input":[]});
+        let s = strip_effort_param(&body, false).unwrap();
+        assert!(s.pointer("/reasoning/effort").is_none());
+        assert_eq!(s["reasoning"]["summary"], "auto");
+        // reasoning 只剩 effort 时连键删(部分严格端点拒收空对象)
+        let only_effort = json!({"model":"x","reasoning":{"effort":"high"}});
+        let s2 = strip_effort_param(&only_effort, false).unwrap();
+        assert!(s2.get("reasoning").is_none());
+        // 无 reasoning / reasoning 无 effort → None
+        assert!(strip_effort_param(&json!({"model":"x"}), false).is_none());
+        assert!(strip_effort_param(&json!({"model":"x","reasoning":{"summary":"auto"}}), false).is_none());
     }
 
     #[test]

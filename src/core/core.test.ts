@@ -121,9 +121,12 @@ describe("patchCodexConfigToml", () => {
     expect("tool_mode" in ds).toBe(false);
     expect("multi_agent_version" in ds).toBe(false);
     // reasoning effort 预设已填充(桌面端 effort 下拉依据;low/high/max 为实测可用档,
-    // 不含 none 以避免 claude/gemini-3.7/grok 拒收 400)
-    const levels = doc.models[0].supported_reasoning_levels as Array<{ effort: string }>;
-    expect(levels.map((l) => l.effort)).toEqual(["low", "high", "max"]);
+    // 不含 none 以避免 claude/gemini-3.7/grok 拒收 400)。全部模型一律填充,不做
+    // reasoning 条件化——未知模型推断为非推理会误伤,兼容由转换代理映射兜底。
+    for (const e of [sol, ds]) {
+      const levels = (e.supported_reasoning_levels ?? []) as Array<{ effort: string }>;
+      expect(levels.map((l) => l.effort)).toEqual(["low", "high", "max"]);
+    }
   });
 });
 

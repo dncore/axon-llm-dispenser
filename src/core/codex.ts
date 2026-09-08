@@ -126,6 +126,9 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
     slug: m.id,
     support_verbosity: false,
     supported_in_api: true,
+    // effort 档位一律填充(桌面端 effort 下拉依据;low/high/max 为实测可用档,不含
+    // none)。不做 reasoning 条件化:axon 面向任意网关,模型表推断不到的 ID 一律
+    // 落到非推理,条件化会误伤未知模型;端点/上游不支持的档位由转换代理做映射兼容。
     supported_reasoning_levels: CODX_REASONING_LEVELS.map((x) => ({ ...x })),
     supports_images: m.input.includes("image"),
     supports_parallel_tool_calls: true,
