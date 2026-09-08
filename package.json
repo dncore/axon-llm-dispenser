@@ -1,7 +1,7 @@
 {
   "name": "axon-llm-dispenser",
   "version": "0.5.18",
-  "description": "\u628a\u7528\u6237\u81ea\u6709\u7684 OpenAI \u517c\u5bb9\u7f51\u5173\u4e00\u952e\u914d\u7f6e\u5230\u5404 Agent \u5de5\u5177",
+  "description": "把用户自有的 OpenAI 兼容网关一键配置到各 Agent 工具",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sync:models": "node scripts/sync-model-meta.mjs",
+    "check:models": "node scripts/sync-model-meta.mjs --check"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
