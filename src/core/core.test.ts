@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveKeyRef, buildResolvedModels } from "./models";
+import { deriveKeyRef, buildResolvedModels, isKnownModel } from "./models";
 import { patchCodexConfigToml, renderCodexModelsJson, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
@@ -22,6 +22,13 @@ describe("buildResolvedModels", () => {
     const [unknown] = buildResolvedModels(["some-gateway-model"]);
     expect(unknown.contextWindow).toBe(128000);
     expect(unknown.reasoning).toBe(false);
+  });
+
+  it("isKnownModel 区分表命中与 fallback(列表 new 徽标依据)", () => {
+    expect(isKnownModel("deepseek-v4-flash")).toBe(true);
+    expect(isKnownModel("Recommend")).toBe(true); // 伪模型路由也在表内
+    expect(isKnownModel("some-gateway-model")).toBe(false);
+    expect(isKnownModel("qwen3.9-plus-0915")).toBe(false); // 未入库的新版本号
   });
 
   it("deepseek-v4-flash-vision-exp 按 flash 同规格 + 图像输入", () => {

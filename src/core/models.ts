@@ -258,6 +258,11 @@ export function buildResolvedModels(ids: string[]): ResolvedModel[] {
   return ids.map((id) => resolveModel(id)).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/** id 是否命中 KNOWN_MODELS(未命中 = 元数据走 fallback 推断,列表标 "new")。 */
+export function isKnownModel(id: string): boolean {
+  return id in KNOWN_MODELS;
+}
+
 /** 是否为 DeepSeek 系模型(pi/omp 走 DeepSeek 官方特配)。 */
 export function isDeepseekModel(id: string): boolean {
   return /deepseek/i.test(id);

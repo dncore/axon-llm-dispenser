@@ -5,7 +5,7 @@ import * as bridge from "./bridge";
 import * as flows from "./flows";
 import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
-import { buildResolvedModels } from "./core/models";
+import { buildResolvedModels, isKnownModel } from "./core/models";
 import { CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { fallbackAutostartChecked } from "./core/autostart";
 // 开机自启(macOS LaunchAgent / Windows 注册表),状态由系统侧查询,不入 AppConfig。
@@ -882,6 +882,8 @@ function renderModelsList(): void {
   for (const r of modelRows) {
     const row = h("div", { class: "model-row" }, [
       h("span", { class: "model-row-id" }, [r.id]),
+      // 未命中元数据表(规格为推断值)的模型标 "new"
+      ...(isKnownModel(r.id) ? [] : [h("span", { class: "model-row-new", title: "未命中模型元数据表,规格按 id 推断" }, ["new"])]),
       r.ownedBy ? h("span", { class: "model-row-owner" }, [r.ownedBy]) : h("span", { class: "model-row-owner" }, ["—"]),
       h("button", { class: "model-row-del", type: "button", title: "移除" }, ["×"]),
     ]);
