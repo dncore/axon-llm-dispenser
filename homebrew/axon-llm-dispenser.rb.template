@@ -10,13 +10,8 @@ cask "axon-llm-dispenser" do
   app "Axon.app"
 
   # 更新前先退出运行中的旧版(否则旧二进制仍在内存运行,brew 直接替换 bundle 后旧版继续跑)
-  preflight do
-    begin
-      system_command "/usr/bin/osascript", args: ["-e", 'tell application "Axon" to quit'], sudo: false
-      sleep 1
-    rescue
-      # 应用未运行 / 非 GUI 会话时忽略
-    end
+  preflight_steps do
+    run "/usr/bin/osascript", args: ["-e", 'tell application "Axon" to quit'], must_succeed: false
   end
 
   # 应用为 ad-hoc 签名(未公证):安装后自动移除 quarantine,避免 Gatekeeper 拦截
