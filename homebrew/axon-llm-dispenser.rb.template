@@ -20,9 +20,8 @@ cask "axon-llm-dispenser" do
   end
 
   # 应用为 ad-hoc 签名(未公证):安装后自动移除 quarantine,避免 Gatekeeper 拦截
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Axon.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Axon.app"]
   end
 
   caveats <<~EOS
