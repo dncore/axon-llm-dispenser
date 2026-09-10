@@ -5,9 +5,7 @@ pub mod proxy;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
-#[cfg(target_os = "macos")]
-use tauri::RunEvent;
+use tauri::{Manager, RunEvent, WindowEvent};
 
 /// 托盘「打开主界面」:显示并聚焦主窗口。
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -130,6 +128,13 @@ pub fn run() {
             // macOS:点击 Dock 图标 / Finder 重新打开应用时恢复主窗口。
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => show_main_window(_app_handle),
+            // brew 一键升级进行中:拦截退出请求(cask preflight 的 AppleScript quit /
+            // 关窗),升级完成后由 update_macos 自动重启为新版。托盘显式退出(code=Some)不拦。
+            RunEvent::ExitRequested { code: None, api, .. } => {
+                if app_update::UPGRADING.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                }
+            }
             _ => {}
         });
 }

@@ -387,8 +387,9 @@ async function checkAppUpdate(): Promise<void> {
     btn.addEventListener("click", () => {
       if (isMac) {
         confirmDialog(`升级 Axon 到 v${info.latest}?将执行 brew upgrade axon-llm-dispenser,升级会自动重启应用。`, () => {
+          notify("brew 升级进行中,期间请勿强制退出;完成后应用自动重启为新版", "info");
           void bridge.appUpdateMacos().then(
-            () => notify("升级命令已执行,应用将自动重启", "info"),
+            () => notify("升级完成,应用即将重启", "info"),
             (e) => notify(`升级失败: ${e}`, "error"),
           );
         });
