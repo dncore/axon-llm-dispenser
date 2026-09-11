@@ -3,13 +3,13 @@
 import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
-import { generateToken, timestamp } from "./core/util";
-import { patchCodexConfigToml, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
-import { patchReasonixProvider, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
-import { patchGrokConfigToml, parseGrokStatus } from "./core/grok";
-import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
-import { patchOpenCodeConfig, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
-import { patchOmpModelsYml, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
+import { escapeRegExp, generateToken, timestamp } from "./core/util";
+import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
+import { patchReasonixProvider, patchReasonixModels, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
+import { patchGrokConfigToml, patchGrokModels, parseGrokStatus } from "./core/grok";
+import { patchDshProvider, patchDshProviderModels, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
+import { patchOpenCodeConfig, patchOpenCodeModels, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
+import { patchOmpModelsYml, patchOmpModelsList, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
 import {
   compareAgentConfig,
   extractClaudeProvider,
@@ -190,19 +190,20 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
     modelsJsonPath: modelsPath,
   });
 
-  const written = await bridge.writeWithBackup(configPath, patched.text);
+  // 内容无变化则不写盘、不产生备份
+  const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
   // 保留现有 models.json 里非当前 provider 的条目(兼容用户已有模型)
   const existingModels = await bridge.readFileOrEmpty(modelsPath);
   const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels);
-  const modelsWritten = await bridge.writeWithBackup(modelsPath, modelsJson);
+  const modelsWritten = modelsJson !== existingModels ? await bridge.writeWithBackup(modelsPath, modelsJson) : null;
 
   const lines = [
-    `config.toml: ${written.path}`,
+    `config.toml: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
-    `models.json: ${modelsWritten.path}(${resolved.length} 个模型)`,
+    `models.json: ${modelsWritten ? `${modelsWritten.path}(${resolved.length} 个模型)` : "无变化,未写入"}`,
     ...proxyLines,
   ];
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: patched.changes, lines };
 }
 
@@ -265,17 +266,18 @@ export async function configureReasonix(cfg: bridge.AppConfig, modelIds: string[
     modelContexts,
   });
 
-  const written = await bridge.writeWithBackup(configPath, patched.text);
+  // 内容无变化则不写盘、不产生备份
+  const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
   const envText = await bridge.readFileOrEmpty(envPath);
   const envPatched = bridge.upsertEnvKey(envText, apiKeyEnv, cfg.apiKey);
-  const envWritten = await bridge.writeSecret(envPath, envPatched.text);
+  const envWritten = envPatched.changed ? await bridge.writeSecret(envPath, envPatched.text) : envPath;
 
   const lines = [
-    `config.toml: ${written.path}`,
+    `config.toml: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
     `凭据: ${envWritten}(${apiKeyEnv}${envPatched.changed ? "" : ",已存在"})`,
   ];
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: patched.changes, lines };
 }
 
@@ -336,7 +338,8 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const resolved = buildResolvedModels(modelIds);
   const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
-  let settingsText = await bridge.readFileOrEmpty(settingsPath);
+  const originalSettings = await bridge.readFileOrEmpty(settingsPath);
+  let settingsText = originalSettings;
   const cleanup: string[] = [];
   // 只清理改 provider 名后残留的旧 provider 路由;llm-deepseek 段由 dsh 自己维护,不动
   const rmProv = removeDshOtherProviders(settingsText, cfg.provider);
@@ -359,19 +362,20 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
   const p2 = patchDshDefaultModel(p1.text, cfg.provider, defaultModel);
   const allChanges = [...cleanup, ...p1.changes, ...p2.changes];
 
-  const written = await bridge.writeWithBackup(settingsPath, p2.text);
+  // 内容无变化则不写盘、不产生备份
+  const written = p2.text !== originalSettings ? await bridge.writeWithBackup(settingsPath, p2.text) : null;
   const credText = await bridge.readFileOrEmpty(credPath);
   const credPatched = upsertDshCredentialYaml(credText, apiKeyEnv, cfg.apiKey);
-  const credWritten = await bridge.writeSecret(credPath, credPatched.text);
+  const credWritten = credPatched.changed ? await bridge.writeSecret(credPath, credPatched.text) : credPath;
 
   const lines = [
-    `settings.yaml: ${written.path}`,
+    `settings.yaml: ${written ? written.path : "无变化,未写入"}`,
     `  ${allChanges.join(", ") || "无变化"}`,
     `凭据: ${credWritten}(${apiKeyEnv}${credPatched.changed ? "" : ",已存在"})`,
     `Web UI: http://127.0.0.1:3080`,
     `启动: npx @deepseek-ai/dsh web`,
   ];
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: allChanges, lines };
 }
 
@@ -405,7 +409,8 @@ export async function configureGrok(cfg: bridge.AppConfig, modelIds: string[]): 
   const resolved = buildResolvedModels(modelIds);
   const models = resolved.map((m) => ({ id: m.id, contextWindow: m.contextWindow, maxTokens: m.maxTokens }));
 
-  const patched = patchGrokConfigToml(await bridge.readFileOrEmpty(configPath), {
+  const cfgText = await bridge.readFileOrEmpty(configPath);
+  const patched = patchGrokConfigToml(cfgText, {
     providerName: cfg.provider,
     label: cfg.displayName || cfg.provider,
     baseUrl: cfg.baseUrl,
@@ -413,15 +418,16 @@ export async function configureGrok(cfg: bridge.AppConfig, modelIds: string[]): 
     defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
     models,
   });
-  const written = await bridge.writeWithBackup(configPath, patched.text);
+  // 内容无变化则不写盘、不产生备份
+  const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
 
   const lines = [
-    `config.toml: ${written.path}`,
+    `config.toml: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
     `API Key 以明文写入 [model_providers.${cfg.provider}](同 Codex experimental_bearer_token 先例;grok 不加载 home .env,env_key 需 shell 导出故不用)`,
     `官方 grok 模型保留走官方通道(grok 内 /model 随时切换,无需 grok logout)`,
   ];
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: patched.changes, lines };
 }
 
@@ -489,7 +495,8 @@ export async function configureClaude(cfg: bridge.AppConfig, roles: ClaudeRoleSe
   };
   const mainCw = buildResolvedModels([roles.main])[0]?.contextWindow ?? 0;
   const anthropicBaseUrl = cfg.anthropicBaseUrl || deriveAnthropicUrl(cfg.baseUrl);
-  const patched = patchClaudeSettings(await bridge.readFileOrEmpty(settingsPath), {
+  const originalJson = await bridge.readFileOrEmpty(settingsPath);
+  const patched = patchClaudeSettings(originalJson, {
     anthropicBaseUrl,
     apiKey: cfg.apiKey,
     mainModel: fmt(roles.main),
@@ -503,13 +510,13 @@ export async function configureClaude(cfg: bridge.AppConfig, roles: ClaudeRoleSe
     // 主模型 <200k 无后缀时用全局兜底;否则后缀已足够,不设以免冲突
     maxContextTokens: mainCw > 0 && mainCw < 200_000 ? mainCw : undefined,
   });
-  const written = await bridge.writeWithBackup(settingsPath, patched.text);
+  const written = patched.text !== originalJson ? await bridge.writeWithBackup(settingsPath, patched.text) : null;
   const lines = [
-    `settings.json: ${written.path}`,
+    `settings.json: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
     `Anthropic 端点: ${anthropicBaseUrl}`,
   ];
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: patched.changes, lines };
 }
 
@@ -540,25 +547,28 @@ export async function configurePi(cfg: bridge.AppConfig, modelIds: string[]): Pr
   const resolved = buildResolvedModels(modelIds);
   const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
-  const p1 = patchPiModelsJson(await bridge.readFileOrEmpty(modelsPath), {
+  const originalModels = await bridge.readFileOrEmpty(modelsPath);
+  const originalSettings = await bridge.readFileOrEmpty(settingsPath);
+  const p1 = patchPiModelsJson(originalModels, {
     providerName: cfg.provider,
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
     models: resolved,
   });
-  const p2 = patchPiSettings(await bridge.readFileOrEmpty(settingsPath), cfg.provider, defaultModel);
+  const p2 = patchPiSettings(originalSettings, cfg.provider, defaultModel);
   const allChanges = [...p1.changes, ...p2.changes];
-  const w1 = await bridge.writeWithBackup(modelsPath, p1.text);
-  const w2 = await bridge.writeWithBackup(settingsPath, p2.text);
+  // 内容无变化则不写盘、不产生备份
+  const w1 = p1.text !== originalModels ? await bridge.writeWithBackup(modelsPath, p1.text) : null;
+  const w2 = p2.text !== originalSettings ? await bridge.writeWithBackup(settingsPath, p2.text) : null;
 
   const lines = [
-    `models.json: ${w1.path}`,
+    `models.json: ${w1 ? w1.path : "无变化,未写入"}`,
     `  ${p1.changes.join(", ") || "无变化"}`,
-    `settings.json: ${w2.path}`,
+    `settings.json: ${w2 ? w2.path : "无变化,未写入"}`,
     `  ${p2.changes.join(", ") || "无变化"}`,
     `默认模型: ${cfg.provider}/${defaultModel}(Pi 内用 /model 切换,重启 Pi 生效)`,
   ];
-  if (w1.backup) lines.push(`备份: ${w1.backup}`);
+  if (w1?.backup) lines.push(`备份: ${w1.backup}`);
   return { changes: allChanges, lines };
 }
 
@@ -590,27 +600,29 @@ export async function configureOmp(cfg: bridge.AppConfig, modelIds: string[]): P
   const resolved = buildResolvedModels(modelIds);
   const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
-  const p1 = patchOmpModelsYml(await bridge.readFileOrEmpty(modelsPath), {
+  const originalModels = await bridge.readFileOrEmpty(modelsPath);
+  const originalConfig = await bridge.readFileOrEmpty(configPath);
+  const p1 = patchOmpModelsYml(originalModels, {
     providerName: cfg.provider,
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
     models: resolved,
   });
-  const written = await bridge.writeWithBackup(modelsPath, p1.text);
-
-  const p2 = patchOmpConfigYml(await bridge.readFileOrEmpty(configPath), cfg.provider, defaultModel);
-  const cfgWritten = await bridge.writeWithBackup(configPath, p2.text);
+  const p2 = patchOmpConfigYml(originalConfig, cfg.provider, defaultModel);
+  // 内容无变化则不写盘、不产生备份
+  const written = p1.text !== originalModels ? await bridge.writeWithBackup(modelsPath, p1.text) : null;
+  const cfgWritten = p2.text !== originalConfig ? await bridge.writeWithBackup(configPath, p2.text) : null;
 
   const deepseekCount = resolved.filter((m) => isDeepseekModel(m.id)).length;
   const lines = [
-    `models.yml: ${written.path}`,
+    `models.yml: ${written ? written.path : "无变化,未写入"}`,
     `  ${p1.changes.join(", ") || "无变化"}`,
-    `config.yml: ${cfgWritten.path}`,
+    `config.yml: ${cfgWritten ? cfgWritten.path : "无变化,未写入"}`,
     `  ${p2.changes.join(", ") || "无变化"}`,
   ];
   if (deepseekCount > 0) lines.push(`DeepSeek 模型 ${deepseekCount} 个:已应用官方特配(thinking 等级 + 完整 compat 块)`);
   lines.push(`使用: omp --model ${cfg.provider}/${defaultModel}`);
-  if (written.backup) lines.push(`备份: ${written.backup}`);
+  if (written?.backup) lines.push(`备份: ${written.backup}`);
   return { changes: [...p1.changes, ...p2.changes], lines };
 }
 
@@ -643,25 +655,28 @@ export async function configureOpenCode(cfg: bridge.AppConfig, modelIds: string[
   const resolved = buildResolvedModels(modelIds);
   const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
-  const p1 = patchOpenCodeConfig(await bridge.readFileOrEmpty(configPath), {
+  const originalJson = await bridge.readFileOrEmpty(configPath);
+  const originalAuth = await bridge.readFileOrEmpty(authPath);
+  const p1 = patchOpenCodeConfig(originalJson, {
     providerName: cfg.provider,
     displayName: cfg.displayName,
     baseUrl: cfg.baseUrl,
     models: resolved,
     defaultModel,
   });
-  const p2 = patchOpenCodeAuth(await bridge.readFileOrEmpty(authPath), cfg.provider, cfg.apiKey);
-  const w1 = await bridge.writeWithBackup(configPath, p1.text);
-  const w2 = await bridge.writeSecret(authPath, p2.text);
+  const p2 = patchOpenCodeAuth(originalAuth, cfg.provider, cfg.apiKey);
+  // 内容无变化则不写盘、不产生备份
+  const w1 = p1.text !== originalJson ? await bridge.writeWithBackup(configPath, p1.text) : null;
+  const w2 = p2.text !== originalAuth ? await bridge.writeSecret(authPath, p2.text) : authPath;
 
   const lines = [
-    `opencode.json: ${w1.path}`,
+    `opencode.json: ${w1 ? w1.path : "无变化,未写入"}`,
     `  ${p1.changes.join(", ") || "无变化"}`,
     `auth.json: ${w2}`,
     `  ${p2.changes.join(", ") || "无变化"}`,
     `使用: opencode 内 /models 选 ${cfg.provider}/<模型>(默认 ${cfg.provider}/${defaultModel}),重启 opencode 生效`,
   ];
-  if (w1.backup) lines.push(`备份: ${w1.backup}`);
+  if (w1?.backup) lines.push(`备份: ${w1.backup}`);
   return { changes: [...p1.changes, ...p2.changes], lines };
 }
 
@@ -790,4 +805,187 @@ export function isDoubaoModel(id: string): boolean {
 /** 按开关过滤模型列表。 */
 export function filterDoubao(models: string[], exclude: boolean): string[] {
   return exclude ? models.filter((id) => !isDoubaoModel(id)) : models;
+}
+
+// ---------------------------------------------------------------------------
+// 刷新模型(仅更新模型列表):只写模型派生部分,base_url / 密钥 / 默认模型一律不动
+// ---------------------------------------------------------------------------
+
+/** 单个 agent 的刷新计划(先读配置算变更,确认后 apply 写入;skip 非空表示跳过)。 */
+export type ModelsRefreshPlan = {
+  agent: string;
+  changes: string[];
+  skip?: string;
+  apply: () => Promise<string[]>;
+};
+
+function skipPlan(agent: string, reason: string): ModelsRefreshPlan {
+  return { agent, changes: [], skip: reason, apply: async () => [] };
+}
+
+function noChangePlan(agent: string): ModelsRefreshPlan {
+  return { agent, changes: [], apply: async () => [] };
+}
+
+/** Codex:只刷新 ~/.codex/models.json(不碰 config.toml,不启动/不触碰转换代理)。 */
+export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "Codex";
+  const home = await bridge.codexHome();
+  const configPath = await bridge.joinPath(home, "config.toml");
+  const modelsPath = await bridge.joinPath(home, "models.json");
+  const cfgText = await bridge.readFileOrEmpty(configPath);
+  if (!new RegExp(`^\\[model_providers\\.${escapeRegExp(cfg.provider)}\\]\\s*$`, "m").test(cfgText)) {
+    return skipPlan(agent, `未接入 ${cfg.provider} provider(先跑「配置」)`);
+  }
+  const plan = patchCodexCatalog(buildResolvedModels(modelIds), cfg.provider, await bridge.readFileOrEmpty(modelsPath));
+  if (plan.unchanged) return noChangePlan(agent);
+  return {
+    agent,
+    changes: [`models.json(${modelIds.length} 个模型)`, ...plan.changes],
+    apply: async () => {
+      const written = await bridge.writeWithBackup(modelsPath, plan.text);
+      return [`models.json 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : ",无变化")];
+    },
+  };
+}
+
+/** dsh:只刷新 llm-pi-ai.providers.<name> 的 models(条目按 id 合并)。 */
+export async function planRefreshDsh(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "dsh";
+  const home = await bridge.dshHome();
+  const settingsPath = await bridge.joinPath(home, "settings.yaml");
+  const r = patchDshProviderModels(await bridge.readFileOrEmpty(settingsPath), {
+    providerName: cfg.provider,
+    models: toDshEntries(buildResolvedModels(modelIds)),
+  });
+  if (!r.providerFound) return skipPlan(agent, `settings.yaml 无 providers.${cfg.provider}(先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(settingsPath, r.text);
+      return [`settings.yaml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+    },
+  };
+}
+
+/** omp:只刷新 providers.<name> 的 models。 */
+export async function planRefreshOmp(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "omp";
+  const home = await bridge.homeDir();
+  const modelsPath = await bridge.joinPath(home, ".omp", "agent", "models.yml");
+  const r = patchOmpModelsList(await bridge.readFileOrEmpty(modelsPath), {
+    providerName: cfg.provider,
+    models: buildResolvedModels(modelIds),
+  });
+  if (!r.providerFound) return skipPlan(agent, `models.yml 无 providers.${cfg.provider}(先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(modelsPath, r.text);
+      return [`models.yml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+    },
+  };
+}
+
+/** Reasonix:只刷新 [[providers]] 的 models + model_overrides。 */
+export async function planRefreshReasonix(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "Reasonix";
+  const home = await bridge.reasonixHome();
+  const configPath = await bridge.joinPath(home, "config.toml");
+  const resolved = buildResolvedModels(modelIds);
+  const modelContexts: Record<string, number> = {};
+  for (const m of resolved) modelContexts[m.id] = m.contextWindow;
+  const r = patchReasonixModels(await bridge.readFileOrEmpty(configPath), {
+    providerName: cfg.provider,
+    modelIds: resolved.map((m) => m.id),
+    modelContexts,
+  });
+  if (!r.providerFound) return skipPlan(agent, `config.toml 无 [[providers]] ${cfg.provider}(先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(configPath, r.text);
+      return [`config.toml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+    },
+  };
+}
+
+/** OpenCode:只刷新 provider.<name>.models。 */
+export async function planRefreshOpenCode(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "OpenCode";
+  const home = await bridge.opencodeHome();
+  const configPath = await bridge.joinPath(home, "opencode.json");
+  const r = patchOpenCodeModels(await bridge.readFileOrEmpty(configPath), {
+    providerName: cfg.provider,
+    models: buildResolvedModels(modelIds),
+  });
+  if (!r.providerFound) return skipPlan(agent, `opencode.json 无 provider.${cfg.provider}(先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(configPath, r.text);
+      return [`opencode.json 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+    },
+  };
+}
+
+/** Grok:只刷新 [model.<id>] 块(provider 段与 api_key 不动;default 失效时修正)。 */
+export async function planRefreshGrok(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "Grok";
+  const home = await bridge.grokHome();
+  const configPath = await bridge.joinPath(home, "config.toml");
+  const resolved = buildResolvedModels(modelIds);
+  const models = resolved.map((m) => ({ id: m.id, contextWindow: m.contextWindow, maxTokens: m.maxTokens }));
+  const r = patchGrokModels(await bridge.readFileOrEmpty(configPath), {
+    providerName: cfg.provider,
+    label: cfg.displayName || cfg.provider,
+    models,
+  });
+  if (!r.providerFound) return skipPlan(agent, `config.toml 无 [model_providers.${cfg.provider}](先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(configPath, r.text);
+      return [`config.toml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+    },
+  };
+}
+
+/** 全部目标的刷新计划(未接入的自动跳过)。 */
+export async function planRefreshAll(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan[]> {
+  return [
+    await planRefreshCodex(cfg, modelIds),
+    await planRefreshDsh(cfg, modelIds),
+    await planRefreshOmp(cfg, modelIds),
+    await planRefreshReasonix(cfg, modelIds),
+    await planRefreshOpenCode(cfg, modelIds),
+    await planRefreshGrok(cfg, modelIds),
+  ];
+}
+
+/** 执行刷新计划(单点失败不中断),返回每个 agent 的结果行。 */
+export async function applyRefreshPlans(plans: ModelsRefreshPlan[]): Promise<string[]> {
+  const lines: string[] = [];
+  for (const p of plans) {
+    if (p.skip || p.changes.length === 0) {
+      lines.push(`- ${p.agent}: ${p.skip ?? "无变化"}`);
+      continue;
+    }
+    try {
+      lines.push(`✓ ${p.agent}: ${(await p.apply()).join("; ")}`);
+    } catch (e) {
+      lines.push(`✗ ${p.agent}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return lines;
 }

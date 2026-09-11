@@ -30,28 +30,45 @@ function parseDoc(text: string, path: string): Record<string, unknown> {
   }
 }
 
-/** 合并写 opencode.json 的 provider.<name> 块与顶层 model(保留其它 provider 与顶层键)。 */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** 按 id 合并模型表:已有条目只改管理字段(name),条目内用户加的其它字段保留。 */
+function mergeModelEntries(
+  prevModels: unknown,
+  models: ResolvedModel[],
+): Record<string, Record<string, unknown>> {
+  const prev = isPlainObject(prevModels) ? prevModels : {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const m of models) {
+    const entry: Record<string, unknown> = isPlainObject(prev[m.id]) ? { ...(prev[m.id] as Record<string, unknown>) } : {};
+    // 模型 key 必须是网关 API 接受的 model 字段值;显示名与 id 不同才写 name
+    if (m.name && m.name !== m.id) entry.name = m.name;
+    else delete entry.name;
+    out[m.id] = entry;
+  }
+  return out;
+}
+
+/** 合并写 opencode.json 的 provider.<name> 块与顶层 model(保留其它 provider、顶层键与 provider 内用户键)。 */
 export function patchOpenCodeConfig(
   text: string,
   input: OpenCodeProviderInput,
 ): { text: string; changes: string[] } {
   const doc = parseDoc(text, "~/.config/opencode/opencode.json");
   const providers = (doc.provider ?? {}) as Record<string, unknown>;
-  const existing = providers[input.providerName] !== undefined;
-
-  const models: Record<string, { name?: string }> = {};
-  for (const m of input.models) {
-    const entry: { name?: string } = {};
-    // 模型 key 必须是网关 API 接受的 model 字段值;显示名与 id 不同才写 name
-    if (m.name && m.name !== m.id) entry.name = m.name;
-    models[m.id] = entry;
-  }
+  const prevRaw = providers[input.providerName];
+  const existing = prevRaw !== undefined;
+  const prev = isPlainObject(prevRaw) ? prevRaw : {};
+  const prevOptions = isPlainObject(prev.options) ? prev.options : {};
 
   providers[input.providerName] = {
+    ...prev,
     name: input.displayName,
     npm: PROVIDER_NPM,
-    options: { baseURL: input.baseUrl },
-    models,
+    options: { ...prevOptions, baseURL: input.baseUrl },
+    models: mergeModelEntries(prev.models, input.models),
   };
   doc.provider = providers;
 
@@ -70,6 +87,27 @@ export function patchOpenCodeConfig(
   }
 
   return { text: JSON.stringify(doc, null, 2) + "\n", changes };
+}
+
+/**
+ * 「仅更新模型列表」:只刷新既有 provider.<name>.models(条目内用户字段保留),
+ * provider 元数据(name/npm/options)与顶层 model 一概不动。未配置时 providerFound=false。
+ */
+export function patchOpenCodeModels(
+  text: string,
+  opts: { providerName: string; models: ResolvedModel[] },
+): { text: string; changes: string[]; providerFound: boolean } {
+  const doc = parseDoc(text, "~/.config/opencode/opencode.json");
+  const providers = (doc.provider ?? {}) as Record<string, unknown>;
+  const prevRaw = providers[opts.providerName];
+  if (!isPlainObject(prevRaw)) return { text, changes: [], providerFound: false };
+  providers[opts.providerName] = { ...prevRaw, models: mergeModelEntries(prevRaw.models, opts.models) };
+  doc.provider = providers;
+  return {
+    text: JSON.stringify(doc, null, 2) + "\n",
+    changes: [`models 已更新(${opts.models.length} 个模型)`],
+    providerFound: true,
+  };
 }
 
 /** 合并写 auth.json 的 <providerName> 凭据(api 类型,保留其它条目与 OAuth 结构)。 */

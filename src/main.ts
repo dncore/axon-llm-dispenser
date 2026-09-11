@@ -122,19 +122,20 @@ function build(): void {
     h("h2", { class: "tools-title" }, [
       "工具接入",
       h("div", { class: "tools-title-right" }, [
-        h("button", { id: "btn-upgrade-all", class: "btn-upgrade-all", type: "button", title: "升级全部" }, [icon("arrow-up")]),
+        h("button", { id: "btn-refresh-all-models", class: "btn btn-small btn-icon-only", type: "button", title: "刷新全部模型列表(仅更新各 Agent 的模型条目,不改 base_url / 密钥 / 默认模型)" }, [icon("refresh")]),
+        h("button", { id: "btn-upgrade-all", class: "btn btn-upgrade-all", type: "button", title: "升级全部" }, [icon("arrow-up")]),
         helpTipIcon(),
       ]),
     ]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-      toolCard("codex", "Codex", ["配置", "状态", "还原"]),
-      toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "状态", "还原"]),
+      toolCard("codex", "Codex", ["配置", "刷新模型", "状态", "还原"]),
+      toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "刷新模型", "状态", "还原"]),
       toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
-      toolCard("omp", "Oh My Pi", ["配置", "状态", "还原"]),
-      toolCard("reasonix", "Reasonix", ["配置", "状态", "生成 Token", "关闭鉴权", "还原"]),
-      toolCard("opencode", "OpenCode", ["配置", "状态", "还原"]),
-      toolCard("grok", "Grok", ["配置", "状态", "还原"]),
+      toolCard("omp", "Oh My Pi", ["配置", "刷新模型", "状态", "还原"]),
+      toolCard("reasonix", "Reasonix", ["配置", "刷新模型", "状态", "生成 Token", "关闭鉴权", "还原"]),
+      toolCard("opencode", "OpenCode", ["配置", "刷新模型", "状态", "还原"]),
+      toolCard("grok", "Grok", ["配置", "刷新模型", "状态", "还原"]),
     ]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -476,6 +477,7 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
 
 const ACTION_ICONS: Record<string, string> = {
   "配置": "play",
+  "刷新模型": "refresh",
   "状态": "info",
   "还原": "restore",
   "生成 Token": "key",
@@ -483,6 +485,7 @@ const ACTION_ICONS: Record<string, string> = {
 };
 const ACTION_TITLES: Record<string, string> = {
   "配置": "配置(覆盖现有配置,自动备份)",
+  "刷新模型": "仅更新模型列表:只写模型相关配置,不改 base_url / 密钥 / 默认模型(自动备份)",
   "状态": "查看配置状态",
   "还原": "从备份还原",
   "生成 Token": "生成鉴权 Token",
@@ -1016,26 +1019,35 @@ function clearOverlays(): void {
  * 不清除已有弹窗:允许叠加在还原弹窗等上层做二次确认(ESC 只关最上层)。
  * okClass 用于危险操作的红色确认按钮(如 btn-danger-solid)。 */
 function confirmDialog(message: string, onOk: () => void, okLabel = "确认", cancelLabel = "取消", okClass = ""): void {
-  const overlay = h("div", { class: "modal-overlay" }, []);
-  const modal = h("div", { class: "modal modal-sm" }, [
-    h("p", { class: "confirm-text" }, [message]),
-    h("div", { class: "modal-footer" }, [
-      h("button", { class: "btn btn-ghost" }, [cancelLabel]),
-      h("button", { class: `btn ${okClass}`.trim() }, [okLabel]),
-    ]),
-  ]);
-  const [cancel, ok] = modal.querySelectorAll("button");
-  const close = (): void => overlay.remove();
-  cancel.addEventListener("click", close);
-  ok.addEventListener("click", () => {
-    close();
-    onOk();
+  void confirmDialogAsync(message, okLabel, cancelLabel, okClass).then((ok) => {
+    if (ok) onOk();
   });
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
+}
+
+/** confirmDialog 的 Promise 版(刷新模型流程:先算变更、确认后才写入)。 */
+function confirmDialogAsync(message: string, okLabel = "确认", cancelLabel = "取消", okClass = ""): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = h("div", { class: "modal-overlay" }, []);
+    const modal = h("div", { class: "modal modal-sm" }, [
+      h("p", { class: "confirm-text" }, [message]),
+      h("div", { class: "modal-footer" }, [
+        h("button", { class: "btn btn-ghost" }, [cancelLabel]),
+        h("button", { class: `btn ${okClass}`.trim() }, [okLabel]),
+      ]),
+    ]);
+    const [cancel, ok] = modal.querySelectorAll("button");
+    const close = (result: boolean): void => {
+      overlay.remove();
+      resolve(result);
+    };
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(false);
+    });
+    overlay.append(modal);
+    document.body.append(overlay);
   });
-  overlay.append(modal);
-  document.body.append(overlay);
 }
 
 /** Claude 模型映射弹窗:为每个角色选模型,按上下文映射表自动加 [1m]/[200k] 后缀。 */
@@ -1660,6 +1672,64 @@ function bind(): void {
   );
 
   $("btn-opencode-还原").addEventListener("click", () => openRestoreModal("opencode"));
+
+  // ---- 刷新模型(仅更新模型列表):先算变更 → 展示确认 → 写入;不改 base_url/密钥/默认模型 ----
+
+  /** 单 agent 刷新处理器:拉模型 → 计划 → 确认 → 执行。 */
+  const refreshOne =
+    (
+      agent: string,
+      label: string,
+      plan: (cfg: bridge.AppConfig, ids: string[]) => Promise<flows.ModelsRefreshPlan>,
+    ): (() => void) =>
+    () =>
+      void run(`${label} 刷新模型`, async () => {
+        readFields();
+        if (!validateProvider()) return;
+        const ids = await ensureModels();
+        if (!ids) return;
+        const p = await plan(config, ids);
+        if (p.skip || p.changes.length === 0) {
+          log([`${label}: ${p.skip ?? "模型列表已是最新,无变化"}`]);
+          return;
+        }
+        const ok = await confirmDialogAsync(
+          `仅更新模型列表(${label}):\n${p.changes.join("\n")}\n\n只写模型相关配置,不改 base_url / 密钥 / 默认模型;原文件自动备份(.bak-*),确认?`,
+        );
+        if (!ok) return;
+        log(await flows.applyRefreshPlans([p]));
+        void detectAgentConfigOne(agent);
+      });
+
+  $("btn-codex-刷新模型").addEventListener("click", refreshOne("codex", "Codex", flows.planRefreshCodex));
+  $("btn-dsh-刷新模型").addEventListener("click", refreshOne("dsh", "dsh", flows.planRefreshDsh));
+  $("btn-omp-刷新模型").addEventListener("click", refreshOne("omp", "omp", flows.planRefreshOmp));
+  $("btn-reasonix-刷新模型").addEventListener("click", refreshOne("reasonix", "Reasonix", flows.planRefreshReasonix));
+  $("btn-opencode-刷新模型").addEventListener("click", refreshOne("opencode", "OpenCode", flows.planRefreshOpenCode));
+  $("btn-grok-刷新模型").addEventListener("click", refreshOne("grok", "Grok", flows.planRefreshGrok));
+
+  // 全局:刷新全部已接入 agent 的模型列表(单点失败不中断)
+  $("btn-refresh-all-models").addEventListener("click", () =>
+    void run("刷新全部模型列表", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      const plans = await flows.planRefreshAll(config, ids);
+      const ready = plans.filter((p) => !p.skip && p.changes.length > 0);
+      if (ready.length === 0) {
+        log(plans.map((p) => `- ${p.agent}: ${p.skip ?? "无变化"}`));
+        return;
+      }
+      const detail = ready.map((p) => `${p.agent}: ${p.changes.join("; ")}`).join("\n");
+      const ok = await confirmDialogAsync(
+        `将刷新 ${ready.length} 个已接入 Agent 的模型列表:\n${detail}\n\n只写模型相关配置,不改 base_url / 密钥 / 默认模型;各自原文件自动备份(.bak-*),确认?`,
+      );
+      if (!ok) return;
+      log(await flows.applyRefreshPlans(plans));
+      for (const a of ["codex", "dsh", "omp", "reasonix", "opencode", "grok"]) void detectAgentConfigOne(a);
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------

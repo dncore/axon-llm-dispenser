@@ -1,7 +1,22 @@
 // DeepSeek Harness (dsh) 配置:官方 settings.yaml + .credentials.yaml。
 // 纯文本变换(缩进感知的 YAML 块补丁),不做文件 I/O。
 
-import { blockBodyEnd, escapeRegExp, findKeyInRegion, headerHasInlineContent, lineAfter, yamlQuote, unquoteYaml } from "./util";
+import {
+  applyTextOps,
+  blockBodyEnd,
+  escapeRegExp,
+  findKeyInRegion,
+  headerHasInlineContent,
+  lineAfter,
+  planManagedKeyUpserts,
+  preserveTrailingBlanks,
+  scanYamlListItems,
+  trailingBlankStart,
+  yamlQuote,
+  unquoteYaml,
+  type ManagedKey,
+  type TextOp,
+} from "./util";
 
 /** 写入 dsh 模型目录的单个模型条目。 */
 export type DshModelEntry = {
@@ -29,47 +44,187 @@ export type DshProviderInput = {
   models: DshModelEntry[];
 };
 
-function renderProviderChildren(indent: number, opts: DshProviderInput): string[] {
-  const pad = (n: number) => " ".repeat(indent + n);
-  const out: string[] = [];
-  out.push(`${pad(2)}displayName: ${yamlQuote(opts.displayName)}`);
-  out.push(`${pad(2)}apiKeyEnv: ${yamlQuote(opts.apiKeyEnv)}`);
-  out.push(`${pad(2)}api: openai-completions`);
-  out.push(`${pad(2)}baseURL: ${yamlQuote(opts.baseUrl)}`);
-  out.push(`${pad(2)}compat:`);
-  out.push(`${pad(4)}thinkingFormat: deepseek`);
-  // route 级 reasoning:部署默认思考档位。缺省时请求不带 reasoningEffort,
-  // pi-ai 的 thinkingFormat=deepseek 分支不发 thinking 开关,模型走非思考模式、
-  // 不返回 reasoning_content,多轮工具调用后网关 400。
-  out.push(`${pad(2)}reasoning: high`);
-  out.push(`${pad(2)}models:`);
-  for (const m of opts.models) {
-    out.push(`${pad(4)}- id: ${yamlQuote(m.id)}`);
-    if (m.name && m.name !== m.id) out.push(`${pad(6)}name: ${yamlQuote(m.name)}`);
-    out.push(`${pad(6)}contextWindow: ${m.contextWindow}`);
-    out.push(`${pad(6)}maxTokens: ${m.maxTokens}`);
-    // reasoningEfforts:对齐 dsh 官方(off 空值 + 非 off 档位),off 用空值声明
-    // 「选 Off 时发送 nothing」;其余档位 key=可选级别, value=wire 拼写。
-    if (m.reasoning && m.reasoningEfforts) {
-      const nonOff = Object.entries(m.reasoningEfforts)
-        .filter(([level, wire]) => level !== "off" && typeof wire === "string" && wire.length > 0)
-        .sort(([a], [b]) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
-      if (nonOff.length > 0) {
-        out.push(`${pad(6)}reasoningEfforts:`);
-        out.push(`${pad(8)}off:`);
-        for (const [level, wire] of nonOff) {
-          out.push(`${pad(8)}${level}: ${yamlQuote(wire as string)}`);
-        }
+/** 模型条目的管理子键(reasoningEfforts/input 不适用时移除,避免残留旧元数据)。 */
+function modelItemManagedKeys(itemIndent: number, m: DshModelEntry): ManagedKey[] {
+  const sp = " ".repeat(itemIndent + 2);
+  // reasoningEfforts:对齐 dsh 官方(off 空值 + 非 off 档位),off 用空值声明
+  // 「选 Off 时发送 nothing」;其余档位 key=可选级别, value=wire 拼写。
+  let effortLines: string[] | null = null;
+  if (m.reasoning && m.reasoningEfforts) {
+    const nonOff = Object.entries(m.reasoningEfforts)
+      .filter(([level, wire]) => level !== "off" && typeof wire === "string" && wire.length > 0)
+      .sort(([a], [b]) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
+    if (nonOff.length > 0) {
+      effortLines = [`${sp}reasoningEfforts:`, `${sp}  off:`];
+      for (const [level, wire] of nonOff) {
+        effortLines.push(`${sp}  ${level}: ${yamlQuote(wire as string)}`);
       }
     }
-    if (m.input && m.input.includes("image")) out.push(`${pad(6)}input: [text, image]`);
+  }
+  return [
+    { key: "name", lines: m.name && m.name !== m.id ? [`${sp}name: ${yamlQuote(m.name)}`] : null },
+    { key: "contextWindow", lines: [`${sp}contextWindow: ${m.contextWindow}`] },
+    { key: "maxTokens", lines: [`${sp}maxTokens: ${m.maxTokens}`] },
+    { key: "reasoningEfforts", lines: effortLines, block: true },
+    { key: "input", lines: m.input && m.input.includes("image") ? [`${sp}input: [text, image]`] : null },
+  ];
+}
+
+/** 渲染单个模型条目(itemIndent 为 `- id:` 行的缩进)。 */
+function renderModelItemLines(itemIndent: number, m: DshModelEntry): string[] {
+  const out = [`${" ".repeat(itemIndent)}- id: ${yamlQuote(m.id)}`];
+  for (const k of modelItemManagedKeys(itemIndent, m)) {
+    if (k.lines) out.push(...k.lines);
   }
   return out;
 }
 
+/** 渲染 `models:` 键行 + 全部条目(provider 缩进;条目缩进 +4)。 */
+function renderModelsLines(providerIndent: number, models: DshModelEntry[]): string[] {
+  const out = [`${" ".repeat(providerIndent + 2)}models:`];
+  for (const m of models) out.push(...renderModelItemLines(providerIndent + 4, m));
+  return out;
+}
+
+/** provider 块标量键(displayName / apiKeyEnv / api / baseURL)。 */
+function providerScalarKeys(indent: number, opts: DshProviderInput): ManagedKey[] {
+  const sp = " ".repeat(indent + 2);
+  return [
+    { key: "displayName", lines: [`${sp}displayName: ${yamlQuote(opts.displayName)}`] },
+    { key: "apiKeyEnv", lines: [`${sp}apiKeyEnv: ${yamlQuote(opts.apiKeyEnv)}`] },
+    { key: "api", lines: [`${sp}api: openai-completions`] },
+    { key: "baseURL", lines: [`${sp}baseURL: ${yamlQuote(opts.baseUrl)}`] },
+  ];
+}
+
+/** DeepSeek 方言静态键(compat 子块 + route 级 reasoning)。
+ *  route 级 reasoning:部署默认思考档位。缺省时请求不带 reasoningEffort,
+ *  pi-ai 的 thinkingFormat=deepseek 分支不发 thinking 开关,模型走非思考模式、
+ *  不返回 reasoning_content,多轮工具调用后网关 400。axon 对所有网关无条件写入。 */
+function providerStaticKeys(indent: number): ManagedKey[] {
+  const pad = (n: number) => " ".repeat(indent + n);
+  return [
+    { key: "compat", lines: [`${pad(2)}compat:`, `${pad(4)}thinkingFormat: deepseek`], block: true },
+    { key: "reasoning", lines: [`${pad(2)}reasoning: high`] },
+  ];
+}
+
 function renderProviderBlock(indent: number, opts: DshProviderInput): string[] {
-  const header = " ".repeat(indent) + opts.providerName + ":";
-  return [header, ...renderProviderChildren(indent, opts)];
+  const out = [`${" ".repeat(indent)}${opts.providerName}:`];
+  for (const k of [...providerScalarKeys(indent, opts), ...providerStaticKeys(indent)]) {
+    if (k.lines) out.push(...k.lines);
+  }
+  out.push(...renderModelsLines(indent, opts.models));
+  return out;
+}
+
+/** 定位 llm-pi-ai.providers.<name> 块;返回其表头行与体区间。 */
+export function locateDshProviderBlock(
+  text: string,
+  providerName: string,
+): { headerStart: number; headerEnd: number; bodyStart: number; bodyEnd: number; indent: number } | null {
+  const NS = "llm-pi-ai";
+  const llm = findKeyInRegion(text, 0, text.length, NS, 0);
+  if (!llm) return null;
+  const llmBodyStart = lineAfter(text, llm.end);
+  const llmBodyEnd = blockBodyEnd(text, llmBodyStart, llm.indent, text.length);
+  const prov = findKeyInRegion(text, llmBodyStart, llmBodyEnd, "providers");
+  if (!prov) return null;
+  const provBodyStart = lineAfter(text, prov.end);
+  const provBodyEnd = blockBodyEnd(text, provBodyStart, prov.indent, llmBodyEnd);
+  const provider = findKeyInRegion(text, provBodyStart, provBodyEnd, providerName);
+  if (!provider) return null;
+  const bodyStart = lineAfter(text, provider.end);
+  const bodyEnd = blockBodyEnd(text, bodyStart, provider.indent, provBodyEnd);
+  return { headerStart: provider.start, headerEnd: provider.end, bodyStart, bodyEnd, indent: provider.indent };
+}
+
+type DshModelsMerge = { ops: TextOp[]; added: number; removed: number };
+
+/** 在 provider 块内按 id 合并 models 列表:已有条目只 upsert 管理子键(用户键保留),
+ *  远端已不存在的条目删除,新条目按字母序插入。models 键缺失/内联时整块写入。 */
+function planDshModelsMerge(
+  text: string,
+  providerBody: { start: number; end: number },
+  providerIndent: number,
+  models: DshModelEntry[],
+): DshModelsMerge {
+  const modelsKey = findKeyInRegion(text, providerBody.start, providerBody.end, "models", providerIndent + 2);
+  if (!modelsKey || headerHasInlineContent(text, modelsKey.start, modelsKey.end)) {
+    const block = renderModelsLines(providerIndent, models).join("\n") + "\n";
+    const op: TextOp = modelsKey
+      ? { start: modelsKey.start, end: lineAfter(text, modelsKey.end), replacement: block }
+      : { start: providerBody.start, end: providerBody.start, replacement: block };
+    return { ops: [op], added: modelsKey ? 0 : models.length, removed: 0 };
+  }
+  const listStart = lineAfter(text, modelsKey.end);
+  const listEnd = blockBodyEnd(text, listStart, modelsKey.indent, providerBody.end);
+  const items = scanYamlListItems(text, listStart, listEnd);
+  const byId = new Map(items.map((it) => [it.id, it]));
+  const wanted = new Set(models.map((m) => m.id));
+  const mergeOps: TextOp[] = [];
+  const deletes: TextOp[] = [];
+  const inserts: TextOp[] = [];
+  let removed = 0;
+  for (const it of items) {
+    if (wanted.has(it.id)) continue;
+    deletes.push({ start: it.start, end: it.end, replacement: preserveTrailingBlanks(text, it) });
+    removed++;
+  }
+  for (const m of models) {
+    const it = byId.get(m.id);
+    if (!it) continue;
+    mergeOps.push(
+      ...planManagedKeyUpserts(
+        text,
+        { start: it.bodyStart, end: it.end },
+        { separator: ":", indent: it.indent + 2, keys: modelItemManagedKeys(it.indent, m) },
+      ),
+    );
+  }
+  const fresh = models.filter((m) => !byId.has(m.id)).sort((a, b) => a.id.localeCompare(b.id));
+  let added = 0;
+  if (fresh.length > 0) {
+    const itemIndent = items[0]?.indent ?? providerIndent + 4;
+    const anchors = new Map<number, string[]>();
+    for (const m of fresh) {
+      const idx = items.findIndex((it) => it.id.localeCompare(m.id) > 0);
+      let pos = idx >= 0 ? items[idx].start : trailingBlankStart(text, listStart, listEnd);
+      // 锚点若落在被删除条目的区间内,收拢到删除区间起点(同点删除先于插入,顺序稳定)
+      for (const d of deletes) {
+        if (pos > d.start && pos < d.end) {
+          pos = d.start;
+          break;
+        }
+      }
+      const lines = anchors.get(pos) ?? [];
+      lines.push(...renderModelItemLines(itemIndent, m));
+      anchors.set(pos, lines);
+      added++;
+    }
+    for (const [pos, lines] of anchors) {
+      inserts.push({ start: pos, end: pos, replacement: lines.join("\n") + "\n" });
+    }
+  }
+  // 顺序:同位置时删除先于插入(applyTextOps 对同 start 保持数组顺序)
+  return { ops: [...mergeOps, ...deletes, ...inserts], added, removed };
+}
+
+/** 应用已有 provider 块的管理键合并:scalarKeys(可为 null)+ 静态键 + models 列表。 */
+function applyDshProviderMerge(
+  text: string,
+  providerBody: { start: number; end: number },
+  providerIndent: number,
+  models: DshModelEntry[],
+  scalarKeys: ManagedKey[] | null,
+): string {
+  const keyOps = planManagedKeyUpserts(text, providerBody, {
+    separator: ":",
+    indent: providerIndent + 2,
+    keys: [...(scalarKeys ?? []), ...providerStaticKeys(providerIndent)],
+  });
+  const merge = planDshModelsMerge(text, providerBody, providerIndent, models);
+  return applyTextOps(text, [...keyOps, ...merge.ops]);
 }
 
 /** 在 settings.yaml 中 upsert llm-pi-ai.providers.<name> 段(官方配置规范)。 */
@@ -111,9 +266,38 @@ export function patchDshProvider(text: string, opts: DshProviderInput): { text: 
   if (headerHasInlineContent(text, provider.start, provider.end)) throw new Error(`providers.${opts.providerName}: 使用内联样式(flow style),请手动编辑 settings.yaml`);
   const bodyStart = lineAfter(text, provider.end);
   const bodyEnd = blockBodyEnd(text, bodyStart, provider.indent, provBodyEnd);
-  const children = renderProviderChildren(provider.indent, opts);
-  const next = text.slice(0, bodyStart) + children.join("\n") + "\n" + text.slice(bodyEnd);
+  // 4) 已有块:只 upsert 管理键(models 按 id 合并),块内用户键与注释原样保留
+  const next = applyDshProviderMerge(
+    text,
+    { start: bodyStart, end: bodyEnd },
+    provider.indent,
+    opts.models,
+    providerScalarKeys(provider.indent, opts),
+  );
   return { text: next, changes: next === text ? [] : [`providers.${opts.providerName} 已更新(${modelCount} 个模型)`] };
+}
+
+/**
+ * 「仅更新模型列表」:只刷新既有 provider 块的 models 列表(条目按 id 合并),
+ * displayName / apiKeyEnv / baseURL / 静态方言键等一概不动。
+ * 块不存在时 providerFound=false,由调用方提示先跑「配置」。
+ */
+export function patchDshProviderModels(
+  text: string,
+  opts: { providerName: string; models: DshModelEntry[] },
+): { text: string; changes: string[]; providerFound: boolean } {
+  const provider = locateDshProviderBlock(text, opts.providerName);
+  if (!provider) return { text, changes: [], providerFound: false };
+  const next = applyDshProviderMerge(
+    text,
+    { start: provider.bodyStart, end: provider.bodyEnd },
+    provider.indent,
+    opts.models,
+    null,
+  );
+  const changes: string[] = [];
+  if (next !== text) changes.push(`models 已更新(${opts.models.length} 个模型)`);
+  return { text: next, changes, providerFound: true };
 }
 
 /** 在 settings.yaml 中 upsert 顶层 `agent-default-model:` 段。

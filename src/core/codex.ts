@@ -2,7 +2,7 @@
 // 只依赖注入的路径参数,不做任何文件 I/O。
 
 import type { ResolvedModel } from "./models";
-import { escapeRegExp } from "./util";
+import { applyTextOps, escapeRegExp, planManagedKeyUpserts } from "./util";
 
 /** Codex 目录 reasoning effort 预设(实测网关对所有模型接受 low/high/max;不含 none,
  * 因 claude 系 / gemini-3.7-flash / grok-4.6 拒收 none→400,且 none 在转换层不发送)。 */
@@ -67,14 +67,27 @@ function upsertProviderSection(
     .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
     .join("\n");
   const block = `[model_providers.${name}]\n${body}\n`;
-  // 末尾判断用「其后无任何字符」的负向先行断言表示文件末尾,不能用 $——
-  // $ 在 m 模式下会匹配任意换行前,导致 lazy 匹配在表头处就结束,替换时旧 body 残留形成重复 key。
-  const re = new RegExp(`^\\[model_providers\\.${escapeRegExp(name)}\\]\\s*$[\\s\\S]*?(?=^\\[|(?![\\s\\S]))`, "m");
-  if (re.test(text)) {
-    const next = text.replace(re, block);
-    return { text: next, changed: next !== text };
+  const headerRe = new RegExp(`^\\[model_providers\\.${escapeRegExp(name)}\\]\\s*$`, "m");
+  const header = headerRe.exec(text);
+  if (!header || header.index === undefined) {
+    return { text: text.replace(/\s+$/, "") + "\n\n" + block, changed: true };
   }
-  return { text: text.replace(/\s+$/, "") + "\n\n" + block, changed: true };
+  // 只 upsert 本段的键,段内用户自己加的键与注释原样保留(不再整段重写)。
+  const headerLineEnd = text.indexOf("\n", header.index);
+  const bodyStart = headerLineEnd === -1 ? text.length : headerLineEnd + 1;
+  const nextHeader = /^\[/m.exec(text.slice(bodyStart));
+  const bodyEnd = nextHeader ? bodyStart + nextHeader.index : text.length;
+  const ops = planManagedKeyUpserts(
+    text,
+    { start: bodyStart, end: bodyEnd },
+    {
+      separator: "=",
+      indent: 0,
+      keys: Object.entries(kv).map(([k, v]) => ({ key: k, lines: [`${k} = ${JSON.stringify(v)}`] })),
+    },
+  );
+  const next = applyTextOps(text, ops);
+  return { text: next, changed: next !== text };
 }
 
 /** 生成/更新 codex config.toml 的 provider 配置(文本级修改,幂等)。 */
@@ -151,26 +164,104 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
   return entry;
 }
 
-/** 生成 codex models.json 内容(所有模型 visibility=list)。 */
+type CodexCatalogPlan = {
+  kept: unknown[];
+  entries: Record<string, unknown>[];
+  added: string[];
+  removed: string[];
+};
+
 /**
- * 生成 codex models.json(所有模型 visibility=list)。
- * 传入现有内容时,保留其中不属于当前 provider 的条目(兼容用户已有模型目录,如官方 gpt 等)。
+ * 规划 models.json 目录内容:
+ * - 本 provider 条目按 description 前缀(`${providerName}: `)归属;已不在模型列表的自家条目移除;
+ * - 非本 provider 条目(不含可识别 slug 的、或描述前缀不匹配的)原样保留(兼容用户已有模型目录);
+ * - opts.preserveExisting(仅更新模型列表):既有 slug 沿用其 visibility/description,其余字段随模型表刷新。
  */
-export function renderCodexModelsJson(models: ResolvedModel[], providerName: string, existingJson?: string): string {
+function planCodexCatalog(
+  models: ResolvedModel[],
+  providerName: string,
+  existingJson: string | undefined,
+  opts?: { preserveExisting?: boolean },
+): CodexCatalogPlan {
   const newIds = new Set(models.map((m) => m.id));
+  const prevSlugs = new Set<string>();
+  const prevBySlug = new Map<string, Record<string, unknown>>();
   const kept: unknown[] = [];
+  const removed: string[] = [];
   if (existingJson && existingJson.trim()) {
     try {
-      const data = JSON.parse(existingJson) as { models?: Array<{ slug?: string }> };
+      const data = JSON.parse(existingJson) as { models?: Array<Record<string, unknown>> };
       for (const m of data.models ?? []) {
-        if (m.slug && !newIds.has(m.slug)) kept.push(m);
+        const slug = typeof m.slug === "string" && m.slug.length > 0 ? m.slug : null;
+        if (!slug) {
+          kept.push(m);
+          continue;
+        }
+        prevSlugs.add(slug);
+        const ours = typeof m.description === "string" && m.description.startsWith(`${providerName}: `);
+        if (newIds.has(slug)) {
+          prevBySlug.set(slug, m);
+          continue;
+        }
+        if (ours) {
+          removed.push(slug);
+          continue;
+        }
+        kept.push(m);
       }
     } catch {
       // 现有目录损坏/非法,忽略
     }
   }
-  const entries = [...kept, ...models.map((m, i) => buildCodexEntry(m, providerName, 20 + i))];
-  return JSON.stringify({ models: entries }, null, 2) + "\n";
+  const added: string[] = [];
+  const entries = models.map((m, i) => {
+    const e: Record<string, unknown> = buildCodexEntry(m, providerName, 20 + i);
+    if (!prevSlugs.has(m.id)) added.push(m.id);
+    const prev = prevBySlug.get(m.id);
+    if (prev && opts?.preserveExisting) {
+      if (typeof prev.visibility === "string") e.visibility = prev.visibility;
+      if (typeof prev.description === "string") e.description = prev.description;
+    }
+    return e;
+  });
+  return { kept, entries, added, removed };
+}
+
+/** 生成 codex models.json 内容(所有模型 visibility=list)。 */
+export function renderCodexModelsJson(models: ResolvedModel[], providerName: string, existingJson?: string): string {
+  const plan = planCodexCatalog(models, providerName, existingJson);
+  return JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
+}
+
+export type CodexCatalogResult = {
+  text: string;
+  changes: string[];
+  added: string[];
+  removed: string[];
+  /** 生成内容与现有文件一致(刷新流程据此跳过写入)。 */
+  unchanged: boolean;
+};
+
+/**
+ * 「仅更新模型列表」用:只生成 models.json 文本与变更摘要(不写盘,不碰 config.toml)。
+ * 既有条目沿用其 visibility/description;自家下架条目移除;非本 provider 条目原样保留。
+ */
+export function patchCodexCatalog(
+  models: ResolvedModel[],
+  providerName: string,
+  existingJson: string,
+): CodexCatalogResult {
+  const plan = planCodexCatalog(models, providerName, existingJson, { preserveExisting: true });
+  const text = JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
+  const unchanged = text === existingJson;
+  const changes: string[] = [];
+  if (!unchanged) {
+    if (plan.added.length > 0) changes.push(`新增 ${plan.added.length} 个模型`);
+    if (plan.removed.length > 0) changes.push(`移除 ${plan.removed.length} 个下架条目(${plan.removed.slice(0, 6).join(", ")}${plan.removed.length > 6 ? " …" : ""})`);
+    if (plan.kept.length > 0) changes.push(`保留非本 provider 条目 ${plan.kept.length} 条`);
+    if (changes.length === 0) changes.push(`模型元数据已更新(${models.length} 个模型)`);
+  }
+  return { text, changes, added: plan.added, removed: plan.removed, unchanged };
 }
 
 export type CodexStatus = {

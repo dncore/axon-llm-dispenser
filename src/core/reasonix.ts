@@ -1,6 +1,6 @@
 // Reasonix 配置:[[providers]] 接入 + [serve] 鉴权。纯文本变换,不做文件 I/O。
 
-import { escapeRegExp, maskToken } from "./util";
+import { applyTextOps, escapeRegExp, maskToken, planManagedKeyUpserts } from "./util";
 
 type ProviderValue = string | string[] | boolean | { raw: string };
 
@@ -110,20 +110,59 @@ function findProvidersBlock(text: string, name: string): { start: number; end: n
 
 function upsertProviderBlock(text: string, name: string, kv: Record<string, ProviderValue>): { text: string; changed: boolean } {
   const existing = findProvidersBlock(text, name);
-  const body = Object.entries(kv).map(([k, v]) => `${k} = ${tomlValue(v)}`).join("\n");
   if (!existing) {
+    const body = Object.entries(kv).map(([k, v]) => `${k} = ${tomlValue(v)}`).join("\n");
     const block = "[[providers]]\n" + body + "\n";
     return { text: (text.trim() ? text.replace(/\s+$/, "") + "\n\n" : "") + block, changed: true };
   }
-  const oldBody = text.slice(existing.start, existing.end);
-  const kept: string[] = [];
-  for (const line of oldBody.split("\n")) {
-    const km = line.match(/^([A-Za-z0-9_-]+)\s*=/);
-    if (km && !(km[1] in kv)) kept.push(line);
-  }
-  const newBody = [body, kept.join("\n")].filter(Boolean).join("\n") + "\n";
-  const next = text.slice(0, existing.start) + newBody + text.slice(existing.end);
+  // 只 upsert 管理键:块内其他 key、注释与空行原位保留(不再拼块体)
+  const ops = planManagedKeyUpserts(
+    text,
+    { start: existing.start, end: existing.end },
+    {
+      separator: "=",
+      indent: 0,
+      keys: Object.entries(kv).map(([k, v]) => ({ key: k, lines: [`${k} = ${tomlValue(v)}`] })),
+    },
+  );
+  const next = applyTextOps(text, ops);
   return { text: next, changed: next !== text };
+}
+
+/**
+ * 合并 model_overrides 内联表:已有条目的其它键原样保留(context_window 只改数值),
+ * 列表外条目移除,新条目追加。
+ */
+function mergeInlineOverrides(oldRaw: string | null, entries: Array<[string, number]>): string {
+  const wanted = new Map(entries);
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  if (oldRaw) {
+    const entryRe = /"((?:[^"\\]|\\.)*)"\s*=\s*\{([^}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = entryRe.exec(oldRaw)) !== null) {
+      let id = m[1];
+      try {
+        id = JSON.parse(`"${id}"`) as string;
+      } catch {
+        // 非法转义——按原样处理
+      }
+      if (!wanted.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      const cw = wanted.get(id)!;
+      let inner = m[2].trim();
+      inner = /context_window\s*=/.test(inner)
+        ? inner.replace(/context_window\s*=\s*\d+/, `context_window = ${cw}`)
+        : inner.length > 0
+          ? `context_window = ${cw}, ${inner}`
+          : `context_window = ${cw}`;
+      parts.push(`${JSON.stringify(id)} = { ${inner} }`);
+    }
+  }
+  for (const [id, cw] of entries) {
+    if (!seen.has(id)) parts.push(`${JSON.stringify(id)} = { context_window = ${cw} }`);
+  }
+  return `{ ${parts.join(", ")} }`;
 }
 
 function upsertTopLevelKey(text: string, key: string, value: string): { text: string; changed: boolean } {
@@ -163,8 +202,11 @@ export function patchReasonixProvider(text: string, input: ReasonixProviderInput
     ? Object.entries(input.modelContexts).filter(([id]) => sorted.includes(id)).sort(([a], [b]) => a.localeCompare(b))
     : [];
   if (knownCtx.length > 0) {
-    const inline = knownCtx.map(([id, cw]) => `${JSON.stringify(id)} = { context_window = ${cw} }`).join(", ");
-    kv.model_overrides = { raw: `{ ${inline} }` };
+    const prevBlock = findProvidersBlock(text, providerName);
+    const prevRaw = prevBlock
+      ? text.slice(prevBlock.start, prevBlock.end).match(/^model_overrides\s*=\s*(.*)$/m)?.[1] ?? null
+      : null;
+    kv.model_overrides = { raw: mergeInlineOverrides(prevRaw, knownCtx) };
   }
 
   const existed = Boolean(findProvidersBlock(text, providerName));
@@ -198,6 +240,38 @@ export function patchReasonixProvider(text: string, input: ReasonixProviderInput
 
   if (changes.length === 0) return { text, changes: [] };
   return { text: out, changes };
+}
+
+/**
+ * 「仅更新模型列表」:只刷新既有 [[providers]] 块的 models 与 model_overrides
+ * (model_overrides 内条目的其它键保留),base_url / api_key_env / default / 顶层 default_model
+ * 一概不动。块不存在时 providerFound=false。
+ */
+export function patchReasonixModels(
+  text: string,
+  opts: { providerName: string; modelIds: string[]; modelContexts?: Record<string, number> },
+): { text: string; changes: string[]; providerFound: boolean } {
+  const block = findProvidersBlock(text, opts.providerName);
+  if (!block) return { text, changes: [], providerFound: false };
+  const sorted = [...opts.modelIds].sort((a, b) => a.localeCompare(b));
+  if (sorted.length === 0) return { text, changes: [], providerFound: true };
+
+  const kv: Record<string, ProviderValue> = { models: sorted };
+  const knownCtx = opts.modelContexts
+    ? Object.entries(opts.modelContexts).filter(([id]) => sorted.includes(id)).sort(([a], [b]) => a.localeCompare(b))
+    : [];
+  if (knownCtx.length > 0) {
+    const prevRaw = text.slice(block.start, block.end).match(/^model_overrides\s*=\s*(.*)$/m)?.[1] ?? null;
+    kv.model_overrides = { raw: mergeInlineOverrides(prevRaw, knownCtx) };
+  }
+
+  const r = upsertProviderBlock(text, opts.providerName, kv);
+  const changes: string[] = [];
+  if (r.changed) {
+    changes.push(`models 已更新(${sorted.length} 个模型)`);
+    if (knownCtx.length > 0) changes.push(`model_overrides 已同步(${knownCtx.length} 个 context_window)`);
+  }
+  return { text: r.text, changes, providerFound: true };
 }
 
 export type ReasonixStatus = {

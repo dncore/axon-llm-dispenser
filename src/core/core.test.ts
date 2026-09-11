@@ -848,3 +848,426 @@ describe("grok 状态与配置提取", () => {
     expect(extractGrokProvider(configured.text, "other").baseUrl).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 块内合并(只 upsert 管理键)+ 「仅更新模型列表」
+// ---------------------------------------------------------------------------
+
+import {
+  applyTextOps,
+  planManagedKeyUpserts,
+  scanYamlListItems,
+  type TextOp,
+} from "./util";
+import { patchCodexCatalog } from "./codex";
+import { patchDshProviderModels } from "./dsh";
+import { patchOmpModelsList } from "./omp";
+import { patchOpenCodeModels } from "./opencode";
+import { patchReasonixModels } from "./reasonix";
+import { patchGrokModels } from "./grok";
+
+describe("文本原语(区间操作)", () => {
+  it("applyTextOps 从后往前应用;同 start 时按输入顺序(删除先于插入)", () => {
+    const text = "aaaa\nbbbb\ncccc\n";
+    const ops: TextOp[] = [
+      { start: 5, end: 10, replacement: "B\n" }, // 替换 bbbb
+      { start: 5, end: 5, replacement: "ins\n" }, // 同点插入(应落在替换结果前)
+    ];
+    expect(applyTextOps(text, ops)).toBe("aaaa\nins\nB\ncccc\n");
+    // 从后往前:靠后的操作先应用,靠前的偏移仍有效
+    const ops2: TextOp[] = [
+      { start: 0, end: 4, replacement: "x" },
+      { start: 10, end: 14, replacement: "y" },
+    ];
+    expect(applyTextOps(text, ops2)).toBe("x\nbbbb\ny\n");
+  });
+
+  it("planManagedKeyUpserts:替换/插入/移除(block 连同子块)", () => {
+    const yaml = ["a:", "  k: 1", "  sub:", "    x: 1", "  other: 2", ""].join("\n");
+    const region = { start: 3, end: yaml.length };
+    // 替换标量键行 + 缺失键插入 + 子块移除
+    const ops = planManagedKeyUpserts(yaml, region, {
+      separator: ":",
+      indent: 2,
+      keys: [
+        { key: "k", lines: ["  k: 9"] },
+        { key: "new", lines: ["  new: 3"] },
+        { key: "sub", lines: null, block: true },
+      ],
+    });
+    const out = applyTextOps(yaml, ops);
+    expect(out).toContain("  k: 9");
+    expect(out).toContain("  new: 3");
+    expect(out).not.toContain("sub:");
+    expect(out).not.toContain("x: 1");
+    expect(out).toContain("  other: 2");
+  });
+
+  it("scanYamlListItems 按缩进取列表项", () => {
+    const text = ["models:", "  - id: a", "    name: A", "  - id: b", "", "next: 1"].join("\n");
+    const items = scanYamlListItems(text, 0, text.indexOf("\nnext"));
+    expect(items.map((i) => i.id)).toEqual(["a", "b"]);
+    expect(text.slice(items[1].start, items[1].end)).toContain("- id: b");
+  });
+});
+
+describe("codex provider 段块内合并", () => {
+  const input = {
+    providerName: "axon",
+    baseUrl: "https://new.example/v1",
+    apiKey: "sk-new",
+    modelsJsonPath: "/home/u/.codex/models.json",
+  };
+
+  it("段内用户键与注释保留,管理键更新,幂等", () => {
+    const existing = [
+      "# 顶层注释",
+      "[model_providers.axon]",
+      "# 段内注释",
+      'name = "axon"',
+      'base_url = "https://old.example/v1"',
+      "request_max_retries = 3",
+      "",
+    ].join("\n");
+    const r = patchCodexConfigToml(existing, input);
+    expect(r.text).toContain("# 段内注释");
+    expect(r.text).toContain("request_max_retries = 3");
+    expect(r.text).toContain('base_url = "https://new.example/v1"');
+    expect(r.text).toContain('experimental_bearer_token = "sk-new"');
+    const r2 = patchCodexConfigToml(r.text, input);
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+});
+
+describe("patchCodexCatalog(仅更新模型列表)", () => {
+  it("沿用既有可见性与描述,新条目 list,自家下架移除,非本 provider 条目保留;无变化返回 unchanged", () => {
+    const existing = JSON.stringify({
+      models: [
+        { slug: "gpt-5", display_name: "GPT-5", description: "OpenAI 官方" },
+        { slug: "m1", description: "axon: Old — openai-compatible gateway", visibility: "hide" },
+        { slug: "gone", description: "axon: Gone — openai-compatible gateway" },
+      ],
+    });
+    const models = buildResolvedModels(["m1", "m2"]);
+    const r = patchCodexCatalog(models, "axon", existing);
+    const doc = JSON.parse(r.text) as { models: Array<Record<string, unknown>> };
+    const by = Object.fromEntries(doc.models.map((m) => [m.slug as string, m]));
+    expect(by.m1.visibility).toBe("hide");
+    expect(by.m1.description).toBe("axon: Old — openai-compatible gateway");
+    expect(by.m2.visibility).toBe("list");
+    expect(by["gpt-5"]).toBeTruthy();
+    expect(by.gone).toBeUndefined();
+    expect(r.removed).toEqual(["gone"]);
+    expect(r.added).toEqual(["m2"]);
+    expect(r.unchanged).toBe(false);
+    expect(r.changes.join()).toContain("移除 1 个下架条目");
+
+    const r2 = patchCodexCatalog(models, "axon", r.text);
+    expect(r2.unchanged).toBe(true);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("全量 renderCodexModelsJson 同样移除自家下架条目、保留外来条目", () => {
+    const existing = JSON.stringify({
+      models: [
+        { slug: "gpt-5", display_name: "GPT-5", description: "OpenAI 官方" },
+        { slug: "gone", description: "axon: Gone — openai-compatible gateway" },
+      ],
+    });
+    const json = renderCodexModelsJson(buildResolvedModels(["m1"]), "axon", existing);
+    const doc = JSON.parse(json) as { models: Array<{ slug: string }> };
+    expect(doc.models.map((m) => m.slug)).toEqual(["gpt-5", "m1"]);
+  });
+});
+
+describe("dsh 块内合并 / 仅更新模型列表", () => {
+  const DSH_EXISTING = [
+    "agent-default-model:",
+    "  provider: deepseek-official",
+    "llm-pi-ai:",
+    "  providers:",
+    "    axon:",
+    "      displayName: Axon",
+    "      apiKeyEnv: AXON_API_KEY",
+    "      api: openai-completions",
+    "      baseURL: https://old.example/v1",
+    "      # 用户注释",
+    "      extraHeaders:",
+    "        X-Trace: on",
+    "      models:",
+    "        - id: deepseek-v4-pro",
+    "          contextWindow: 1",
+    "          maxTokens: 2",
+    "          customFlag: true",
+    "        - id: gone-model",
+    "          contextWindow: 1",
+    "          maxTokens: 1",
+    "    other:",
+    "      baseURL: https://other.example/v1",
+    "",
+  ].join("\n");
+
+  const models = [
+    { id: "deepseek-v4-pro", contextWindow: 1000000, maxTokens: 384000, reasoning: true, reasoningEfforts: { high: "high", max: "max" } },
+    { id: "qwen3.8-max", contextWindow: 983616, maxTokens: 131072 },
+  ];
+
+  it("models-only:按 id 合并,用户键/注释保留,下架删除,baseURL 不动,幂等", () => {
+    const r = patchDshProviderModels(DSH_EXISTING, { providerName: "axon", models });
+    expect(r.providerFound).toBe(true);
+    expect(r.text).toContain("baseURL: https://old.example/v1");
+    expect(r.text).toContain("# 用户注释");
+    expect(r.text).toContain("X-Trace: on");
+    expect(r.text).toContain("customFlag: true");
+    expect(r.text).toContain("contextWindow: 1000000");
+    expect(r.text).not.toContain("gone-model");
+    expect(r.text).toContain("- id: qwen3.8-max");
+    expect(r.text).toContain("other:");
+    const r2 = patchDshProviderModels(r.text, { providerName: "axon", models });
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("全量 patch:管理键更新、块内用户键保留,幂等", () => {
+    const input = { providerName: "axon", displayName: "New Name", apiKeyEnv: "AXON_API_KEY", baseUrl: "https://new.example/v1", models };
+    const r = patchDshProvider(DSH_EXISTING, input);
+    expect(r.text).toContain("baseURL: https://new.example/v1");
+    expect(r.text).toContain("displayName: New Name");
+    expect(r.text).toContain("X-Trace: on");
+    expect(r.text).toContain("customFlag: true"); // 保留条目的用户子键不动
+    expect(r.text).not.toContain("gone-model"); // 下架条目整体移除
+    const r2 = patchDshProvider(r.text, input);
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("未接入时 providerFound=false 且不改文本", () => {
+    const text = "llm-pi-ai:\n  providers:\n    other:\n      baseURL: https://x.example/v1\n";
+    const r = patchDshProviderModels(text, { providerName: "axon", models });
+    expect(r.providerFound).toBe(false);
+    expect(r.text).toBe(text);
+  });
+});
+
+describe("omp 块内合并 / 仅更新模型列表", () => {
+  const OMP_EXISTING = [
+    "providers:",
+    "  others:",
+    "    baseUrl: https://other.example/v1",
+    "  mygw:",
+    "    baseUrl: https://old.example/v1",
+    "    api: openai-completions",
+    "    apiKey: sk-old",
+    "    authHeader: true",
+    "    headers:",
+    "      X-Trace: on",
+    "    models:",
+    "      - id: glm-5.3",
+    "        reasoning: true",
+    "        contextWindow: 1",
+    "        maxTokens: 2",
+    "        temperature: 0.3",
+    "      - id: gone-model",
+    "        reasoning: false",
+    "        contextWindow: 1",
+    "        maxTokens: 1",
+    "",
+  ].join("\n");
+
+  const models = buildResolvedModels(["glm-5.3", "kimi-k3"]);
+
+  it("models-only:条目按 id 合并,用户键保留,下架删除,apiKey/baseUrl 不动", () => {
+    const r = patchOmpModelsList(OMP_EXISTING, { providerName: "mygw", models });
+    expect(r.providerFound).toBe(true);
+    expect(r.text).toContain("apiKey: sk-old");
+    expect(r.text).toContain("baseUrl: https://old.example/v1");
+    expect(r.text).toContain("X-Trace: on");
+    expect(r.text).toContain("temperature: 0.3");
+    expect(r.text).not.toContain("gone-model");
+    expect(r.text).toContain("- id: kimi-k3");
+    expect(r.text).toContain("others:");
+    const r2 = patchOmpModelsList(r.text, { providerName: "mygw", models });
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("全量 patch:baseUrl/apiKey 更新、块内用户键保留", () => {
+    const r = patchOmpModelsYml(OMP_EXISTING, {
+      providerName: "mygw",
+      baseUrl: "https://new.example/v1",
+      apiKey: "sk-new",
+      models: buildResolvedModels(["glm-5.3"]),
+    });
+    expect(r.text).toContain("baseUrl: https://new.example");
+    expect(r.text).toContain("apiKey: sk-new");
+    expect(r.text).toContain("X-Trace: on");
+    expect(r.text).toContain("temperature: 0.3");
+  });
+});
+
+describe("opencode 块内合并 / 仅更新模型列表", () => {
+  const EXISTING =
+    JSON.stringify(
+      {
+        model: "other/model",
+        theme: "dark",
+        provider: {
+          mygw: {
+            name: "Old Name",
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "https://old.example/v1", headers: { "X-Trace": "on" } },
+            models: { "glm-5.3": { name: "GLM", limit: { context: 1 } } },
+            customKey: "keep",
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n";
+
+  it("models-only:只合并 models,条目内用户字段保留,provider 元数据与顶层 model 不动", () => {
+    const r = patchOpenCodeModels(EXISTING, { providerName: "mygw", models: buildResolvedModels(["glm-5.3", "kimi-k3"]) });
+    expect(r.providerFound).toBe(true);
+    const doc = JSON.parse(r.text) as any;
+    expect(doc.model).toBe("other/model");
+    expect(doc.provider.mygw.name).toBe("Old Name");
+    expect(doc.provider.mygw.options.baseURL).toBe("https://old.example/v1");
+    expect(doc.provider.mygw.options.headers["X-Trace"]).toBe("on");
+    expect(doc.provider.mygw.customKey).toBe("keep");
+    expect(doc.provider.mygw.models["glm-5.3"].limit).toEqual({ context: 1 });
+    expect(doc.provider.mygw.models["kimi-k3"]).toBeTruthy();
+    const r2 = patchOpenCodeModels(r.text, { providerName: "mygw", models: buildResolvedModels(["glm-5.3", "kimi-k3"]) });
+    expect(r2.text).toBe(r.text);
+  });
+
+  it("全量 patch:provider 对象用户键保留,顶层 model 切换", () => {
+    const r = patchOpenCodeConfig(EXISTING, {
+      providerName: "mygw",
+      displayName: "New Name",
+      baseUrl: "https://new.example/v1",
+      models: buildResolvedModels(["glm-5.3"]),
+      defaultModel: "glm-5.3",
+    });
+    const doc = JSON.parse(r.text) as any;
+    expect(doc.provider.mygw.name).toBe("New Name");
+    expect(doc.provider.mygw.customKey).toBe("keep");
+    expect(doc.provider.mygw.options.headers["X-Trace"]).toBe("on");
+    expect(doc.model).toBe("mygw/glm-5.3");
+  });
+});
+
+describe("reasonix 块内合并 / 仅更新模型列表", () => {
+  const EXISTING = [
+    "[[providers]]",
+    'name = "axon"',
+    "# 用户注释",
+    'kind = "openai"',
+    'base_url = "https://user-set.example/v1"',
+    'models = ["glm-5.3"]',
+    'api_key_env = "AXON_API_KEY"',
+    'model_overrides = { "glm-5.3" = { context_window = 1, custom = "keep" } }',
+    'default = "glm-5.3"',
+    'custom_key = "keep"',
+    "",
+  ].join("\n");
+
+  it("models-only:只改 models 与 model_overrides,其余键与注释保留", () => {
+    const r = patchReasonixModels(EXISTING, {
+      providerName: "axon",
+      modelIds: ["glm-5.3", "kimi-k3"],
+      modelContexts: { "glm-5.3": 1048576, "kimi-k3": 256000 },
+    });
+    expect(r.providerFound).toBe(true);
+    expect(r.text).toContain('base_url = "https://user-set.example/v1"');
+    expect(r.text).toContain("# 用户注释");
+    expect(r.text).toContain('custom_key = "keep"');
+    expect(r.text).toContain('models = ["glm-5.3", "kimi-k3"]');
+    expect(r.text).toContain('"glm-5.3" = { context_window = 1048576, custom = "keep" }');
+    expect(r.text).toContain('"kimi-k3" = { context_window = 256000 }');
+    const r2 = patchReasonixModels(r.text, {
+      providerName: "axon",
+      modelIds: ["glm-5.3", "kimi-k3"],
+      modelContexts: { "glm-5.3": 1048576, "kimi-k3": 256000 },
+    });
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("未配置时 providerFound=false 且不改文本", () => {
+    const text = '[[providers]]\nname = "other"\n';
+    const r = patchReasonixModels(text, { providerName: "axon", modelIds: ["m"] });
+    expect(r.providerFound).toBe(false);
+    expect(r.text).toBe(text);
+  });
+});
+
+describe("grok 块内合并 / 仅更新模型列表", () => {
+  const EXISTING = [
+    "# 用户配置",
+    "[model_providers.other]",
+    'base_url = "https://other.example/v1"',
+    "",
+    "[model_providers.axon]",
+    'base_url = "https://old.example/v1"',
+    'api_backend = "chat_completions"',
+    'api_key = "sk-old"',
+    "user_retry = 5",
+    "",
+    '[model."glm-5.3"]',
+    'model = "glm-5.3"',
+    'model_provider = "axon"',
+    "temperature = 0.3",
+    "context_window = 111",
+    "",
+    "[models]",
+    'default = "glm-5.3"',
+    "",
+  ].join("\n");
+
+  const models = [
+    { id: "glm-5.3", contextWindow: 1048576, maxTokens: 131072 },
+    { id: "kimi-k3", contextWindow: 256000, maxTokens: 96000 },
+  ];
+
+  it("models-only:模型块按 id 合并,块内用户键保留;provider 段与 api_key 不动", () => {
+    const r = patchGrokModels(EXISTING, { providerName: "axon", label: "Axon", models });
+    expect(r.providerFound).toBe(true);
+    expect(r.text).toContain('base_url = "https://old.example/v1"');
+    expect(r.text).toContain('api_key = "sk-old"');
+    expect(r.text).toContain("user_retry = 5");
+    expect(r.text).toContain("temperature = 0.3");
+    expect(r.text).toContain("context_window = 1048576");
+    expect(r.text).toContain("[model.kimi-k3]");
+    expect(r.text).toContain("# 用户配置");
+    const input = { providerName: "axon", label: "Axon", models };
+    const r2 = patchGrokModels(r.text, input);
+    expect(r2.text).toBe(r.text);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("models-only:default 指向已下架模型时修正;未接入时 providerFound=false", () => {
+    const stale = EXISTING.replace('default = "glm-5.3"', 'default = "gone-model"');
+    const r = patchGrokModels(stale, { providerName: "axon", label: "Axon", models: [{ id: "kimi-k3", contextWindow: 1, maxTokens: 1 }] });
+    expect(r.text).toContain('default = "kimi-k3"');
+    const missing = patchGrokModels("[models]\n", { providerName: "axon", label: "Axon", models });
+    expect(missing.providerFound).toBe(false);
+    expect(missing.text).toBe("[models]\n");
+  });
+
+  it("全量 patch:provider 段用户键保留、模型块用户键保留、陈旧自有块移除", () => {
+    const r = patchGrokConfigToml(EXISTING, {
+      providerName: "axon",
+      label: "Axon",
+      baseUrl: "https://new.example/v1",
+      apiKey: "sk-new",
+      defaultModel: "glm-5.3",
+      models: [models[0]],
+    });
+    expect(r.text).toContain('base_url = "https://new.example/v1"');
+    expect(r.text).toContain('api_key = "sk-new"');
+    expect(r.text).toContain("user_retry = 5");
+    expect(r.text).toContain("temperature = 0.3");
+    expect(r.text).toContain("[model_providers.other]");
+  });
+});

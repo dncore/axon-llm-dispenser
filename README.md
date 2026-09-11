@@ -53,6 +53,26 @@
 - 📦 **安装检测**：绿=已检测到 CLI，灰=未检测到（PATH + 各官方安装方式的常见目录，兼容 macOS/Windows/Linux）
 - 🎚 **配置一致性**：绿=写入的 provider 与当前网关 baseUrl/Key 一致，橙=不一致，灰=未配置；「配置」操作成功后自动重检
 
+### 刷新模型（仅更新模型列表）
+
+除 Claude Code（无模型列表）外的接入工具（Codex / dsh / omp / Reasonix / OpenCode / Grok）各有一个 ⟳ **刷新模型**动作，
+标题行还有一个 ⟳ **刷新全部模型列表**（一次刷新所有已接入的 Agent，未接入的自动跳过，单个失败不中断）：
+
+- 只写**模型派生部分**，`base_url` / API Key / 默认模型 / provider 元数据一概不动：
+  Codex 只写 `models.json`（不碰 config.toml、不重启转换代理）；dsh / omp 只改 `providers.<name>` 的 `models`；
+  Reasonix 只改 `models` + `model_overrides`；OpenCode 只改 `provider.<name>.models`；Grok 只改 `[model.<id>]` 块（default 失效时修正）
+- 模型来源 = 左侧**当前模型列表**（Doubao 过滤开关生效）；需要网关最新列表时先点模型卡片 ↻ 拉取
+- 条目按 id 识别：新增写入、已有条目只更新管理字段、**网关已下架的条目移除**（非本工具写入的条目/模型块原样保留）
+- 写入仍自动备份（`.bak-*`）；**内容无变化时不写盘、不产生备份**；写入前的确认框会列出具体变更
+
+### 配置写入保留策略
+
+- 所有写入为**合并式补丁**：只 upsert 本工具管理的键——块内你自己加的键、注释、模型条目内的自定义字段（如 per-model 参数）原样保留；
+  其他 provider、顶层键、其他 `[model.*]` 块一概不动
+- 模型条目按 id 识别合并；归属本工具的条目在网关下架后会随同步移除，**非本工具写入的条目/模型块一律保留**
+  （Codex `models.json` 按 description 前缀识别归属，Grok 按 `model_provider` 识别，其余按模型列表归属）
+- 全量「配置」与「刷新模型」遵循同一套规则；密钥文件（`.env` / `auth.json` / `.credentials.yaml`）不备份、固定 0600
+
 ### 升级 / 安装（按现有安装方式）
 
 - 安装图标变**橙色 ↑** 表示该 Agent 有新版本（tooltip 显示 v1 → v2 与安装方式），点击按现有安装方式升级：npm 全局（fnm/nvm 多版本安全，带 `--prefix <nodeRoot>`）/ pnpm / bun / Homebrew / 官方自更新 / npx 缓存刷新
@@ -101,7 +121,8 @@ pi 与 omp 的 DeepSeek 模型按 **DeepSeek 官方接入指南**写入优化配
 
 1. 打开应用，在「连接设置」填入 Provider 名、Base URL、API Key（可选填 Anthropic 端点）
 2. 点「测试连接」拉取模型列表（自动应用 Doubao 过滤并保存配置）
-3. 在「工具接入」点对应 Agent 的 ▶ 配置（Claude 会弹出角色映射），确认后写入其官方配置文件
+3. 在「工具接入」点对应 Agent 的 ▶ 配置（Claude 会弹出角色映射），确认后写入其官方配置文件；
+   只更新模型列表（不动 base_url / 密钥）时点该 Agent 的 ⟳ 刷新模型，或标题行 ⟳ 一次刷新全部
 4. 图标变橙色 ↑ 时点击升级；未安装的 Agent 点击图标选择官方方式安装
 5. 需要时用 ⟲ 从备份还原（支持重命名 / 删除 / 编辑备份内容）
 
