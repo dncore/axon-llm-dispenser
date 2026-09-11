@@ -1,6 +1,6 @@
 {
   "name": "axon-llm-dispenser",
-  "version": "0.5.22",
+  "version": "0.5.23",
   "description": "把用户自有的 OpenAI 兼容网关一键配置到各 Agent 工具",
   "private": true,
   "type": "module",
