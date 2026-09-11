@@ -49,7 +49,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ fe2957bf · 128 models
+// canonical: gist b8931f4c @ 167f79c7 · 131 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -62,6 +62,8 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-v4-pro": { name: "DeepSeek V4 Pro", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" } },
   "deepseek-v4-flash": { name: "DeepSeek V4 Flash", contextWindow: 1000000, maxTokens: 384000, reasoning: true, cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" } },
   "deepseek-v4-flash-vision-exp": { name: "DeepSeek V4 Flash Vision (Exp)", contextWindow: 1000000, maxTokens: 384000, reasoning: true, input: ["text", "image"], cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 }, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" } },
+  "deepseek-v4-pro-0813": { name: "DeepSeek V4 Pro (0813)", contextWindow: 1000000, maxTokens: 384000, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { low: "low", high: "high", xhigh: "max" } }, thinkingLevelMap: { minimal: null, low: "low", medium: "high", high: "high", xhigh: "max" }, cost: { input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 } },
+  "deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", contextWindow: 1000000, maxTokens: 384000, reasoning: true, input: ["text", "image"], compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { low: "low", high: "high", xhigh: "max" } }, thinkingLevelMap: { minimal: null, low: "low", medium: "high", high: "high", xhigh: "max" }, cost: { input: 0.14, output: 0.56, cacheRead: 0.003, cacheWrite: 0 } },
   "qwen-max": { contextWindow: 131072, maxTokens: 8192, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen-plus": { contextWindow: 131072, maxTokens: 8192, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen-turbo": { contextWindow: 131072, maxTokens: 8192, reasoning: true, compat: { thinkingFormat: "qwen" } },
@@ -90,7 +92,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "qwen3.5-flash": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen3.5-plus": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
   "qwen3.6-plus": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
-  "qwen-lastest": { contextWindow: 1000000, maxTokens: 65536, reasoning: true, compat: { thinkingFormat: "qwen" } },
+  "qwen-lastest": { name: "Qwen 3.8 Max Preview", contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"], compat: { thinkingFormat: "qwen" }, thinkingLevelMap: { off: null } },
   "qvq-max": { contextWindow: 32768, maxTokens: 8192, reasoning: true, input: ["text", "image"], compat: { thinkingFormat: "qwen" } },
   "qwen-vl-max": { contextWindow: 32768, maxTokens: 8192, reasoning: true, input: ["text", "image"], compat: { thinkingFormat: "qwen" } },
   "qwen-vl-plus": { contextWindow: 32768, maxTokens: 8192, reasoning: true, input: ["text", "image"], compat: { thinkingFormat: "qwen" } },
@@ -110,7 +112,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "glm-5.2": { contextWindow: 1048576, maxTokens: 131072, reasoning: true, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   "glm-5.3": { contextWindow: 1048576, maxTokens: 131072, reasoning: true, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "glm-5.3-flash": { name: "GLM-5.3 Flash", contextWindow: 1048576, maxTokens: 131072, reasoning: true, input: ["text", "image"], cost: { input: 0.8, output: 2.8, cacheRead: 0, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
-  "glm-lastest": { contextWindow: 1000000, maxTokens: 131072, reasoning: true },
+  "glm-lastest": { contextWindow: 1048576, maxTokens: 131072, reasoning: true, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "doubao-pro": { contextWindow: 128000, maxTokens: 16384, reasoning: true },
   "doubao-lite": { contextWindow: 128000, maxTokens: 16384, reasoning: false },
   "doubao-pro-256k": { contextWindow: 256000, maxTokens: 16384, reasoning: false },
@@ -132,7 +134,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "kimi-k2.5": { contextWindow: 262144, maxTokens: 8192, reasoning: true, deprecated: true },
   "kimi-k2.6": { contextWindow: 262144, maxTokens: 8192, reasoning: true },
   "kimi-k2.7-code": { contextWindow: 262144, maxTokens: 96000, reasoning: true, name: "Kimi K2.7 Code" },
-  "kimi-lastest": { contextWindow: 262144, maxTokens: 96000, reasoning: true, deprecated: true },
+  "kimi-lastest": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "kimi-k3": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "abab6.5s-chat": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
   "abab7-chat-preview": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
@@ -143,7 +145,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "MiniMax-M2.7": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M2.7-highspeed": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M3": { name: "MiniMax M3", contextWindow: 1000000, maxTokens: 32768, reasoning: true, input: ["text", "image"] },
-  "MiniMax-lastest": { contextWindow: 1000000, maxTokens: 32768, reasoning: true },
+  "MiniMax-lastest": { name: "MiniMax M3", contextWindow: 1000000, maxTokens: 32768, reasoning: true, input: ["text", "image"] },
   "claude-3-opus-20240229": { contextWindow: 200000, maxTokens: 4096, reasoning: false, input: ["text", "image"], deprecated: true },
   "claude-3.5-sonnet-20241022": { contextWindow: 200000, maxTokens: 8192, reasoning: false, input: ["text", "image"], deprecated: true },
   "claude-3.5-haiku-20241022": { contextWindow: 200000, maxTokens: 8192, reasoning: false, input: ["text", "image"], deprecated: true },
@@ -170,6 +172,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "gemini-3.5-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
   "gemini-3.6-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "gemini-3.7-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "gemini-3.8-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "grok-4.6": { name: "Grok 4.6 (xAI)", contextWindow: 500000, maxTokens: 500000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   "hy3-preview": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
   "hy3": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
