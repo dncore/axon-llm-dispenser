@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels, isKnownModel } from "./models";
-import { patchCodexConfigToml, renderCodexModelsJson, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_DEFAULT_PORT } from "./codex";
+import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
@@ -859,7 +859,6 @@ import {
   scanYamlListItems,
   type TextOp,
 } from "./util";
-import { patchCodexCatalog } from "./codex";
 import { patchDshProviderModels } from "./dsh";
 import { patchOmpModelsList } from "./omp";
 import { patchOpenCodeModels } from "./opencode";
@@ -978,6 +977,119 @@ describe("patchCodexCatalog(仅更新模型列表)", () => {
     const json = renderCodexModelsJson(buildResolvedModels(["m1"]), "axon", existing);
     const doc = JSON.parse(json) as { models: Array<{ slug: string }> };
     expect(doc.models.map((m) => m.slug)).toEqual(["gpt-5", "m1"]);
+  });
+});
+
+describe("Codex 可见模型上限(客户端模型列表超上限会渲染错乱)", () => {
+  const many = (n: number): string[] => Array.from({ length: n }, (_, i) => `m${String(i + 1).padStart(2, "0")}`);
+  const own = (slug: string, visibility?: string): Record<string, unknown> => ({
+    slug,
+    description: `axon: ${slug} — openai-compatible gateway`,
+    ...(visibility ? { visibility } : {}),
+  });
+  const visibilityOf = (json: string): Record<string, string> => {
+    const doc = JSON.parse(json) as { models: Array<{ slug: string; visibility: string }> };
+    return Object.fromEntries(doc.models.map((m) => [m.slug, m.visibility]));
+  };
+
+  it("上限 8:无既有目录时,超出的条目需用户挑选,预选前 8 个", () => {
+    const models = buildResolvedModels(many(10));
+    const p = planCodexListed(models);
+    expect(CODX_MAX_LISTED_MODELS).toBe(8);
+    expect(p.desired).toBe(10);
+    expect(p.needsChoice).toBe(true);
+    expect(p.listed).toEqual(many(8));
+    expect(p.current).toEqual([]);
+  });
+
+  it("不超上限时不需挑选,全部可见", () => {
+    const p = planCodexListed(buildResolvedModels(many(8)));
+    expect(p.needsChoice).toBe(false);
+    expect(p.listed).toEqual(many(8));
+  });
+
+  it("既有可见集合沿用;新增条目并入;合计超上限才需挑选", () => {
+    const existing = JSON.stringify({ models: [own("m01"), own("m02", "hide"), own("gone")] });
+    // m01 沿用可见、m02 保持隐藏(gone 已下架不算期望),新增 m03 → 期望 2,不超上限
+    const p = planCodexListed(buildResolvedModels(["m01", "m02", "m03"]), existing);
+    expect(p.current).toEqual(["m01"]);
+    expect(p.desired).toBe(2);
+    expect(p.needsChoice).toBe(false);
+    expect(p.listed).toEqual(["m01", "m03"]);
+
+    // 既有 8 条可见 + 1 个新模型 → 期望 9 > 8,需挑选
+    const full = JSON.stringify({ models: many(8).map((id) => own(id)) });
+    const p2 = planCodexListed(buildResolvedModels([...many(8), "m09"]), full);
+    expect(p2.current).toEqual(many(8));
+    expect(p2.desired).toBe(9);
+    expect(p2.needsChoice).toBe(true);
+    expect(p2.listed).toEqual([...many(8)]); // 预选 = 既有可见集合
+  });
+
+  it("默认模型优先进入预选(仅在截断时生效)", () => {
+    const p = planCodexListed(buildResolvedModels(many(10)), undefined, { defaultModel: "m05", cap: 3 });
+    expect(p.listed).toEqual(["m05", "m01", "m02"]);
+    expect(p.needsChoice).toBe(true);
+  });
+
+  it("同 slug 的既有条目沿用可见性(provider 改名后不重置),不同 slug 的不占名额", () => {
+    const existing = JSON.stringify({
+      models: [
+        { slug: "m01", display_name: "GPT", visibility: "list" }, // 同 slug,描述前缀不匹配
+        { slug: "other", display_name: "外部条目", visibility: "list" }, // 不在模型列表里,不占名额
+      ],
+    });
+    const p = planCodexListed(buildResolvedModels(many(9)), existing);
+    expect(p.current).toEqual(["m01"]); // 同 slug 的可见条目视为用户既有选择(即使描述前缀不匹配)
+    expect(p.desired).toBe(9); // m01 沿用 + m02..m09 为目录新增
+    expect(p.needsChoice).toBe(true);
+    expect(p.listed).toEqual(many(8));
+  });
+
+  it("显式 hide 的既有条目保持隐藏,且不算进期望可见数", () => {
+    const existing = JSON.stringify({ models: many(9).map((id) => own(id, id === "m01" || id === "m02" ? "hide" : undefined)) });
+    const p = planCodexListed(buildResolvedModels(many(9)), existing);
+    expect(p.current).toEqual(many(9).slice(2)); // m01/m02 用户已隐藏
+    expect(p.desired).toBe(7);
+    expect(p.needsChoice).toBe(false);
+  });
+
+  it("显式 listed:未选中条目写 hide(仍在目录里),既有描述保留", () => {
+    const models = buildResolvedModels(many(10));
+    const json = patchCodexCatalog(models, "axon", JSON.stringify({ models: [own("m01")] }), many(8));
+    const by = visibilityOf(json.text);
+    expect(by.m01).toBe("list");
+    expect(by.m08).toBe("list");
+    expect(by.m09).toBe("hide");
+    expect(by.m10).toBe("hide");
+    expect(json.visible).toBe(8);
+    expect(json.hidden).toBe(2);
+    expect(json.unchanged).toBe(false);
+    expect(json.changes.join()).toContain("可见 8 个(上限 8)/ 隐藏 2 个");
+
+    // 同一 listed 再规划:幂等
+    const r2 = patchCodexCatalog(models, "axon", json.text, many(8));
+    expect(r2.unchanged).toBe(true);
+    expect(r2.changes).toHaveLength(0);
+  });
+
+  it("renderCodexModelsJson 支持显式 listed(配置流程写入用户选择)", () => {
+    const models = buildResolvedModels(many(10));
+    const by = visibilityOf(renderCodexModelsJson(models, "axon", undefined, ["m10", "m09"]));
+    expect(by.m10).toBe("list");
+    expect(by.m09).toBe("list");
+    expect(by.m01).toBe("hide");
+  });
+
+  it("上限外的条目仍带完整元数据(hide 条目可用作默认模型/CLI 指定)", () => {
+    const models = buildResolvedModels(["deepseek-v4-flash", "glm-5.3"]);
+    const doc = JSON.parse(renderCodexModelsJson(models, "axon", undefined, ["glm-5.3"])) as {
+      models: Array<Record<string, unknown>>;
+    };
+    const ds = doc.models.find((m) => m.slug === "deepseek-v4-flash")!;
+    expect(ds.visibility).toBe("hide");
+    expect(ds.context_window).toBe(1000000);
+    expect(ds.supported_reasoning_levels).toHaveLength(3);
   });
 });
 

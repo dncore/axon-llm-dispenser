@@ -649,6 +649,30 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
 
 .claude-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ok); font-weight: 600; white-space: nowrap; width: 52px; text-align: right; }
 
+/* Codex 可见模型选择弹窗 */
+.picker-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-shrink: 0; }
+.picker-filter { flex: 1; min-width: 0; }
+.picker-counter { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  font-size: 13px;
+  cursor: pointer;
+}
+.picker-row:hover { border-color: var(--accent); }
+.picker-row.on { border-color: var(--accent); background: #eff6ff; }
+.picker-row input[type="checkbox"] { margin: 0; flex-shrink: 0; }
+.picker-row input[type="checkbox"]:disabled { opacity: 0.4; }
+.picker-row:has(input:disabled) { cursor: default; opacity: 0.6; }
+.picker-row:has(input:disabled):hover { border-color: var(--border); }
+.picker-id { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn[disabled] { opacity: 0.5; pointer-events: none; }
+
 /* 自定义下拉 */
 .cselect { position: relative; flex: 1; min-width: 0; }
 .cselect-btn {

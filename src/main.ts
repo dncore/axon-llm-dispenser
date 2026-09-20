@@ -6,7 +6,7 @@ import * as flows from "./flows";
 import { AGENT_CLIS } from "./core/agents";
 import { claudeModelSuffix } from "./core/claude";
 import { buildResolvedModels, isKnownModel } from "./core/models";
-import { CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
+import { CODX_MAX_LISTED_MODELS, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { fallbackAutostartChecked } from "./core/autostart";
 // 开机自启(macOS LaunchAgent / Windows 注册表),状态由系统侧查询,不入 AppConfig。
 import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from "@tauri-apps/plugin-autostart";
@@ -129,7 +129,7 @@ function build(): void {
     ]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-      toolCard("codex", "Codex", ["配置", "刷新模型", "状态", "还原"]),
+      toolCard("codex", "Codex", ["配置", "刷新模型", "选模型", "状态", "还原"]),
       toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "刷新模型", "状态", "还原"]),
       toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
       toolCard("omp", "Oh My Pi", ["配置", "刷新模型", "状态", "还原"]),
@@ -491,6 +491,7 @@ function customSelect(options: string[], initial: string, onChange: (v: string) 
 const ACTION_ICONS: Record<string, string> = {
   "配置": "play",
   "刷新模型": "refresh",
+  "选模型": "sliders",
   "状态": "info",
   "还原": "restore",
   "生成 Token": "key",
@@ -499,6 +500,7 @@ const ACTION_ICONS: Record<string, string> = {
 const ACTION_TITLES: Record<string, string> = {
   "配置": "配置(覆盖现有配置,自动备份)",
   "刷新模型": "仅更新模型列表:只写模型相关配置,不改 base_url / 密钥 / 默认模型(自动备份)",
+  "选模型": `选择 Codex 可见模型(${CODX_MAX_LISTED_MODELS} 个上限;未选中的写 visibility=hide,仅在 models.json 里生效)`,
   "状态": "查看配置状态",
   "还原": "从备份还原",
   "生成 Token": "生成鉴权 Token",
@@ -1023,9 +1025,16 @@ function hideTip(): void {
   tipEl = null;
 }
 
+/** Promise 弹窗(确认/选择)的关闭回调:ESC/批量清理时走各自回调结算,避免 await 永久挂起。 */
+const overlayDismissers = new WeakMap<Element, () => void>();
+
 /** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 *//** 清理所有残留弹窗(自愈:避免旧 overlay 堆积导致假卡死)。 */
 function clearOverlays(): void {
-  document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
+  document.querySelectorAll(".modal-overlay").forEach((el) => {
+    const dismiss = overlayDismissers.get(el);
+    if (dismiss) dismiss(); // Promise 弹窗按「取消」结算,否则其 await 永不返回
+    else el.remove();
+  });
 }
 
 /** 自定义确认弹窗(window.confirm 在 Tauri WebView 下不可用,故自实现)。
@@ -1055,12 +1064,95 @@ function confirmDialogAsync(message: string, okLabel = "确认", cancelLabel = "
     };
     cancel.addEventListener("click", () => close(false));
     ok.addEventListener("click", () => close(true));
+    overlayDismissers.set(overlay, () => close(false));
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) close(false);
     });
     overlay.append(modal);
     document.body.append(overlay);
   });
+}
+
+/**
+ * Codex 可见模型选择弹窗:Codex 客户端模型列表超过上限会渲染错乱,
+ * 让用户在上限内挑选要显示的模型(其余以 visibility="hide" 写入,仍可用 codex -m <id> 指定)。
+ * 返回选中的 id 集合(取消返回 null)。
+ */
+function openCodexModelPicker(ids: string[], preselect: string[], cap: number, defaultModel: string): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    const selected = new Set(preselect);
+    // 展示顺序与 models.json 的写入顺序一致(按 id 排序)
+    const sortedIds = [...ids].sort((a, b) => a.localeCompare(b));
+    const overlay = h("div", { class: "modal-overlay" }, []);
+    const counter = h("span", { class: "picker-counter" }, []);
+    const filter = h("input", { class: "input picker-filter", type: "text", placeholder: "搜索模型…" }, []);
+    const list = h("div", { class: "modal-list picker-list" }, []);
+    const ok = h("button", { class: "btn" }, []);
+    const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
+    const modal = h("div", { class: "modal" }, [
+      h("h3", {}, [`Codex 可见模型(最多 ${cap} 个)`]),
+      h("div", { class: "modal-sub" }, [
+        `Codex 客户端的模型列表超过 ${cap} 个会渲染错乱,请选择要在选择器里显示的模型;` +
+          `未选中的以 visibility="hide" 写入(不出现在选择器,但仍保留在目录里,可作默认模型 / codex -m <id> 指定)。`,
+      ]),
+      h("div", { class: "picker-toolbar" }, [filter, counter]),
+      list,
+    ]);
+
+    const sync = (): void => {
+      counter.textContent = `已选 ${selected.size}/${cap}`;
+      ok.textContent = `确认(${selected.size}/${cap})`;
+      if (selected.size === 0) ok.setAttribute("disabled", "disabled");
+      else ok.removeAttribute("disabled");
+    };
+    const render = (): void => {
+      const q = filter.value.trim().toLowerCase();
+      list.replaceChildren();
+      for (const id of sortedIds) {
+        if (q && !id.toLowerCase().includes(q)) continue;
+        const on = selected.has(id);
+        const box = h("input", { type: "checkbox" }, []) as HTMLInputElement;
+        box.checked = on;
+        box.disabled = !on && selected.size >= cap; // 到达上限后其余条目不可勾选
+        const row = h("label", { class: `picker-row${on ? " on" : ""}` }, [
+          box,
+          h("span", { class: "picker-id" }, [id]),
+          ...(id === defaultModel ? [h("span", { class: "model-row-owner", title: "config.toml 里的默认模型" }, ["默认"])] : []),
+        ]);
+        box.addEventListener("change", () => {
+          if (box.checked) selected.add(id);
+          else selected.delete(id);
+          render(); // 重渲染以同步计数、行态与「已达上限」的可勾选性
+        });
+        list.append(row);
+      }
+      sync();
+    };
+    const close = (result: string[] | null): void => {
+      overlay.remove();
+      resolve(result);
+    };
+    filter.addEventListener("input", render);
+    filter.addEventListener("click", (e) => e.stopPropagation());
+    cancel.addEventListener("click", () => close(null));
+    ok.addEventListener("click", () => close([...selected]));
+    overlayDismissers.set(overlay, () => close(null));
+    modal.append(h("div", { class: "modal-footer" }, [cancel, ok]));
+    overlay.append(modal);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(null);
+    });
+    document.body.append(overlay);
+    render();
+    filter.focus();
+  });
+}
+
+/** 计算 Codex 可见集合:超上限时弹选择框;返回最终集合(用户取消返回 null)。 */
+async function pickCodexListed(ids: string[]): Promise<string[] | null> {
+  const p = await flows.codexListedPlan(config, ids);
+  if (!p.needsChoice) return p.listed;
+  return await openCodexModelPicker(ids, p.listed, CODX_MAX_LISTED_MODELS, p.defaultModel);
 }
 
 /** Claude 模型映射弹窗:为每个角色选模型,按上下文映射表自动加 [1m]/[200k] 后缀。 */
@@ -1496,16 +1588,33 @@ function bind(): void {
 
 
   $("btn-codex-配置").addEventListener("click", () =>
-    confirmDialog("将更新 Codex 的接入配置:写入 config.toml / models.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?", () => {
-      void run("Codex 配置", async () => {
-        readFields();
-        if (!validateProvider()) return;
-        const ids = await ensureModels();
-        if (!ids) return;
-        const r = await flows.configureCodex(config, ids);
-        log(r.lines);
-        void detectAgentConfigOne("codex");
-      });
+    void run("Codex 配置", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      // 可见模型超上限时先让用户在上限内挑选(取消则中止)
+      const listed = await pickCodexListed(ids);
+      if (!listed) return;
+      const ok = await confirmDialogAsync("将更新 Codex 的接入配置:写入 config.toml / models.json 中 provider/鉴权与模型相关字段,保留其它设置;原文件自动备份(.bak-*),确认?");
+      if (!ok) return;
+      const r = await flows.configureCodex(config, ids, listed);
+      log(r.lines);
+      void detectAgentConfigOne("codex");
+    }),
+  );
+
+  // 主动改选(不依赖超上限触发):只写 models.json 的可见性,不动 config.toml
+  $("btn-codex-选模型").addEventListener("click", () =>
+    void run("Codex 选择可见模型", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      const lp = await flows.codexListedPlan(config, ids);
+      const sel = await openCodexModelPicker(ids, lp.listed, CODX_MAX_LISTED_MODELS, lp.defaultModel);
+      if (!sel) return;
+      await applyOnePlan("codex", "Codex", await flows.planRefreshCodex(config, ids, sel));
     }),
   );
 
@@ -1688,6 +1797,20 @@ function bind(): void {
 
   // ---- 刷新模型(仅更新模型列表):先算变更 → 展示确认 → 写入;不改 base_url/密钥/默认模型 ----
 
+  /** 执行单个刷新计划:跳过/无变化直接记日志,否则确认后写入。 */
+  const applyOnePlan = async (agent: string, label: string, p: flows.ModelsRefreshPlan): Promise<void> => {
+    if (p.skip || p.changes.length === 0) {
+      log([`${label}: ${p.skip ?? "模型列表已是最新,无变化"}`]);
+      return;
+    }
+    const ok = await confirmDialogAsync(
+      `仅更新模型列表(${label}):\n${p.changes.join("\n")}\n\n只写模型相关配置,不改 base_url / 密钥 / 默认模型;原文件自动备份(.bak-*),确认?`,
+    );
+    if (!ok) return;
+    log(await flows.applyRefreshPlans([p]));
+    void detectAgentConfigOne(agent);
+  };
+
   /** 单 agent 刷新处理器:拉模型 → 计划 → 确认 → 执行。 */
   const refreshOne =
     (
@@ -1701,20 +1824,26 @@ function bind(): void {
         if (!validateProvider()) return;
         const ids = await ensureModels();
         if (!ids) return;
-        const p = await plan(config, ids);
-        if (p.skip || p.changes.length === 0) {
-          log([`${label}: ${p.skip ?? "模型列表已是最新,无变化"}`]);
-          return;
-        }
-        const ok = await confirmDialogAsync(
-          `仅更新模型列表(${label}):\n${p.changes.join("\n")}\n\n只写模型相关配置,不改 base_url / 密钥 / 默认模型;原文件自动备份(.bak-*),确认?`,
-        );
-        if (!ok) return;
-        log(await flows.applyRefreshPlans([p]));
-        void detectAgentConfigOne(agent);
+        await applyOnePlan(agent, label, await plan(config, ids));
       });
 
-  $("btn-codex-刷新模型").addEventListener("click", refreshOne("codex", "Codex", flows.planRefreshCodex));
+  // Codex 刷新模型:可见模型超上限时先让用户挑选(未接入则直接跳过,不弹选择框)
+  $("btn-codex-刷新模型").addEventListener("click", () =>
+    void run("Codex 刷新模型", async () => {
+      readFields();
+      if (!validateProvider()) return;
+      const ids = await ensureModels();
+      if (!ids) return;
+      const base = await flows.planRefreshCodex(config, ids);
+      if (base.skip) {
+        log([`Codex: ${base.skip}`]);
+        return;
+      }
+      const listed = await pickCodexListed(ids);
+      if (!listed) return;
+      await applyOnePlan("codex", "Codex", await flows.planRefreshCodex(config, ids, listed));
+    }),
+  );
   $("btn-dsh-刷新模型").addEventListener("click", refreshOne("dsh", "dsh", flows.planRefreshDsh));
   $("btn-omp-刷新模型").addEventListener("click", refreshOne("omp", "omp", flows.planRefreshOmp));
   $("btn-reasonix-刷新模型").addEventListener("click", refreshOne("reasonix", "Reasonix", flows.planRefreshReasonix));
@@ -1728,7 +1857,16 @@ function bind(): void {
       if (!validateProvider()) return;
       const ids = await ensureModels();
       if (!ids) return;
-      const plans = await flows.planRefreshAll(config, ids);
+      const basePlans = await flows.planRefreshAll(config, ids);
+      // Codex 可见模型超上限:先让用户在上限内挑选(取消则整个批量刷新中止)
+      let codexListed: string[] | undefined;
+      const codexBase = basePlans.find((p) => p.agent === "Codex");
+      if (codexBase && !codexBase.skip) {
+        const sel = await pickCodexListed(ids);
+        if (!sel) return;
+        codexListed = sel;
+      }
+      const plans = codexListed ? await flows.planRefreshAll(config, ids, codexListed) : basePlans;
       const ready = plans.filter((p) => !p.skip && p.changes.length > 0);
       if (ready.length === 0) {
         log(plans.map((p) => `- ${p.agent}: ${p.skip ?? "无变化"}`));
@@ -1766,11 +1904,16 @@ async function boot(): Promise<void> {
   });
   // 关闭 webview 右键默认菜单(Reload/返回等)
   document.addEventListener("contextmenu", (e) => e.preventDefault());
-  // ESC 只关闭最上层弹窗(确认/编辑弹窗叠加在还原弹窗上时逐层退出)
+  // ESC 只关闭最上层弹窗(确认/编辑弹窗叠加在还原弹窗上时逐层退出);
+  // Promise 弹窗(确认/模型选择)走各自的关闭回调,保证 await 能结算
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       const overlays = document.querySelectorAll(".modal-overlay");
-      overlays[overlays.length - 1]?.remove();
+      const top = overlays[overlays.length - 1] as El | undefined;
+      if (!top) return;
+      const dismiss = overlayDismissers.get(top);
+      if (dismiss) dismiss();
+      else top.remove();
     }
   });
   // 全局 JS 错误显示为 toast(暴露隐藏错误)

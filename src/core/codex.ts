@@ -21,6 +21,12 @@ export const CODX_PROXY_DEFAULT_PORT = 17321;
 export const CODX_PROXY_CONVERT_PATTERN =
   "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
+/** Codex 客户端模型选择器可见条目上限(visibility="list")。超过该数量,客户端渲染的模型
+ * 列表布局会挤压错乱;Codex 官方内置目录也只保留 5 条可见(list)+ 4 条 hide。
+ * 上限之外的模型一律写 visibility="hide":不出现在选择器,但仍留在目录里,
+ * 仍可用 codex -m <slug> / 作默认模型。 */
+export const CODX_MAX_LISTED_MODELS = 8;
+
 /** 转换代理的 base_url 主机与端口(Codex 配置指向它)。默认 localhost 天然绕过系统/环境代理劫持;
  * 被劫持且 localhost 不可达时,Rust 侧自动改用本机 LAN IP 并返回 codexHost。 */
 export function codexProxyBaseUrl(port: number, host = "localhost"): string {
@@ -169,19 +175,76 @@ type CodexCatalogPlan = {
   entries: Record<string, unknown>[];
   added: string[];
   removed: string[];
+  /** 本 provider 条目中可见 / 隐藏的数量。 */
+  visible: number;
+  hidden: number;
 };
+
+export type CodexListedPlan = {
+  /** 计划写入的可见集合(已按上限截断)。 */
+  listed: string[];
+  /** 期望可见数(既有可见 + 目录新增);> 上限即需用户挑选。 */
+  desired: number;
+  /** 期望可见数超上限,需用户挑选(UI 弹选择框)。 */
+  needsChoice: boolean;
+  /** 既有 models.json 中与模型列表同 slug 的可见条目(文件顺序)。 */
+  current: string[];
+  /** 计算预选时用的默认模型(供 UI 标注;与写入 config.toml 的一致)。 */
+  defaultModel: string;
+};
+
+/**
+ * 规划「哪些模型在 Codex 客户端可见」(visibility="list",数量上限 cap):
+ * - 既有目录里同 slug 的可见条目沿用(即用户上次的选择,provider 改名也不丢);
+ * - 目录里没有的新条目默认希望可见(与旧行为一致:新模型自动出现在选择器);
+ * - 二者合计超过上限时 needsChoice=true,listed 为按上限截断的预选集合(默认模型置首);
+ * - 名额只算与模型列表同 slug 的条目:目录里其它来源的条目保持原样,不占名额也不被改写。
+ */
+export function planCodexListed(
+  models: ResolvedModel[],
+  existingJson?: string,
+  opts?: { defaultModel?: string; cap?: number },
+): CodexListedPlan {
+  const cap = opts?.cap ?? CODX_MAX_LISTED_MODELS;
+  const ids = models.map((m) => m.id);
+  const idSet = new Set(ids);
+  const known = new Set<string>();
+  const current: string[] = [];
+  if (existingJson && existingJson.trim()) {
+    try {
+      const data = JSON.parse(existingJson) as { models?: Array<Record<string, unknown>> };
+      for (const m of data.models ?? []) {
+        const slug = typeof m.slug === "string" && m.slug.length > 0 ? m.slug : null;
+        if (!slug) continue;
+        known.add(slug);
+        // 与模型列表同 slug 的既有条目即沿用其可见性(含 provider 改名前的旧条目,改名不该重置用户选择);
+        // visibility 缺失视为 list(与 Codex 内置目录一致),显式 hide 的保持隐藏
+        if (idSet.has(slug) && m.visibility !== "hide") current.push(slug);
+      }
+    } catch {
+      // 现有目录损坏/非法:按无既有目录处理
+    }
+  }
+  const fresh = ids.filter((id) => !known.has(id));
+  const wants = [...current, ...fresh];
+  const dflt = opts?.defaultModel ?? "";
+  // 默认模型置首:只在需要截断时影响预选,不影响 desired
+  const ordered = dflt && wants.includes(dflt) ? [dflt, ...wants.filter((id) => id !== dflt)] : wants;
+  return { listed: ordered.slice(0, Math.max(0, cap)), desired: wants.length, needsChoice: wants.length > cap, current, defaultModel: dflt };
+}
 
 /**
  * 规划 models.json 目录内容:
  * - 本 provider 条目按 description 前缀(`${providerName}: `)归属;已不在模型列表的自家条目移除;
  * - 非本 provider 条目(不含可识别 slug 的、或描述前缀不匹配的)原样保留(兼容用户已有模型目录);
- * - opts.preserveExisting(仅更新模型列表):既有 slug 沿用其 visibility/description,其余字段随模型表刷新。
+ * - opts.preserveExisting(仅更新模型列表):既有 slug 沿用其 description,其余字段随模型表刷新;
+ * - opts.listed:可见集合(visibility="list"),其余自家条目写 hide;缺省按 planCodexListed 推导(带上限)。
  */
 function planCodexCatalog(
   models: ResolvedModel[],
   providerName: string,
   existingJson: string | undefined,
-  opts?: { preserveExisting?: boolean },
+  opts?: { preserveExisting?: boolean; listed?: string[] },
 ): CodexCatalogPlan {
   const newIds = new Set(models.map((m) => m.id));
   const prevSlugs = new Set<string>();
@@ -213,23 +276,31 @@ function planCodexCatalog(
       // 现有目录损坏/非法,忽略
     }
   }
+  const listed = new Set(opts?.listed ?? planCodexListed(models, existingJson).listed);
   const added: string[] = [];
   const entries = models.map((m, i) => {
     const e: Record<string, unknown> = buildCodexEntry(m, providerName, 20 + i);
+    // 可见性由 listed 决定:上限外的自家条目一律 hide(条目仍保留,可用作默认模型/CLI 指定)
+    e.visibility = listed.has(m.id) ? "list" : "hide";
     if (!prevSlugs.has(m.id)) added.push(m.id);
     const prev = prevBySlug.get(m.id);
     if (prev && opts?.preserveExisting) {
-      if (typeof prev.visibility === "string") e.visibility = prev.visibility;
       if (typeof prev.description === "string") e.description = prev.description;
     }
     return e;
   });
-  return { kept, entries, added, removed };
+  const visible = entries.filter((e) => e.visibility === "list").length;
+  return { kept, entries, added, removed, visible, hidden: entries.length - visible };
 }
 
-/** 生成 codex models.json 内容(所有模型 visibility=list)。 */
-export function renderCodexModelsJson(models: ResolvedModel[], providerName: string, existingJson?: string): string {
-  const plan = planCodexCatalog(models, providerName, existingJson);
+/** 生成 codex models.json 内容(listed 之外的自家条目写 hide,上限默认 CODX_MAX_LISTED_MODELS)。 */
+export function renderCodexModelsJson(
+  models: ResolvedModel[],
+  providerName: string,
+  existingJson?: string,
+  listed?: string[],
+): string {
+  const plan = planCodexCatalog(models, providerName, existingJson, { listed });
   return JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
 }
 
@@ -238,20 +309,25 @@ export type CodexCatalogResult = {
   changes: string[];
   added: string[];
   removed: string[];
+  /** 本 provider 条目中可见 / 隐藏的数量。 */
+  visible: number;
+  hidden: number;
   /** 生成内容与现有文件一致(刷新流程据此跳过写入)。 */
   unchanged: boolean;
 };
 
 /**
  * 「仅更新模型列表」用:只生成 models.json 文本与变更摘要(不写盘,不碰 config.toml)。
- * 既有条目沿用其 visibility/description;自家下架条目移除;非本 provider 条目原样保留。
+ * 既有条目沿用其 description;自家下架条目移除;非本 provider 条目原样保留。
+ * listed 之外的自家条目写 hide(可见数量按 CODX_MAX_LISTED_MODELS 上限)。
  */
 export function patchCodexCatalog(
   models: ResolvedModel[],
   providerName: string,
   existingJson: string,
+  listed?: string[],
 ): CodexCatalogResult {
-  const plan = planCodexCatalog(models, providerName, existingJson, { preserveExisting: true });
+  const plan = planCodexCatalog(models, providerName, existingJson, { preserveExisting: true, listed });
   const text = JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
   const unchanged = text === existingJson;
   const changes: string[] = [];
@@ -259,9 +335,9 @@ export function patchCodexCatalog(
     if (plan.added.length > 0) changes.push(`新增 ${plan.added.length} 个模型`);
     if (plan.removed.length > 0) changes.push(`移除 ${plan.removed.length} 个下架条目(${plan.removed.slice(0, 6).join(", ")}${plan.removed.length > 6 ? " …" : ""})`);
     if (plan.kept.length > 0) changes.push(`保留非本 provider 条目 ${plan.kept.length} 条`);
-    if (changes.length === 0) changes.push(`模型元数据已更新(${models.length} 个模型)`);
+    changes.push(`可见 ${plan.visible} 个(上限 ${CODX_MAX_LISTED_MODELS})/ 隐藏 ${plan.hidden} 个`);
   }
-  return { text, changes, added: plan.added, removed: plan.removed, unchanged };
+  return { text, changes, added: plan.added, removed: plan.removed, visible: plan.visible, hidden: plan.hidden, unchanged };
 }
 
 export type CodexStatus = {

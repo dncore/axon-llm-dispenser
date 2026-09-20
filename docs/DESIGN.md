@@ -93,7 +93,10 @@ axon-llm-dispenser/
 ### 5.1 Codex（`~/.codex/`）
 
 - `config.toml`：`model_provider = "<provider>"`、`model = "<默认模型>"`、`model_catalog_json = "~/.codex/models.json"`、`[model_providers.<provider>]`（`base_url`、`wire_api = "responses"`、`requires_openai_auth = false`、`experimental_bearer_token = <api_key>`）。
-- `models.json`：`/models` 结果（+ 手动增删）写成 `{ id, name, context_window, max_tokens, visibility: "list" }`，用 `KNOWN_MODELS` 补元数据。
+- `models.json`：`/models` 结果（+ 手动增删）写成 Codex 目录条目，用 `KNOWN_MODELS` 补元数据；
+  `visibility` 受**可见上限 `CODX_MAX_LISTED_MODELS`（8）**约束：超上限由 `planCodexListed` 给出预选（沿用既有可见 + 目录新增，默认模型置首），
+  UI 弹「Codex 可见模型」选择框让用户在上限内挑，未选中的写 `visibility="hide"`（仍在目录里，可作默认模型 / CLI 指定）。
+  选择结果即 models.json 里的可见性，后续刷新/配置沿用（`planCodexListed.current`），不超上限不再打扰。
 - 写前自动备份 `config.toml.bak-<时间戳>` / `models.json.bak-<时间戳>`。
 
 ### 5.2 Reasonix（`~/.reasonix/`，可 `REASONIX_HOME` 覆盖）

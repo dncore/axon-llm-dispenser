@@ -4,7 +4,7 @@ import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { escapeRegExp, generateToken, timestamp } from "./core/util";
-import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
+import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
 import { patchReasonixProvider, patchReasonixModels, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchGrokConfigToml, patchGrokModels, parseGrokStatus } from "./core/grok";
 import { patchDshProvider, patchDshProviderModels, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
@@ -29,7 +29,7 @@ export type FlowResult = {
 };
 
 /** 默认模型选择:配置的优先;否则优先网关内常见的 deepseek-v4-flash,再退回第一个。 */
-function pickDefaultModel(modelIds: string[], configured?: string): string {
+export function pickDefaultModel(modelIds: string[], configured?: string): string {
   if (configured) return configured;
   if (modelIds.includes("deepseek-v4-flash")) return "deepseek-v4-flash";
   return modelIds[0] ?? "";
@@ -158,11 +158,23 @@ export function dshDeepseekEfforts(id: string): Record<string, string> {
 // Codex
 // ---------------------------------------------------------------------------
 
-export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+/** Codex 可见模型规划(读现有 models.json,供 UI 判断是否需要弹「选模型」)。 */
+export async function codexListedPlan(cfg: bridge.AppConfig, modelIds: string[]): Promise<CodexListedPlan> {
+  const home = await bridge.codexHome();
+  const modelsPath = await bridge.joinPath(home, "models.json");
+  const resolved = buildResolvedModels(modelIds);
+  return planCodexListed(resolved, await bridge.readFileOrEmpty(modelsPath), {
+    // 与写入 config.toml 的默认模型同规则(同一排序后的列表),避免预选与实际默认不一致
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
+  });
+}
+
+export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], listed?: string[]): Promise<FlowResult> {
   const home = await bridge.codexHome();
   const configPath = await bridge.joinPath(home, "config.toml");
   const modelsPath = await bridge.joinPath(home, "models.json");
   const resolved = buildResolvedModels(modelIds);
+  const defaultModel = pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel);
 
   // Codex 转换代理:开启时把 Codex 的 base_url 指向本机代理(独立常驻进程),
   // 代理按模型规则把 Responses 翻译成 Chat 打到网关(网关对 gpt-5.6 家族
@@ -186,21 +198,23 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[]):
     providerName: cfg.provider,
     baseUrl,
     apiKey: cfg.apiKey,
-    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
+    defaultModel,
     modelsJsonPath: modelsPath,
   });
 
   // 内容无变化则不写盘、不产生备份
   const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
-  // 保留现有 models.json 里非当前 provider 的条目(兼容用户已有模型)
+  // 保留现有 models.json 里非当前 provider 的条目(兼容用户已有模型);
+  // 可见集合沿用现有 models.json(用户上次的选择),上限 CODX_MAX_LISTED_MODELS,超出由 UI 先让用户挑选
   const existingModels = await bridge.readFileOrEmpty(modelsPath);
-  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels);
+  const listedSet = listed ?? planCodexListed(resolved, existingModels, { defaultModel }).listed;
+  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels, listedSet);
   const modelsWritten = modelsJson !== existingModels ? await bridge.writeWithBackup(modelsPath, modelsJson) : null;
 
   const lines = [
     `config.toml: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
-    `models.json: ${modelsWritten ? `${modelsWritten.path}(${resolved.length} 个模型)` : "无变化,未写入"}`,
+    `models.json: ${modelsWritten ? `${modelsWritten.path}(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length},上限 ${CODX_MAX_LISTED_MODELS})` : "无变化,未写入"}`,
     ...proxyLines,
   ];
   if (written?.backup) lines.push(`备份: ${written.backup}`);
@@ -237,7 +251,7 @@ export async function codexStatus(): Promise<string[]> {
     `model: ${s.model ?? "(未设置)"}`,
     `model_catalog_json: ${s.modelCatalogJson ?? "(未设置!)"}`,
     `provider 段: ${s.providerConfigured ? "已配置" : "未配置"}`,
-    `models.json: ${s.catalogCount} 条(list ${s.catalogList} / hide ${s.catalogHide})`,
+    `models.json: ${s.catalogCount} 条(list ${s.catalogList} / hide ${s.catalogHide},可见上限 ${CODX_MAX_LISTED_MODELS};超出会让客户端模型列表渲染错乱)`,
     proxyLine,
     `codex CLI: ${cli ?? "未检测到"}`,
   ];
@@ -827,8 +841,9 @@ function noChangePlan(agent: string): ModelsRefreshPlan {
   return { agent, changes: [], apply: async () => [] };
 }
 
-/** Codex:只刷新 ~/.codex/models.json(不碰 config.toml,不启动/不触碰转换代理)。 */
-export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+/** Codex:只刷新 ~/.codex/models.json(不碰 config.toml,不启动/不触碰转换代理)。
+ *  listed 缺省时沿用现有 models.json 的可见集合(上限 CODX_MAX_LISTED_MODELS)。 */
+export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[], listed?: string[]): Promise<ModelsRefreshPlan> {
   const agent = "Codex";
   const home = await bridge.codexHome();
   const configPath = await bridge.joinPath(home, "config.toml");
@@ -837,11 +852,14 @@ export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[]
   if (!new RegExp(`^\\[model_providers\\.${escapeRegExp(cfg.provider)}\\]\\s*$`, "m").test(cfgText)) {
     return skipPlan(agent, `未接入 ${cfg.provider} provider(先跑「配置」)`);
   }
-  const plan = patchCodexCatalog(buildResolvedModels(modelIds), cfg.provider, await bridge.readFileOrEmpty(modelsPath));
+  const resolved = buildResolvedModels(modelIds);
+  const existing = await bridge.readFileOrEmpty(modelsPath);
+  const listedSet = listed ?? planCodexListed(resolved, existing, { defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel) }).listed;
+  const plan = patchCodexCatalog(resolved, cfg.provider, existing, listedSet);
   if (plan.unchanged) return noChangePlan(agent);
   return {
     agent,
-    changes: [`models.json(${modelIds.length} 个模型)`, ...plan.changes],
+    changes: [`models.json(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length})`, ...plan.changes],
     apply: async () => {
       const written = await bridge.writeWithBackup(modelsPath, plan.text);
       return [`models.json 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : ",无变化")];
@@ -961,10 +979,10 @@ export async function planRefreshGrok(cfg: bridge.AppConfig, modelIds: string[])
   };
 }
 
-/** 全部目标的刷新计划(未接入的自动跳过)。 */
-export async function planRefreshAll(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan[]> {
+/** 全部目标的刷新计划(未接入的自动跳过)。codexListed 为 Codex 已确认的可见集合(可选)。 */
+export async function planRefreshAll(cfg: bridge.AppConfig, modelIds: string[], codexListed?: string[]): Promise<ModelsRefreshPlan[]> {
   return [
-    await planRefreshCodex(cfg, modelIds),
+    await planRefreshCodex(cfg, modelIds, codexListed),
     await planRefreshDsh(cfg, modelIds),
     await planRefreshOmp(cfg, modelIds),
     await planRefreshReasonix(cfg, modelIds),
