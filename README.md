@@ -170,6 +170,10 @@ npx tauri build    # 产物 .app/.dmg(macOS) 或便携 zip(Windows, 经 CI)
 
 测试: `npx vitest run`（前端纯函数） + `cd src-tauri && cargo test`（Rust: 配置校验 / 升级分类 / CLI 检测）
 
+UI 冒烟: `npm run smoke:ui` —— 无头 Chrome 打开真实构建产物、mock 掉 Tauri IPC（内存文件系统），
+跑 Codex 可见模型上限的交互断言（超限弹选择框 / 上限内勾选 / 写盘可见性 / ESC 取消 / 不超限不打扰 / 新增模型再次触发）。
+需要系统 Chrome/Chromium（或用 `CHROME_BIN=` 指定）；脚本在 `scripts/ui-smoke/`。
+
 ## 技术栈
 
 - **Tauri v2** + TypeScript (Vite)，vanilla UI

@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "smoke:ui": "npm run build && node scripts/ui-smoke/run.mjs",
     "sync:models": "node scripts/sync-model-meta.mjs",
     "check:models": "node scripts/sync-model-meta.mjs --check"
   },
