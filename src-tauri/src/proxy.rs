@@ -65,9 +65,19 @@ fn message_content_to_chat(content: &Value) -> Value {
     let mut parts: Vec<Value> = Vec::new();
     for p in &arr {
         match p.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-            "input_text" => {
+            // output_text/summary_text 出现在回放的历史里:Codex 把上一轮 assistant
+            // 消息按 Responses 输出线形(output_text parts)原样回传;只认 input_text
+            // 会把整段历史丢成空 content(模型看不到自己说过什么,严格上游还会拒收
+            // 空 assistant 消息)。
+            "input_text" | "output_text" | "summary_text" => {
                 if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                     parts.push(json!({"type": "text", "text": t}));
+                }
+            }
+            "refusal" => {
+                // 历史里的拒答文案当正文带入(chat 无 refusal 概念)
+                if let Some(r) = p.get("refusal").and_then(|v| v.as_str()) {
+                    parts.push(json!({"type": "text", "text": r}));
                 }
             }
             "input_image" => {
@@ -117,9 +127,7 @@ fn responses_tool_to_chat_tool(tool: &Value) -> Option<Value> {
             if let Some(d) = tool.get("description") {
                 f.insert("description".into(), d.clone());
             }
-            if let Some(p) = tool.get("parameters") {
-                f.insert("parameters".into(), p.clone());
-            }
+            f.insert("parameters".into(), with_object_type(tool.get("parameters")));
             if let Some(s) = tool.get("strict") {
                 f.insert("strict".into(), s.clone());
             }
@@ -159,6 +167,140 @@ fn responses_tool_to_chat_tool(tool: &Value) -> Option<Value> {
     }
 }
 
+/// 工具 schema 兜底:若干上游要求 `parameters` 带顶层 `type:"object"`。
+/// 缺省/空 schema 补最小对象;已有 type 或非对象 schema 原样透传。
+fn with_object_type(p: Option<&Value>) -> Value {
+    match p {
+        None | Some(Value::Null) => json!({"type": "object"}),
+        Some(Value::Object(m)) => {
+            if m.contains_key("type") {
+                Value::Object(m.clone())
+            } else {
+                let mut m = m.clone();
+                m.insert("type".into(), json!("object"));
+                Value::Object(m)
+            }
+        }
+        Some(other) => other.clone(),
+    }
+}
+
+/// tool_choice 归一化为 chat 形态。字符串形 auto/none/required 原样;对象形:
+/// Responses 扁平 `{"type":"function","name":…}` 要嵌进 chat 的 `function` 子对象,
+/// Cursor 系 `{"type":"tool"|"any"}` → "required"。特别注意 `{"type":"none"}` 不能
+/// 降级成 auto —— 那会把客户端明确禁用的工具重新打开。
+fn tool_choice_to_chat(tc: &Value) -> Value {
+    if let Some(s) = tc.as_str() {
+        return match s {
+            "auto" | "none" | "required" => json!(s),
+            _ => json!("auto"),
+        };
+    }
+    match tc.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "auto" | "none" => json!(tc.get("type").and_then(|v| v.as_str()).unwrap_or("auto")),
+        "required" | "tool" | "any" => json!("required"),
+        "function" => {
+            let name = tc
+                .get("function")
+                .and_then(|v| v.get("name"))
+                .or_else(|| tc.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                json!("required")
+            } else {
+                json!({"type": "function", "function": {"name": name}})
+            }
+        }
+        _ => json!("auto"),
+    }
+}
+
+/// function_call_output 的 output(string 或 parts 数组)→ chat tool 消息 content。
+/// 图片 part 转 image_url,文本类 part 转 text;空 parts 退化为空字符串。
+fn tool_output_to_chat(output: Option<&Value>) -> Value {
+    match output {
+        Some(Value::Array(parts)) => {
+            let mut chat_parts: Vec<Value> = Vec::new();
+            for p in parts {
+                match p.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "input_image" | "output_image" | "image_url" => {
+                        let url = p
+                            .get("image_url")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| p.get("data").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        chat_parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+                    }
+                    _ => {
+                        if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                            chat_parts.push(json!({"type": "text", "text": t}));
+                        }
+                    }
+                }
+            }
+            if chat_parts.is_empty() {
+                Value::String(String::new())
+            } else {
+                json!(chat_parts)
+            }
+        }
+        Some(Value::String(s)) => Value::String(s.clone()),
+        Some(v) => Value::String(v.to_string()),
+        None => Value::String(String::new()),
+    }
+}
+
+/// system 消息的文本(用于"instructions 是否已在输入里"比较;content 可能是字符串或 parts)。
+fn system_message_text(m: &Value) -> Option<String> {
+    if m.get("role").and_then(|v| v.as_str()) != Some("system") {
+        return None;
+    }
+    Some(match m.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    })
+}
+
+/// Responses 的 `response_format` / `text.format` → chat `response_format`。
+/// json_schema 在 Responses 官方线形里是扁平的(name/schema/strict 直接挂在 format
+/// 对象上;Codex 的结构化输出即 text.format 扁平形),chat 要求嵌进 `json_schema`
+/// 子对象;两种嵌套都接受(嵌套形优先)。json_object / text 两边同构,原样带。
+fn response_format_to_chat(body: &Value) -> Option<Value> {
+    let raw = body
+        .get("response_format")
+        .filter(|v| v.is_object())
+        .or_else(|| body.pointer("/text/format").filter(|v| v.is_object()))?;
+    match raw.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "json_schema" => {
+            let src = raw.get("json_schema").filter(|v| v.is_object()).unwrap_or(raw);
+            let schema = src.get("schema")?; // 缺 schema 构不成合法 chat 请求 → 不映射
+            // chat 校验 name 非空(Codex guardian 的 text.format 就不带 name;
+            // 名字只用于展示,对约束无影响)
+            let name = src
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("final_output");
+            let mut js = serde_json::Map::new();
+            js.insert("name".into(), json!(name));
+            js.insert("schema".into(), schema.clone());
+            if let Some(strict) = src.get("strict") {
+                js.insert("strict".into(), strict.clone());
+            }
+            Some(json!({"type": "json_schema", "json_schema": js}))
+        }
+        "json_object" | "text" | "" => Some(raw.clone()),
+        // 未知类型:宁可不带,也不把畸形参数发给上游换 400
+        _ => None,
+    }
+}
+
 /// Responses 请求体 → Chat Completions 请求体。
 pub fn responses_to_chat(body: &Value) -> Value {
     let mut out = serde_json::Map::new();
@@ -169,54 +311,106 @@ pub fn responses_to_chat(body: &Value) -> Value {
 
     let mut messages: Vec<Value> = Vec::new();
 
-    // instructions(顶层)→ system 消息
-    if let Some(inst) = body.get("instructions").and_then(|v| v.as_str()) {
-        if !inst.trim().is_empty() {
-            messages.push(json!({"role": "system", "content": inst}));
+    // input:item 数组(标准)或纯字符串(单轮 user);两者皆空时回退旧 prompt 字段
+    let mut input_items: Vec<Value> = Vec::new();
+    let mut input_str = String::new();
+    match body.get("input") {
+        Some(Value::Array(items)) => input_items = items.clone(),
+        Some(Value::String(s)) => input_str = s.clone(),
+        _ => {}
+    }
+    if input_items.is_empty() && input_str.is_empty() {
+        match body.get("prompt") {
+            Some(Value::Array(items)) => input_items = items.clone(),
+            Some(Value::String(s)) => input_str = s.clone(),
+            _ => {}
         }
     }
+    if !input_str.is_empty() {
+        messages.push(json!({"role": "user", "content": input_str}));
+    }
 
-    if let Some(input) = body.get("input").and_then(|v| v.as_array()) {
-        for item in input {
-            let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match typ {
-                "message" => {
-                    let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                    let content = item.get("content").cloned().unwrap_or_else(|| json!([]));
-                    let chat_content = message_content_to_chat(&content);
-                    messages.push(json!({"role": role_to_chat_role(role), "content": chat_content}));
+    for item in &input_items {
+        let typ = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match typ {
+            "message" => {
+                let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                let content = item.get("content").cloned().unwrap_or_else(|| json!([]));
+                let chat_content = message_content_to_chat(&content);
+                messages.push(json!({"role": role_to_chat_role(role), "content": chat_content}));
+            }
+            "function_call" => {
+                let call_id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // 回放还原:响应方向把 chat 扁平名 `ns__func` 拆成 name + namespace
+                // 两项(见 chat_message_to_output_items),Codex 回放时原样带回;
+                // 这里必须拼回扁平名,否则上游 tools 列表里没有该名字(MCP 工具的
+                // 第二轮调用会 400/历史错乱)。
+                let raw_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = match item.get("namespace").and_then(|v| v.as_str()) {
+                    Some(ns) if !ns.is_empty() && !raw_name.is_empty() => {
+                        format!("{ns}__{raw_name}")
+                    }
+                    _ => raw_name.to_string(),
+                };
+                // arguments 正常是 JSON 字符串(原样透传,不再序列化 —— 否则 chat 上游
+                // 收到 "\"{}\"" 双重编码);少数客户端发对象时序列化成字符串。
+                let arguments = item
+                    .get("arguments")
+                    .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                    .unwrap_or_else(|| "{}".into());
+                let tool_call = json!({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments}
+                });
+                // 并行调用:Codex 把上一轮的 N 个 function_call 作为连续 item 回放;
+                // chat 语义是「一条 assistant 消息 + N 个 tool_calls」,且严格上游
+                // 拒收连续 assistant 回合 → 上一条是 assistant 时并入其 tool_calls。
+                let mut merged = false;
+                if let Some(last) = messages.last_mut().and_then(|m| m.as_object_mut()) {
+                    if last.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                        match last.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+                            Some(arr) => arr.push(tool_call.clone()),
+                            None => {
+                                last.insert("tool_calls".into(), json!([tool_call.clone()]));
+                            }
+                        }
+                        merged = true;
+                    }
                 }
-                "function_call" => {
-                    let call_id = item
-                        .get("call_id")
-                        .or_else(|| item.get("id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let arguments = item
-                        .get("arguments")
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "{}".into());
+                if !merged {
                     messages.push(json!({
                         "role": "assistant",
                         "content": Value::Null,
-                        "tool_calls": [{
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": arguments}
-                        }]
+                        "tool_calls": [tool_call]
                     }));
                 }
-                "function_call_output" => {
-                    let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let output = item.get("output").map(|v| {
-                        v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())
-                    }).unwrap_or_else(|| String::new());
-                    messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": output}));
-                }
-                "reasoning" | "additional_tools" => { /* 丢弃:chat 无对应内容项 */ }
-                _ => {}
             }
+            "function_call_output" => {
+                let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                let output = tool_output_to_chat(item.get("output"));
+                messages.push(json!({"role": "tool", "tool_call_id": call_id, "content": output}));
+            }
+            "reasoning" | "additional_tools" => { /* 丢弃:chat 无对应内容项 */ }
+            _ => {}
+        }
+    }
+
+    // instructions(顶层)→ 前置 system。与对照实现"输入里有 system 消息就跳过"不同,
+    // 这里只在已存在**同文**system 消息时才跳过:Codex 的 base instructions 只走
+    // instructions 字段,"存在 system 消息"并不等于"指令已在输入里",无条件跳过会把
+    // 整个系统提示丢掉;而纯重复文案(客户端把 instructions 又抄进 input)才是要避免的。
+    if let Some(inst) = body.get("instructions").and_then(|v| v.as_str()) {
+        let inst = inst.trim();
+        let already = messages
+            .iter()
+            .any(|m| system_message_text(m).as_deref() == Some(inst));
+        if !inst.is_empty() && !already {
+            messages.insert(0, json!({"role": "system", "content": inst}));
         }
     }
 
@@ -262,9 +456,14 @@ pub fn responses_to_chat(body: &Value) -> Value {
         }
     }
 
-    // tool_choice 透传(Responses 与 chat 同构:{"type":"function","function":{...}})
+    // tool_choice 归一化(Responses 扁平形 → chat 嵌套形;none 不得降级为 auto)
     if let Some(tc) = body.get("tool_choice") {
-        out.insert("tool_choice".into(), tc.clone());
+        out.insert("tool_choice".into(), tool_choice_to_chat(tc));
+    }
+
+    // 结构化输出:text.format(Codex 结构化输出/guardian 走这条)或 response_format
+    if let Some(rf) = response_format_to_chat(body) {
+        out.insert("response_format".into(), rf);
     }
 
     // max_output_tokens → max_completion_tokens(gpt-5/o 系)或 max_tokens
@@ -291,7 +490,8 @@ pub fn responses_to_chat(body: &Value) -> Value {
         }
     }
 
-    for k in ["temperature", "top_p", "stream"] {
+    // parallel_tool_calls / user 同名透传(Codex 必发 parallel_tool_calls)
+    for k in ["temperature", "top_p", "stream", "parallel_tool_calls", "user"] {
         if let Some(v) = body.get(k) {
             out.insert(k.into(), v.clone());
         }
@@ -347,9 +547,21 @@ fn chat_usage_to_responses(usage: Option<&Value>) -> Value {
     })
 }
 
+/// 未完成原因(Responses 的 incomplete_details.reason)。Codex 只在
+/// response.incomplete 事件上读它并向上抛错("Incomplete response returned,
+/// reason: ..."),response.completed 的 status 字段它不解析。
+fn incomplete_reason(finish_reason: Option<&str>) -> Option<&'static str> {
+    match finish_reason {
+        Some("length") => Some("max_output_tokens"),
+        Some("content_filter") => Some("content_filter"),
+        // refusal(拒答)也报 incomplete,但没有 details.reason(对齐 OpenAI 线形)
+        _ => None,
+    }
+}
+
 fn finish_status(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
-        Some("length") => "incomplete",
+        Some("length") | Some("content_filter") | Some("refusal") => "incomplete",
         _ => "completed",
     }
 }
@@ -361,8 +573,23 @@ pub fn chat_message_to_output_items(
     start: usize,
 ) -> Vec<Value> {
     let mut out = Vec::new();
+    // 思考内容(deepseek 系 message.reasoning_content / 部分网关 message.reasoning):
+    // 转成 reasoning item,按 OpenAI 原生线形排在 message 之前。
+    let think = message
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .or_else(|| message.get("reasoning").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if !think.is_empty() {
+        out.push(json!({
+            "type": "reasoning",
+            "id": next_id("rs"),
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": think}]
+        }));
+    }
     let content = message.get("content");
-    let text = match content {
+    let mut text = match content {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(parts)) => parts
             .iter()
@@ -371,6 +598,8 @@ pub fn chat_message_to_output_items(
             .join(""),
         _ => String::new(),
     };
+    // 拒答文案并入正文(同流式:Codex 没有 refusal content part 变体)
+    text.push_str(message.get("refusal").and_then(|v| v.as_str()).unwrap_or(""));
     if !text.is_empty() {
         out.push(json!({
             "type": "message",
@@ -435,7 +664,7 @@ pub fn chat_to_responses_json(chat: &Value, model: &str) -> Value {
             "output": []
         });
     }
-    json!({
+    let mut out = json!({
         "id": next_id("resp"),
         "object": "response",
         "created_at": chrono_ts(),
@@ -443,7 +672,11 @@ pub fn chat_to_responses_json(chat: &Value, model: &str) -> Value {
         "model": model,
         "output": output,
         "usage": chat_usage_to_responses(chat.get("usage"))
-    })
+    });
+    if let Some(reason) = incomplete_reason(finish) {
+        out["incomplete_details"] = json!({"reason": reason});
+    }
+    out
 }
 
 fn chrono_ts() -> u64 {
@@ -461,6 +694,37 @@ fn sse_event(ev: &str, data: Value) -> Bytes {
     Bytes::from(format!("event: {ev}\ndata: {}\n\n", data.to_string()))
 }
 
+/// 关掉进行中的 reasoning item:返回 (事件类型, data) 列表与终态 item。
+/// async_stream 的生成器里无法在闭包中 yield,故收尾事件收集后由调用方逐条发出。
+/// 线形(空 summary 数组、summary_index、summary_text part)按 Codex 严格解析要求。
+fn close_reasoning(item: Value, idx: usize, text: &str) -> (Vec<(&'static str, Value)>, Value) {
+    let mut done = item.clone();
+    done["status"] = json!("completed");
+    done["summary"] = json!([{"type": "summary_text", "text": text}]);
+    let events = vec![
+        (
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done", "item_id": item["id"],
+                "output_index": idx, "summary_index": 0, "text": text
+            }),
+        ),
+        (
+            "response.reasoning_summary_part.done",
+            json!({
+                "type": "response.reasoning_summary_part.done", "item_id": item["id"],
+                "output_index": idx, "summary_index": 0,
+                "part": {"type": "summary_text", "text": text}
+            }),
+        ),
+        (
+            "response.output_item.done",
+            json!({"type": "response.output_item.done", "output_index": idx, "item": done.clone()}),
+        ),
+    ];
+    (events, done)
+}
+
 /// 把上游 chat SSE 字节流转换为 responses SSE 事件流。
 pub fn transform_chat_sse<S>(input: S, model: String) -> impl Stream<Item = Bytes>
 where
@@ -472,11 +736,19 @@ where
     stream! {
         let mut buf = String::new();
         let mut started = false;
-        // 组装中的 items
-        let mut output_items: Vec<Value> = Vec::new();
+        // 组装中的 items。每个 item 在"首次出现"时分配 output_index(单调递增),
+        // 收尾时按其排序 —— 不能用 output_items.len() 现算:文字 item 挂起未入列时,
+        // 工具调用算出的 added/delta 索引会和最终 done 索引错位。
+        let mut next_index = 0usize; // 下一个待分配的 output_index
+        let mut output_items: Vec<(usize, Value)> = Vec::new(); // (output_index, 终态 item)
+        let mut reasoning_item: Option<Value> = None; // active reasoning item
+        let mut reasoning_idx = 0usize;
+        let mut reasoning_buf = String::new();
         let mut text_item: Option<Value> = None; // active message item
+        let mut text_idx = 0usize;
         let mut text_buf = String::new();
         let mut tool_items: HashMap<usize, Value> = HashMap::new(); // chat index -> function_call item
+        let mut tool_idx: HashMap<usize, usize> = HashMap::new(); // chat index -> output_index
         let mut tool_args: HashMap<usize, String> = HashMap::new();
         let mut finish_reason: Option<String> = None;
         let mut usage: Option<Value> = None;
@@ -489,9 +761,9 @@ where
         while let Some(chunk) = input.next().await {
             match chunk {
                 Err(e) => {
-                    // 上游 SSE 流中断:设置 failed,并 break 落到收尾,确保响应流
-                    // 总以 response.completed 结束(否则 codex 报
-                    // "stream closed before response.completed",见 Windows 反馈)。
+                    // 上游 SSE 流中断:设置 failed,并 break 落到收尾 —— 收尾恒发终点事件
+                    // (这里是 response.failed,见下),避免 codex 报
+                    // "stream closed before response.completed"(Windows 反馈)。
                     failed = Some(json!({"type": "upstream_error", "message": format!("upstream stream error: {e}")}));
                     break;
                 }
@@ -531,31 +803,88 @@ where
                         }
                         let Some(delta) = choice.get("delta") else { continue };
 
-                        // 文本增量
-                        if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
-                            if !t.is_empty() {
-                                if text_item.is_none() {
-                                    let item = json!({
-                                        "type": "message", "id": next_id("msg"), "status": "in_progress",
-                                        "role": "assistant", "content": []
-                                    });
-                                    text_item = Some(item.clone());
-                                    yield sse_event("response.output_item.added", json!({
-                                        "type": "response.output_item.added", "output_index": output_items.len(),
-                                        "item": item
-                                    }));
-                                    yield sse_event("response.content_part.added", json!({
-                                        "type": "response.content_part.added", "item_id": item["id"], "output_index": output_items.len(),
-                                        "content_index": 0,
-                                        "part": {"type": "output_text", "text": "", "annotations": []}
-                                    }));
-                                }
-                                text_buf.push_str(t);
-                                yield sse_event("response.output_text.delta", json!({
-                                    "type": "response.output_text.delta", "item_id": text_item.as_ref().unwrap()["id"],
-                                    "output_index": output_items.len(), "content_index": 0, "delta": t
+                        // 思考增量(deepseek 系 reasoning_content / 部分网关 reasoning)。
+                        // Codex 只在带 summary_index 的 reasoning_summary_* 事件上取内容,
+                        // 其余字段照 OpenAI 原生线形(空 summary 数组是硬要求)。
+                        let think = delta
+                            .get("reasoning_content")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| delta.get("reasoning").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        if !think.is_empty() {
+                            if reasoning_item.is_none() {
+                                let item = json!({
+                                    "type": "reasoning", "id": next_id("rs"),
+                                    "status": "in_progress", "summary": []
+                                });
+                                reasoning_idx = next_index;
+                                next_index += 1;
+                                reasoning_item = Some(item.clone());
+                                yield sse_event("response.output_item.added", json!({
+                                    "type": "response.output_item.added", "output_index": reasoning_idx, "item": item
+                                }));
+                                yield sse_event("response.reasoning_summary_part.added", json!({
+                                    "type": "response.reasoning_summary_part.added",
+                                    "item_id": item["id"], "output_index": reasoning_idx, "summary_index": 0,
+                                    "part": {"type": "summary_text", "text": ""}
                                 }));
                             }
+                            reasoning_buf.push_str(think);
+                            yield sse_event("response.reasoning_summary_text.delta", json!({
+                                "type": "response.reasoning_summary_text.delta",
+                                "item_id": reasoning_item.as_ref().unwrap()["id"],
+                                "output_index": reasoning_idx, "summary_index": 0, "delta": think
+                            }));
+                        }
+
+                        // 正文增量:content + refusal(上游拒答文案)都按正文处理。
+                        // Codex 的 ContentItem 没有 refusal 变体(只有 input/output_text
+                        // 等),发 refusal part 会让整个 message item 反序列化失败被静默
+                        // 丢弃;当正文带出去用户至少能看到拒答内容。
+                        let mut chunk_text = String::new();
+                        chunk_text.push_str(delta.get("content").and_then(|v| v.as_str()).unwrap_or(""));
+                        chunk_text.push_str(delta.get("refusal").and_then(|v| v.as_str()).unwrap_or(""));
+                        let text_delta = chunk_text.as_str();
+                        let has_tools = delta
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+
+                        // 其它内容到来时先关掉 reasoning item:OpenAI 原生流就是这个顺序,
+                        // 客户端按该顺序挂载(参考实现同样如此)。
+                        if reasoning_item.is_some() && (!text_delta.is_empty() || has_tools) {
+                            let (evs, done) = close_reasoning(reasoning_item.take().unwrap(), reasoning_idx, &reasoning_buf);
+                            for (ev, data) in evs {
+                                yield sse_event(ev, data);
+                            }
+                            output_items.push((reasoning_idx, done));
+                        }
+
+                        if !text_delta.is_empty() {
+                            if text_item.is_none() {
+                                let item = json!({
+                                    "type": "message", "id": next_id("msg"), "status": "in_progress",
+                                    "role": "assistant", "content": []
+                                });
+                                text_idx = next_index;
+                                next_index += 1;
+                                text_item = Some(item.clone());
+                                yield sse_event("response.output_item.added", json!({
+                                    "type": "response.output_item.added", "output_index": text_idx,
+                                    "item": item
+                                }));
+                                yield sse_event("response.content_part.added", json!({
+                                    "type": "response.content_part.added", "item_id": item["id"], "output_index": text_idx,
+                                    "content_index": 0,
+                                    "part": {"type": "output_text", "text": "", "annotations": []}
+                                }));
+                            }
+                            text_buf.push_str(text_delta);
+                            yield sse_event("response.output_text.delta", json!({
+                                "type": "response.output_text.delta", "item_id": text_item.as_ref().unwrap()["id"],
+                                "output_index": text_idx, "content_index": 0, "delta": text_delta
+                            }));
                         }
 
                         // 工具调用增量
@@ -576,10 +905,12 @@ where
                                         item["namespace"] = json!(name[..sep].to_string());
                                     }
                                     tool_items.insert(idx, item.clone());
+                                    tool_idx.insert(idx, next_index);
+                                    next_index += 1;
                                     tool_args.insert(idx, String::new());
                                     yield sse_event("response.output_item.added", json!({
                                         "type": "response.output_item.added",
-                                        "output_index": output_items.len() + tool_items.len() - 1,
+                                        "output_index": tool_idx[&idx],
                                         "item": item
                                     }));
                                 }
@@ -588,7 +919,7 @@ where
                                     yield sse_event("response.function_call_arguments.delta", json!({
                                         "type": "response.function_call_arguments.delta",
                                         "item_id": tool_items[&idx]["id"],
-                                        "output_index": output_items.len() + tool_items.len() - 1,
+                                        "output_index": tool_idx[&idx],
                                         "arguments": args
                                     }));
                                 }
@@ -602,14 +933,21 @@ where
         }
 
         // 收尾:完成挂起 items
+        if let Some(item) = reasoning_item.take() {
+            let (evs, done) = close_reasoning(item, reasoning_idx, &reasoning_buf);
+            for (ev, data) in evs {
+                yield sse_event(ev, data);
+            }
+            output_items.push((reasoning_idx, done));
+        }
         if let Some(mut item) = text_item.take() {
             item["status"] = json!("completed");
             item["content"] = json!([{"type": "output_text", "text": text_buf, "annotations": []}]);
             yield sse_event("response.content_part.done", json!({
-                "type": "response.content_part.done", "item_id": item["id"], "output_index": output_items.len(), "content_index": 0
+                "type": "response.content_part.done", "item_id": item["id"], "output_index": text_idx, "content_index": 0
             }));
-            yield sse_event("response.output_item.done", json!({"type": "response.output_item.done", "output_index": output_items.len(), "item": item}));
-            output_items.push(item);
+            yield sse_event("response.output_item.done", json!({"type": "response.output_item.done", "output_index": text_idx, "item": item}));
+            output_items.push((text_idx, item));
         }
         let mut idxs: Vec<usize> = tool_items.keys().cloned().collect();
         idxs.sort_unstable();
@@ -618,25 +956,47 @@ where
                 item["status"] = json!("completed");
                 item["arguments"] = json!(tool_args.remove(&idx).unwrap_or_default());
                 yield sse_event("response.output_item.done", json!({
-                    "type": "response.output_item.done", "output_index": output_items.len(), "item": item
+                    "type": "response.output_item.done", "output_index": tool_idx[&idx], "item": item
                 }));
-                output_items.push(item);
+                output_items.push((tool_idx[&idx], item));
             }
         }
+        // 终态 output 按 output_index 排序(首次出现顺序)
+        output_items.sort_by_key(|(i, _)| *i);
+        let output: Vec<Value> = output_items.into_iter().map(|(_, v)| v).collect();
 
-        let status = if failed.is_some() { "failed" } else { finish_status(finish_reason.as_deref()) };
         let mut resp = json!({
-            "id": meta_id, "object": "response", "created_at": chrono_ts(), "status": status,
-            "model": model, "output": output_items
+            "id": meta_id, "object": "response", "created_at": chrono_ts(), "status": "completed",
+            "model": model, "output": output
         });
         // usage 恒用完整默认(缺失时补 input_tokens 等全字段):部分上游(如 grok/xAI)的
         // chat SSE 不返回 usage,若不补全,桌面端(内嵌 codex)解析 response.completed 会报
         // "missing field `input_tokens`"。
         resp["usage"] = chat_usage_to_responses(usage.as_ref());
-        if let Some(err) = failed.take() {
-            resp["error"] = err;
-        }
-        yield sse_event("response.completed", json!({"type": "response.completed", "response": resp}));
+        // 终点事件三选一(Codex 只解析事件类型,resp.status 鲜有消费):
+        // - 上游流中断/带内错误 → response.failed:Codex 在该事件上读 error 并映射成
+        //   可重试/上下文超限等类型;沿用 response.completed 会被静默当成正常空回答。
+        // - finish_reason=length/content_filter → response.incomplete:Codex 在该事件上
+        //   读 incomplete_details.reason 并向上抛错。
+        // - 其余 → response.completed。
+        let terminal = match failed.take() {
+            Some(err) => {
+                resp["status"] = json!("failed");
+                resp["error"] = err;
+                "response.failed"
+            }
+            None => match finish_status(finish_reason.as_deref()) {
+                "incomplete" => {
+                    resp["status"] = json!("incomplete");
+                    if let Some(reason) = incomplete_reason(finish_reason.as_deref()) {
+                        resp["incomplete_details"] = json!({"reason": reason});
+                    }
+                    "response.incomplete"
+                }
+                _ => "response.completed",
+            },
+        };
+        yield sse_event(terminal, json!({"type": terminal, "response": resp}));
     }
 }
 
@@ -794,6 +1154,19 @@ async fn handle_responses(
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let convert = should_convert(&model, &st.convert_pattern);
     let stream_req = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // 转换路径无状态、不保存响应:客户端若靠 previous_response_id 续写,静默忽略会变成
+    // "丢上下文继续生成"的静默错误 —— 直接 400(透传路径由上游原生处理,不拦)。
+    if convert {
+        if let Some(prev) = body.get("previous_response_id").and_then(|v| v.as_str()) {
+            if !prev.is_empty() {
+                return json_err(
+                    400,
+                    "previous_response_id is not supported by this proxy (stateless): send the full conversation in `input`".to_string(),
+                );
+            }
+        }
+    }
 
     let (target, out_body) = if convert {
         (format!("{}/chat/completions", st.upstream_base_url.trim_end_matches('/')), responses_to_chat(&body))
@@ -1359,6 +1732,8 @@ mod tests {
         assert_eq!(msgs[0]["role"], "assistant");
         assert_eq!(msgs[0]["tool_calls"][0]["id"], "fc_1");
         assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "exec_command");
+        // arguments 原样透传,不得双重编码(上游必须收到 {…} 而不是 "{…}")
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["arguments"], "{\"cmd\":\"ls\"}");
         assert_eq!(msgs[1]["role"], "tool");
         assert_eq!(msgs[1]["tool_call_id"], "fc_1");
         assert_eq!(msgs[1]["content"], "file1");
@@ -1547,5 +1922,436 @@ mod tests {
         assert!(text.contains("event: response.function_call_arguments.delta"));
         assert!(text.contains("function_call"));
         assert!(text.contains("\"status\":\"completed\""));
+    }
+
+    #[test]
+    fn history_assistant_output_text_parts_survive() {
+        // Codex 回放历史时 assistant 消息的 part 是 output_text(非 input_text),
+        // 丢它 = 模型看不到自己上一轮说过什么。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "prev answer"}]}
+            ]
+        });
+        let chat = responses_to_chat(&body);
+        let msgs = chat["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "prev answer");
+    }
+
+    #[test]
+    fn parallel_function_calls_merge_into_one_assistant_message() {
+        // 并行工具调用回放:连续 function_call item → 一条 assistant + N 个 tool_calls
+        // (连续 assistant 回合会被严格上游拒收)。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "1"},
+                {"type": "function_call_output", "call_id": "c2", "output": "2"}
+            ]
+        });
+        let chat = responses_to_chat(&body);
+        let msgs = chat["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4); // user, assistant(2 tool_calls), tool, tool
+        let calls = msgs[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "c1");
+        assert_eq!(calls[0]["function"]["name"], "a");
+        assert_eq!(calls[1]["id"], "c2");
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "c1");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "c2");
+    }
+
+    #[test]
+    fn namespaced_function_call_rejoins_flat_name_on_replay() {
+        // 响应方向:chat 名 mcp__git__status → {name:"status", namespace:"mcp__git"}
+        let chat = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "mcp__git__status", "arguments": "{}"}}
+                ]},
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let resp = chat_to_responses_json(&chat, "gpt-5.6-sol");
+        let item = &resp["output"][0];
+        assert_eq!(item["name"], "status");
+        assert_eq!(item["namespace"], "mcp__git");
+        // 回放方向:Codex 原样带回 {name, namespace},必须拼回扁平名,否则上游无此工具
+        let replay = responses_to_chat(&json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                item.clone(),
+                {"type": "function_call_output", "call_id": item["call_id"], "output": "ok"}
+            ]
+        }));
+        let msgs = replay["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "mcp__git__status");
+        assert_eq!(msgs[1]["role"], "tool");
+    }
+
+    #[tokio::test]
+    async fn in_band_error_emits_response_failed() {
+        // 网关以 HTTP 200 + {"error":...} 带内拒绝:终点事件必须是 response.failed,
+        // Codex 才会按 error.code 呈现/重试(response.completed 的 status 它不解析)。
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"error\":{\"type\":\"upstream_error\",\"code\":\"rate_limit_exceeded\",\"message\":\"quota\"}}\n\n")),
+        ];
+        let s = transform_chat_sse(iter(chunks), "gpt-5.6-luna".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("event: response.failed"));
+        assert!(!text.contains("event: response.completed"));
+        assert!(text.contains("\"status\":\"failed\""));
+        assert!(text.contains("rate_limit_exceeded"));
+    }
+
+    /// 把 SSE 文本解析成事件 JSON 列表(serde_json::Value 键按字典序序列化,
+    /// 故不用脆弱的键序字符串断言)。
+    fn parse_sse_events(text: &str) -> Vec<Value> {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+            .collect()
+    }
+
+    #[test]
+    fn structured_output_format_maps_to_chat() {
+        // Codex 的 text.format:扁平 json_schema(name 可缺省)
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "text": {"format": {"type": "json_schema", "name": "out", "strict": true, "schema": {"type": "object"}}}
+        });
+        let chat = responses_to_chat(&body);
+        assert_eq!(chat["response_format"]["type"], "json_schema");
+        assert_eq!(chat["response_format"]["json_schema"]["name"], "out");
+        assert_eq!(chat["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(chat["response_format"]["json_schema"]["schema"]["type"], "object");
+        // name 缺失 → 补默认(chat 校验 name 非空)
+        let unnamed = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "text": {"format": {"type": "json_schema", "schema": {"type": "object"}}}
+        });
+        assert_eq!(
+            responses_to_chat(&unnamed)["response_format"]["json_schema"]["name"],
+            "final_output"
+        );
+        // 嵌套形(chat 回显)也接受
+        let nested = json!({
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "n", "schema": {"type": "object"}}}
+        });
+        assert_eq!(responses_to_chat(&nested)["response_format"]["json_schema"]["name"], "n");
+        // json_object 两边同构,原样带
+        let jo = json!({"model": "m", "response_format": {"type": "json_object"}});
+        assert_eq!(responses_to_chat(&jo)["response_format"]["type"], "json_object");
+        // 缺 schema / 未知类型 → 不映射(不发畸形参数给上游)
+        let no_schema = json!({"model": "m", "text": {"format": {"type": "json_schema"}}});
+        assert!(responses_to_chat(&no_schema).get("response_format").is_none());
+        let unknown = json!({"model": "m", "text": {"format": {"type": "future_thing"}}});
+        assert!(responses_to_chat(&unknown).get("response_format").is_none());
+    }
+
+    #[tokio::test]
+    async fn reasoning_stream_emits_summary_events_before_message() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hard\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let s = transform_chat_sse(iter(chunks), "deepseek-v4-flash".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let evs = parse_sse_events(&text);
+        let kinds: Vec<&str> = evs.iter().filter_map(|e| e["type"].as_str()).collect();
+        for want in [
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+        ] {
+            assert!(kinds.contains(&want), "missing {want}: {kinds:?}");
+        }
+        // added 时 summary 必须是空数组(Codex 拿不到该键会丢整个 item)
+        let rs_added = evs
+            .iter()
+            .find(|e| e["type"] == "response.output_item.added" && e["item"]["type"] == "reasoning")
+            .unwrap();
+        assert_eq!(rs_added["item"]["summary"].as_array().unwrap().len(), 0);
+        assert_eq!(rs_added["output_index"], 0);
+        // summary_index 必带(Codex 无该键时静默丢弃 delta)
+        let delta = evs
+            .iter()
+            .find(|e| e["type"] == "response.reasoning_summary_text.delta")
+            .unwrap();
+        assert_eq!(delta["summary_index"], 0);
+        assert_eq!(delta["delta"], "think ");
+        // reasoning 先关后开 message
+        let rs_done = evs
+            .iter()
+            .position(|e| e["type"] == "response.reasoning_summary_text.done")
+            .unwrap();
+        let msg_added = evs
+            .iter()
+            .position(|e| e["type"] == "response.output_item.added" && e["item"]["type"] == "message")
+            .unwrap();
+        assert!(rs_done < msg_added, "reasoning 必须先于 message 收尾");
+        // 终态:reasoning item 聚合完整且在首位
+        let completed = evs.iter().find(|e| e["type"] == "response.completed").unwrap();
+        assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+        assert_eq!(completed["response"]["output"][0]["summary"][0]["text"], "think hard");
+        assert_eq!(completed["response"]["output"][1]["type"], "message");
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_emits_response_incomplete() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"trunc\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n")),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let s = transform_chat_sse(iter(chunks), "gpt-5.6-luna".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let evs = parse_sse_events(&text);
+        let inc = evs.iter().find(|e| e["type"] == "response.incomplete").unwrap();
+        assert_eq!(inc["response"]["status"], "incomplete");
+        assert_eq!(inc["response"]["incomplete_details"]["reason"], "max_output_tokens");
+        assert!(evs.iter().all(|e| e["type"] != "response.completed"));
+    }
+
+    #[test]
+    fn nonstream_truncation_reports_incomplete_details() {
+        let chat = json!({
+            "choices": [{"message": {"role": "assistant", "content": "x"}, "finish_reason": "length"}]
+        });
+        let r = chat_to_responses_json(&chat, "gpt-5.6-luna");
+        assert_eq!(r["status"], "incomplete");
+        assert_eq!(r["incomplete_details"]["reason"], "max_output_tokens");
+    }
+
+    #[test]
+    fn nonstream_reasoning_content_becomes_item() {
+        let chat = json!({
+            "choices": [{"message": {"role": "assistant", "content": "ans", "reasoning_content": "because"}, "finish_reason": "stop"}]
+        });
+        let r = chat_to_responses_json(&chat, "deepseek-v4-flash");
+        assert_eq!(r["output"][0]["type"], "reasoning");
+        assert_eq!(r["output"][0]["summary"][0]["text"], "because");
+        assert_eq!(r["output"][1]["type"], "message");
+    }
+
+    #[test]
+    fn tool_choice_forms_normalize_for_chat() {
+        let chat = |v: Value| responses_to_chat(&json!({
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "tool_choice": v
+        }))["tool_choice"]
+            .clone();
+        assert_eq!(chat(json!("auto")), "auto");
+        // 对象形 none 不得降级为 auto(那会重新打开被禁用的工具)
+        assert_eq!(chat(json!({"type": "none"})), "none");
+        assert_eq!(chat(json!({"type": "required"})), "required");
+        assert_eq!(chat(json!({"type": "tool"})), "required");
+        assert_eq!(chat(json!({"type": "any"})), "required");
+        // Responses 扁平形 → chat 嵌套形
+        assert_eq!(
+            chat(json!({"type": "function", "name": "f"})),
+            json!({"type": "function", "function": {"name": "f"}})
+        );
+        assert_eq!(
+            chat(json!({"type": "function", "function": {"name": "g"}})),
+            json!({"type": "function", "function": {"name": "g"}})
+        );
+        // function 无名 → required;未知字符串 → auto
+        assert_eq!(chat(json!({"type": "function"})), "required");
+        assert_eq!(chat(json!("whatever")), "auto");
+    }
+
+    #[test]
+    fn tool_parameters_gain_object_type() {
+        let body = json!({
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "tools": [
+                {"type": "function", "name": "no_params"},
+                {"type": "function", "name": "loose", "parameters": {"properties": {"a": {"type": "string"}}}},
+                {"type": "function", "name": "typed", "parameters": {"type": "object", "properties": {}}}
+            ]
+        });
+        let tools = responses_to_chat(&body)["tools"].clone();
+        assert_eq!(tools[0]["function"]["parameters"], json!({"type": "object"}));
+        assert_eq!(tools[1]["function"]["parameters"]["type"], "object");
+        assert!(tools[1]["function"]["parameters"]["properties"]["a"].is_object());
+        assert_eq!(tools[2]["function"]["parameters"]["properties"], json!({}));
+    }
+
+    #[test]
+    fn string_input_and_prompt_fallback() {
+        // input 为纯字符串 → 单轮 user 消息
+        let s = responses_to_chat(&json!({"model": "m", "input": "hello"}));
+        let msgs = s["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "hello");
+        // input 缺省时回退旧 prompt 字段
+        let p = responses_to_chat(&json!({"model": "m", "prompt": "legacy"}));
+        assert_eq!(p["messages"][0]["content"], "legacy");
+    }
+
+    #[test]
+    fn instructions_dedup_only_on_identical_system_message() {
+        // 同文 system 消息已在输入里 → 不重复前置
+        let dup = responses_to_chat(&json!({
+            "model": "m",
+            "instructions": "be terse",
+            "input": [
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "be terse"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        }));
+        let msgs = dup["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        // 不同文的 system 消息存在时,instructions 仍然前置(不能整个丢系统提示)
+        let other = responses_to_chat(&json!({
+            "model": "m",
+            "instructions": "base prompt",
+            "input": [
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "extra rules"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        }));
+        let msgs = other["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["content"], "base prompt");
+        assert_eq!(msgs[1]["role"], "system"); // developer 归一
+    }
+
+    #[test]
+    fn tool_output_parts_convert_to_chat_parts() {
+        let body = json!({
+            "model": "m",
+            "input": [
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": [
+                    {"type": "output_text", "text": "{\"ok\":"},
+                    {"type": "output_text", "text": "true}"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAA"}
+                ]}
+            ]
+        });
+        let chat = responses_to_chat(&body);
+        let content = &chat["messages"][1]["content"];
+        assert_eq!(content[0], json!({"type": "text", "text": "{\"ok\":"}));
+        assert_eq!(content[1], json!({"type": "text", "text": "true}"}));
+        assert_eq!(content[2]["type"], "image_url");
+        assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,AAA");
+    }
+
+    #[test]
+    fn parallel_tool_calls_and_user_forwarded() {
+        let chat = responses_to_chat(&json!({
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "x"}]}],
+            "parallel_tool_calls": false,
+            "user": "u-1"
+        }));
+        assert_eq!(chat["parallel_tool_calls"], false);
+        assert_eq!(chat["user"], "u-1");
+    }
+
+    #[tokio::test]
+    async fn refusal_streams_as_text_and_finishes_incomplete() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"refusal\":\"I can't\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"refusal\"}]}\n\n")),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let s = transform_chat_sse(iter(chunks), "gpt-5.6-luna".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let evs = parse_sse_events(&text);
+        // 拒答以 output_text.delta 流给 Codex(无 refusal part:Codex 无该变体)
+        let delta = evs
+            .iter()
+            .find(|e| e["type"] == "response.output_text.delta")
+            .unwrap();
+        assert_eq!(delta["delta"], "I can't");
+        let inc = evs.iter().find(|e| e["type"] == "response.incomplete").unwrap();
+        assert_eq!(inc["response"]["status"], "incomplete");
+        assert!(inc["response"].get("incomplete_details").is_none());
+        assert_eq!(inc["response"]["output"][0]["content"][0]["text"], "I can't");
+        assert!(evs.iter().all(|e| e["type"] != "response.completed"));
+    }
+
+    #[test]
+    fn nonstream_refusal_merges_into_text() {
+        let chat = json!({
+            "choices": [{"message": {"role": "assistant", "content": null, "refusal": "policy"}, "finish_reason": "refusal"}]
+        });
+        let r = chat_to_responses_json(&chat, "gpt-5.6-luna");
+        assert_eq!(r["status"], "incomplete");
+        assert_eq!(r["output"][0]["content"][0]["type"], "output_text");
+        assert_eq!(r["output"][0]["content"][0]["text"], "policy");
+    }
+
+    #[tokio::test]
+    async fn output_indices_align_after_text_then_tool() {
+        // 先文本后工具:文本 item 占 0,function_call 必须是 1,added 与 done 一致
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n")),
+            Ok(Bytes::from("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let s = transform_chat_sse(iter(chunks), "gpt-5.6-sol".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let evs = parse_sse_events(&text);
+        let idx = |ev_type: &str, item_type: &str|
+            evs.iter()
+                .find(|e| e["type"] == ev_type && e["item"]["type"] == item_type)
+                .unwrap()["output_index"]
+                .clone();
+        assert_eq!(idx("response.output_item.added", "message"), 0);
+        assert_eq!(idx("response.output_item.added", "function_call"), 1);
+        assert_eq!(idx("response.output_item.done", "function_call"), 1);
+        let completed = evs.iter().find(|e| e["type"] == "response.completed").unwrap();
+        assert_eq!(completed["response"]["output"][0]["type"], "message");
+        assert_eq!(completed["response"]["output"][1]["type"], "function_call");
     }
 }
