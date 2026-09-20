@@ -45,18 +45,58 @@ fn is_newer(latest: &str, current: &str) -> bool {
     false
 }
 
+/// 版本检查结果(命令与托盘检查线程共用)。
+struct UpdateInfo {
+    current: String,
+    latest: String,
+    url: String,
+    update_available: bool,
+}
+
 /// 查询 GitHub Releases 最新版本信息。返回 { current, latest, url, updateAvailable }。
 /// async + spawn_blocking:同步命令在主线程执行,15s 超时的 HTTP 会卡住整个 UI。
 #[tauri::command]
 pub async fn check_update(app: tauri::AppHandle) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || check_update_blocking(app))
+    let info = tauri::async_runtime::spawn_blocking(move || check_update_blocking(app))
         .await
-        .map_err(|e| format!("查询任务失败: {e}"))?
+        .map_err(|e| format!("查询任务失败: {e}"))??;
+    Ok(json!({
+        "current": info.current,
+        "latest": info.latest,
+        "url": info.url,
+        "updateAvailable": info.update_available,
+    }))
 }
 
-fn check_update_blocking(
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
+/// 托盘新版提示的低频检查线程:启动约 15s 后首查,此后每 6h 一次,结果同步到托盘
+/// (tooltip + 菜单首项「发现新版本」)。主窗口 header 的提示条是前端另一路检查,
+/// 这里不与其耦合 —— 多一次 GitHub API 调用换来后台常驻(自启 --background、
+/// 关窗仅隐藏)时也能感知新版;未认证限额 60 次/时/IP,量级无虞。
+pub fn spawn_update_watcher(app: tauri::AppHandle) {
+    const FIRST_DELAY: Duration = Duration::from_secs(15);
+    const INTERVAL: Duration = Duration::from_secs(6 * 3600);
+    std::thread::spawn(move || {
+        // 当前已提示的版本:仅状态变化时刷托盘(避免每轮重建菜单)
+        let mut shown: Option<String> = None;
+        let mut first = true;
+        loop {
+            std::thread::sleep(if first { FIRST_DELAY } else { INTERVAL });
+            first = false;
+            let latest = match check_update_blocking(app.clone()) {
+                Ok(info) if info.update_available => Some(info.latest),
+                Ok(_) => None,
+                // 网络失败(离线/GitHub 不可达):保持现状,不抹掉已有提示
+                Err(_) => continue,
+            };
+            if latest != shown {
+                crate::set_tray_update(&app, latest.as_deref());
+                shown = latest;
+            }
+        }
+    });
+}
+
+fn check_update_blocking(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     use tauri::Manager;
     let current = app.package_info().version.to_string();
     let url = "https://api.github.com/repos/dncore/axon-llm-dispenser/releases/latest";
@@ -88,12 +128,12 @@ fn check_update_blocking(
         .to_string();
     let update_available = !latest.is_empty() && is_newer(&latest, &current);
 
-    Ok(json!({
-        "current": current,
-        "latest": latest,
-        "url": html_url,
-        "updateAvailable": update_available,
-    }))
+    Ok(UpdateInfo {
+        current,
+        latest,
+        url: html_url,
+        update_available,
+    })
 }
 
 /// macOS:执行 `brew upgrade axon-llm-dispenser`(流式日志走 agent-update-log 事件)。

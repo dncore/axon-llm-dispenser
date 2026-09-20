@@ -147,6 +147,13 @@ brew install --cask axon-llm-dispenser
 
 > macOS 首次打开：右键 →「打开」→「打开」；或 `xattr -dr com.apple.quarantine /Applications/Axon.app`。
 
+### 应用内更新提示
+
+App 会自查新版并给出提示，无需自己盯 Releases：
+
+- **窗口内**：header 右侧出现「发现新版本 vX.Y.Z」提示条；macOS 一键 `brew upgrade --cask`（升级中拦截退出、完成后自动重启），Windows 跳转下载页手动替换便携 exe。窗口从托盘/后台恢复可见或获得焦点时自动重查（30 分钟节流）。
+- **托盘**：后台常驻（关窗仅隐藏 / 自启 `--background`）时看不到窗口提示条，检测到新版会把托盘提示改成「Axon LLM dispenser — 发现新版本 vX.Y.Z」，并给托盘菜单加一项「发现新版本 vX.Y.Z」（点击打开主界面升级）。启动约 15s 后首查，此后每 6 小时一次；离线/网络不通时保持现状不误报。
+
 ## 从源码构建
 
 ```bash

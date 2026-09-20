@@ -375,13 +375,26 @@ function appUpdateWidget(): El {
   return h("span", { id: "app-update-chip", class: "app-update-chip", style: "display:none" }, []);
 }
 
-/** 检查 App 更新:有新版则显示更新条;macOS「一键升级」,Windows「去下载」。 */
-async function checkAppUpdate(): Promise<void> {
+/** 窗口重新可见/聚焦时的重查节流:30 分钟内不重复打 GitHub API。 */
+const APP_UPDATE_RECHECK_INTERVAL_MS = 30 * 60 * 1000;
+let appUpdateCheckedAt = 0;
+
+/** 检查 App 更新:有新版则显示更新条;macOS「一键升级」,Windows「去下载」。
+ *  force=false 时受 30 分钟节流(供窗口可见/聚焦时的重查用)。 */
+async function checkAppUpdate(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - appUpdateCheckedAt < APP_UPDATE_RECHECK_INTERVAL_MS) return;
+  appUpdateCheckedAt = now;
   try {
     const info = await bridge.appCheckUpdate();
-    if (!info.updateAvailable) return;
     const chip = document.getElementById("app-update-chip");
     if (!chip) return;
+    if (!info.updateAvailable) {
+      // 重查时已无新版(如手动升级过):收起旧提示
+      chip.replaceChildren();
+      chip.style.display = "none";
+      return;
+    }
     chip.replaceChildren();
     const isMac = navigator.userAgent.includes("Mac");
     const btn = h("button", { class: "btn btn-small", type: "button", title: isMac ? "执行 brew upgrade axon-llm-dispenser" : "前往 GitHub Release 下载" }, [isMac ? "一键升级" : "去下载"]);
@@ -1785,7 +1798,13 @@ async function boot(): Promise<void> {
     // 忽略:版本获取失败时保留占位
   }
   // 检查 App 自身更新(有新版才显示提示)
-  void checkAppUpdate();
+  void checkAppUpdate(true);
+  // 窗口从托盘/后台恢复可见或获得焦点时重查(30 分钟节流):长驻实例(关窗仅隐藏、
+  // 自启 --background)不重启也能拿到最新版本状态
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void checkAppUpdate();
+  });
+  window.addEventListener("focus", () => void checkAppUpdate());
   try {
     config = await bridge.loadAppConfig();
     fillForm(config);

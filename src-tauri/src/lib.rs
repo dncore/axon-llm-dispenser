@@ -7,6 +7,11 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, RunEvent, WindowEvent};
 
+/// 托盘图标 id(更新检查线程按 id 取回托盘刷新提示)。
+const TRAY_ID: &str = "app-tray";
+/// 托盘默认 tooltip(无新版时恢复)。
+const TRAY_TOOLTIP: &str = "Axon LLM dispenser";
+
 /// 托盘「打开主界面」:显示并聚焦主窗口。
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     // macOS:恢复 Dock 图标(关窗时已隐藏),窗口可见时表现为正常应用。
@@ -27,20 +32,67 @@ fn quit_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     app.exit(0);
 }
 
+/// 托盘菜单:发现新版时首项插入「发现新版本 v…」(点击打开主界面,一键升级/下载入口
+/// 在界面的提示条上,不在托盘里直接执行升级)。
+fn build_tray_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    latest: Option<&str>,
+) -> tauri::Result<Menu<R>> {
+    let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出并停止代理", true, None::<&str>)?;
+    match latest {
+        Some(v) => {
+            let update =
+                MenuItem::with_id(app, "update", format!("发现新版本 v{v}"), true, None::<&str>)?;
+            Menu::with_items(app, &[&update, &show, &quit])
+        }
+        None => Menu::with_items(app, &[&show, &quit]),
+    }
+}
+
+/// 托盘新版提示:tooltip + 菜单首项。由 app_update 的低频检查线程调用;
+/// 主窗口 header 的提示条是前端另一路检查,互不耦合。
+pub fn set_tray_update<R: tauri::Runtime>(app: &tauri::AppHandle<R>, latest: Option<&str>) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        // 托盘不存在(理论上不会):记一笔,便于后台场景排查
+        eprintln!("[app-update] tray {TRAY_ID} not found, skip update hint");
+        return;
+    };
+    let tooltip = match latest {
+        Some(v) => format!("Axon LLM dispenser — 发现新版本 v{v}"),
+        None => TRAY_TOOLTIP.to_string(),
+    };
+    if let Err(e) = tray.set_tooltip(Some(tooltip)) {
+        eprintln!("[app-update] set tray tooltip failed: {e}");
+    }
+    match build_tray_menu(app, latest) {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                eprintln!("[app-update] set tray menu failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("[app-update] build tray menu failed: {e}"),
+    }
+    // 只在状态变化时走到这里(调用方已去抖):一行日志便于排查后台常驻场景
+    match latest {
+        Some(v) => eprintln!("[app-update] 托盘已提示新版本 v{v}"),
+        None => eprintln!("[app-update] 托盘提示已恢复为无新版"),
+    }
+}
+
 /// 系统托盘:左键点击恢复主窗口;右键菜单「打开主界面 / 退出并停止代理」。
 /// 真正退出只走托盘菜单——关闭窗口(CloseRequested)一律拦截并隐藏到托盘,Codex 转换
 /// 代理进程与 GUI 相互独立,关窗/退出 GUI 均不影响 Codex 继续可用。
 fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出并停止代理", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let menu = build_tray_menu(app, None)?;
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().cloned().unwrap_or_else(|| tauri::image::Image::new(&[], 0, 0)))
-        .tooltip("Axon LLM dispenser")
+        .tooltip(TRAY_TOOLTIP)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
+            "update" => show_main_window(app),
             "show" => show_main_window(app),
             "quit" => quit_app(app),
             _ => {}
@@ -83,6 +135,8 @@ pub fn run() {
         ))
         .setup(|app| {
             setup_tray(app.handle())?;
+            // 低频检查 App 新版并同步托盘提示(后台常驻场景下用户也能看到新版信号)
+            app_update::spawn_update_watcher(app.handle().clone());
             // 主窗口默认隐藏(visible:false,避免自启后台时闪烁)。
             // 开机自启(带 --background)→ 后台运行只留托盘图标;手动启动 → 显示主窗口。
             if is_background_launch(std::env::args()) {
