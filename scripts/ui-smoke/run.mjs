@@ -235,7 +235,13 @@ async function runScenarios(cdp) {
   check("可见集合=用户选择", eqSet(written.listed, EXPECTED_SEED));
   check("隐藏条目保留完整元数据", written.hiddenHasMeta);
   check("旧工具/改名前的条目被接管(单一 description 前缀)", written.providers.length === 1 && written.providers[0] === "axon", JSON.stringify(written.providers));
-  check("config.toml 一并写入(配置流程)", (await evaluate(`window.__MOCK__.writes.filter(w => w.path.endsWith('.codex/config.toml')).map(w => w.content).pop() ?? ''`)).includes("[model_providers.axon]"));
+  const cfgToml = await evaluate(`(() => {
+    const t = window.__MOCK__.writes.filter(w => w.path.endsWith('.codex/config.toml')).map(w => w.content).pop() ?? '';
+    return { hasProvider: t.includes('[model_providers.axon]'), model: (t.match(/^model = "(.*)"$/m) || [])[1] ?? '' };
+  })()`);
+  check("config.toml 一并写入(配置流程)", cfgToml.hasProvider);
+  check("model 跟随 provider:旧网关模型不在新列表 → 改写为默认模型", cfgToml.model === "deepseek-v4-flash", cfgToml.model);
+  check("日志说明 model 改写原因", (await evaluate(LOGS)).some((l) => l.includes("旧模型不在新网关模型列表")));
   const modelsLine = (await evaluate(LOGS)).find((l) => l.startsWith("models.json:")) ?? "";
   check("日志显示可见/隐藏与上限", modelsLine.includes("可见 8 / 隐藏 7") && modelsLine.includes("上限 8"), modelsLine);
 
@@ -273,6 +279,88 @@ async function runScenarios(cdp) {
     (await evaluate(PICKER_STATE)).counter === "已选 8/8" && eqSet(rows8.filter((r) => r.checked).map((r) => r.id), EXPECTED_SEED) && rows8.find((r) => r.id === "grok-5").disabled);
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await sleep(200);
+
+  // ---- 多 Provider:一键切换(公司网关 → 自建网关 → 切回)+ 备份去重 ----
+  const F = (path) => `(window.__MOCK__.fs[${JSON.stringify(path)}] ?? '')`;
+  const switchTo = async (label) => {
+    await evaluate(`document.querySelector('.provider-bar .cselect-btn').click()`);
+    await waitFor(`[...document.querySelectorAll('.provider-bar .cselect-item')].some(x => x.textContent === ${JSON.stringify(label)})`);
+    await evaluate(`[...document.querySelectorAll('.provider-bar .cselect-item')].find(x => x.textContent === ${JSON.stringify(label)}).click()`);
+  };
+  const bakDelta = async () => ({
+    codex: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('config.toml.bak-')).length`),
+    claude: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('settings.json.bak-')).length`),
+  });
+  const bakBefore = await bakDelta();
+  await switchTo("自建网关 · gw2.example");
+  check(
+    "切换 Provider:确认框列出已接入的工具",
+    await waitFor(`(() => { const o = [...document.querySelectorAll('.modal-overlay')].pop(); return !!o && o.textContent.includes('将写入已接入的工具') && o.textContent.includes('Claude Code') && o.textContent.includes('Codex'); })()`),
+  );
+  await evaluate(CLICK_MODAL_BTN("确认"));
+  await waitFor(`${F("/mock/home/.claude/settings.json")}.includes("gw2.example")`);
+  check(
+    "切换写入已接入的 Claude(端点与密钥换成新网关,permissions 保留)",
+    await evaluate(`(() => { const d = JSON.parse(${F("/mock/home/.claude/settings.json")}); return d.env.ANTHROPIC_BASE_URL === 'https://gw2.example/api/anthropic' && d.env.ANTHROPIC_AUTH_TOKEN === 'sk-backup' && Array.isArray(d.permissions.allow); })()`),
+  );
+  check(
+    "切换写入 Codex(provider 段换密钥,代理地址不变)",
+    await evaluate(`(() => { const t = ${F("/mock/home/.codex/config.toml")}; return t.includes('experimental_bearer_token = "sk-backup"') && t.includes('base_url = "http://localhost:17321/api/v1"') && !t.includes('sk-test'); })()`),
+  );
+  check(
+    "切换持久化到 config.json(activeProfileId=p2,两套配置都在)",
+    await evaluate(`(() => { const c = JSON.parse(${F("/mock/home/.config/axon/config.json")}); return c.activeProfileId === 'p2' && c.profiles.length === 2 && c.profiles.find(p => p.id === 'p2').apiKey === 'sk-backup' && c.profiles.find(p => p.id === 'p1').baseUrl === 'https://gw.example/v1'; })()`),
+  );
+  // 备份去重:Claude 的 settings.json 是外部(种子)内容 → 备份;Codex config.toml 是本 app 上次写入 → 不备份
+  const bakAfter = await bakDelta();
+  check(
+    "备份去重:外部改过的文件才备份(Claude +1,Codex 不变)",
+    bakAfter.claude === bakBefore.claude + 1 && bakAfter.codex === bakBefore.codex,
+    JSON.stringify({ before: bakBefore, after: bakAfter }),
+  );
+  const bakAfterSwitch = await evaluate(`window.__MOCK__.backupWrites()`);
+
+  // 切回:p1 的记忆里没有 grok-5(网关后加的)→ 新增模型触发一次可见集合选择,再确认写入
+  await switchTo("公司网关 · gw.example");
+  check("切回 Provider:p1 记忆里没有 grok-5,新模型触发可见集合选择", await waitFor(`!!document.querySelector('.picker-row')`));
+  const backPicker = await evaluate(PICKER_STATE);
+  check("可见集合选择预选=p1 上次所选 8 个", backPicker.counter === "已选 8/8", backPicker.counter);
+  await evaluate(CLICK_MODAL_BTN("确认("));
+  await waitFor(`!document.querySelector('.picker-row')`);
+  await evaluate(CLICK_MODAL_BTN("确认"));
+  await waitFor(`${F("/mock/home/.codex/config.toml")}.includes("sk-test")`);
+  check(
+    "切回写入成功且不再新增备份(内容均同上次本 app 写入)",
+    (await evaluate(`window.__MOCK__.backupWrites()`)) === bakAfterSwitch,
+    `backupWrites=${await evaluate(`window.__MOCK__.backupWrites()`)}`,
+  );
+  check(
+    "还原弹窗展示各工具已配置徽标(切换后回到当前 Provider)",
+    await waitFor(`document.getElementById('agent-cfg-dot-codex').classList.contains('ok')`),
+  );
+
+  // ---- 备份清理:自动备份保留最近 10 个,手动重命名的保留 ----
+  await evaluate(`(() => {
+    const fs = window.__MOCK__.fs;
+    for (let i = 1; i <= 12; i++) fs['/mock/home/.codex/config.toml.bak-202608010000' + String(i).padStart(2, '0')] = 'old-' + i;
+    fs['/mock/home/.codex/config.toml.bak-manual-keep'] = 'manual';
+    return true;
+  })()`);
+  const autosBefore = await evaluate(`Object.keys(window.__MOCK__.fs).filter(p => p.startsWith('/mock/home/.codex/config.toml.bak-') && !p.endsWith('manual-keep')).length`);
+  await evaluate(`document.getElementById('btn-codex-还原').click()`);
+  check("还原弹窗列出备份", await waitFor(`[...document.querySelectorAll('.modal-row .modal-name')].some(x => x.textContent.includes('.bak-'))`));
+  await evaluate(`[...document.querySelectorAll('.modal-footer button')].find(b => b.textContent === '清理自动备份').click()`);
+  check(
+    "清理确认框:只算超额自动备份",
+    await waitFor(`(() => { const o = [...document.querySelectorAll('.modal-overlay')].pop(); return !!o && o.textContent.includes('将删除 ${autosBefore - 10} 个自动备份'); })()`),
+    `autosBefore=${autosBefore}`,
+  );
+  await evaluate(`[...document.querySelectorAll('.modal-overlay')].pop().querySelectorAll('.modal-footer button').forEach(b => { if (b.textContent === '删除') b.click(); })`);
+  await waitFor(`Object.keys(window.__MOCK__.fs).filter(p => p.startsWith('/mock/home/.codex/config.toml.bak-') && !p.endsWith('manual-keep')).length === 10`);
+  check(
+    "清理后:自动备份保留 10 个(删掉最旧的),手动重命名的备份保留",
+    await evaluate(`!('/mock/home/.codex/config.toml.bak-20260801000001' in window.__MOCK__.fs) && ('/mock/home/.codex/config.toml.bak-manual-keep' in window.__MOCK__.fs)`),
+  );
 }
 
 // ---------------------------------------------------------------------------

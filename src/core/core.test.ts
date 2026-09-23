@@ -105,6 +105,27 @@ describe("patchCodexConfigToml", () => {
     expect(r.text).toContain('experimental_bearer_token = "sk-test"');
   });
 
+  it("model 跟随 provider:旧模型不在新网关列表时改写为默认模型,仍在列表则保留", () => {
+    const base = {
+      providerName: "axon",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-test",
+      defaultModel: "deepseek-v4-flash",
+      modelsJsonPath: "/home/u/.codex/models.json",
+    };
+    // 切换网关:config.toml 里还是旧网关的模型(不在新列表)→ 改写 + 记录变更
+    const stale = patchCodexConfigToml('model = "gw-a-only-model"\n', { ...base, modelIds: ["deepseek-v4-flash", "glm-5.3"] });
+    expect(stale.text).toContain('model = "deepseek-v4-flash"');
+    expect(stale.changes.join()).toContain("旧模型不在新网关模型列表");
+    // 用户在 Codex 里选的模型仍在新网关列表内 → 保留不动(只有 provider/目录等其它变更)
+    const keep = patchCodexConfigToml('model = "glm-5.3"\n', { ...base, modelIds: ["deepseek-v4-flash", "glm-5.3"] });
+    expect(keep.text).toContain('model = "glm-5.3"');
+    expect(keep.changes.some((c) => c.includes('model = "') || c.includes("model: "))).toBe(false);
+    // 未传 modelIds(如仅更新 provider 段)→ 保持旧行为,不猜模型
+    const noIds = patchCodexConfigToml('model = "gw-a-only-model"\n', base);
+    expect(noIds.text).toContain('model = "gw-a-only-model"');
+  });
+
   it("models.json 输出所有模型 visibility=list", () => {
     const models = buildResolvedModels(["deepseek-v4-flash", "kimi-k3"]);
     const json = renderCodexModelsJson(models, "axon");
@@ -977,6 +998,25 @@ describe("patchCodexCatalog(仅更新模型列表)", () => {
     const json = renderCodexModelsJson(buildResolvedModels(["m1"]), "axon", existing);
     const doc = JSON.parse(json) as { models: Array<{ slug: string }> };
     expect(doc.models.map((m) => m.slug)).toEqual(["gpt-5", "m1"]);
+  });
+
+  it("切换 provider 名:本 app 其它 profile 的旧条目一并清理(不再残留在选择器里)", () => {
+    const existing = JSON.stringify({
+      models: [
+        { slug: "m1", description: "axon-old: M1 — openai-compatible gateway" },
+        { slug: "m9", description: "axon-old: M9 — openai-compatible gateway" },
+        { slug: "gpt-5", description: "OpenAI 官方" },
+      ],
+    });
+    const r = patchCodexCatalog(buildResolvedModels(["m1"]), "axon", existing, undefined, ["axon", "axon-old"]);
+    const doc = JSON.parse(r.text) as { models: Array<{ slug: string; description?: string }> };
+    expect(doc.models.map((m) => m.slug).sort()).toEqual(["gpt-5", "m1"]);
+    expect(r.removed).toEqual(["m9"]); // 旧 provider 名下架条目被清理;保留的 m1 仍是本 app 条目(前缀在登记表内)
+    expect(doc.models.find((m) => m.slug === "m1")?.description).toBe("axon-old: M1 — openai-compatible gateway");
+    // 未登记的 provider 名(用户自己或其它工具写的)一律保留
+    const foreign = patchCodexCatalog(buildResolvedModels(["m1"]), "axon", existing);
+    const fdoc = JSON.parse(foreign.text) as { models: Array<{ slug: string }> };
+    expect(fdoc.models.map((m) => m.slug).sort()).toEqual(["gpt-5", "m1", "m9"]);
   });
 });
 

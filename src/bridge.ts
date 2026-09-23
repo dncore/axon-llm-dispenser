@@ -4,35 +4,12 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { timestamp } from "./core/util";
+import { contentHash, timestamp } from "./core/util";
+import { migrateAppConfig, serializeAppConfig, type AppConfig } from "./core/appconfig";
 
-export type AppConfig = {
-  provider: string;
-  displayName: string;
-  baseUrl: string;
-  apiKey: string;
-  defaultModel: string;
-  /** Anthropic 兼容端点(Claude 用);留空时自动从 baseUrl 推导。 */
-  anthropicBaseUrl: string;
-  /** 全局过滤 Doubao 系模型(默认开启,生成配置不含 doubao)。 */
-  excludeDoubao: boolean;
-  /** Codex Responses 转换代理(网关 /responses 对部分模型如 gpt-5.6 转换不可用时开启)。 */
-  codexProxy?: { enabled: boolean; port: number };
-  /** 上次拉取的模型列表(持久化,避免刷新/升级后模型项丢失)。 */
-  models?: { id: string; ownedBy?: string }[];
-};
-
-export const DEFAULT_CONFIG: AppConfig = {
-  provider: "axon",
-  displayName: "Axon",
-  baseUrl: "",
-  apiKey: "",
-  defaultModel: "",
-  anthropicBaseUrl: "",
-  excludeDoubao: true,
-  codexProxy: { enabled: true, port: 17321 },
-  models: [],
-};
+// 应用配置结构(多 Provider profile)见 core/appconfig.ts;此处仅做 I/O 与再导出。
+export { DEFAULT_CONFIG } from "./core/appconfig";
+export type { AppConfig, ProviderProfile } from "./core/appconfig";
 
 // ---------------------------------------------------------------------------
 // 基础 invoke 封装
@@ -276,35 +253,23 @@ export async function opencodeDataHome(): Promise<string> {
 // 应用自身配置
 // ---------------------------------------------------------------------------
 
+/** 读取应用配置(旧版单 provider 的 config.json 自动迁移为一个 profile)。 */
 export async function loadAppConfig(): Promise<AppConfig> {
   try {
     const path = await appConfigFile();
     const raw = await readFile(path);
-    if (!raw.trim()) return { ...DEFAULT_CONFIG };
-    const parsed = JSON.parse(raw) as Partial<AppConfig>;
-    return {
-      provider: parsed.provider || DEFAULT_CONFIG.provider,
-      displayName: parsed.displayName || parsed.provider || DEFAULT_CONFIG.displayName,
-      baseUrl: parsed.baseUrl || "",
-      apiKey: parsed.apiKey || "",
-      defaultModel: parsed.defaultModel || "",
-      anthropicBaseUrl: parsed.anthropicBaseUrl || "",
-      excludeDoubao: parsed.excludeDoubao ?? true,
-      codexProxy: {
-        enabled: parsed.codexProxy?.enabled ?? true,
-        port: parsed.codexProxy?.port ?? 17321,
-      },
-      models: Array.isArray(parsed.models) ? parsed.models : [],
-    };
+    if (!raw.trim()) return migrateAppConfig(null);
+    return migrateAppConfig(JSON.parse(raw));
   } catch {
-    return { ...DEFAULT_CONFIG };
+    return migrateAppConfig(null);
   }
 }
 
+/** 保存应用配置:先把顶层字段(表单)写回激活 profile,再按 profiles schema 落盘。 */
 export async function saveAppConfig(cfg: AppConfig): Promise<string> {
   const path = await appConfigFile();
   // Rust write_file 会自动创建父目录
-  await writeFile(path, JSON.stringify(cfg, null, 2) + "\n", 0o600);
+  await writeFile(path, JSON.stringify(serializeAppConfig(cfg), null, 2) + "\n", 0o600);
   return path;
 }
 
@@ -312,16 +277,64 @@ export async function saveAppConfig(cfg: AppConfig): Promise<string> {
 // 文件写入辅助
 // ---------------------------------------------------------------------------
 
-/** 写文件前先备份原文件为 .bak-<时间戳>(只备份非密钥文件)。返回备份路径或 undefined。 */
-export async function writeWithBackup(path: string, content: string, mode?: number): Promise<{ path: string; backup?: string }> {
+// 写入指纹:记录本 app 上次写入各文件的内容指纹,用于「不重复备份自己的产物」。
+// (频繁切换 provider 时被覆盖的往往就是上一次 app 自己写的内容,原始备份早已存在,
+//  而外部手改过的内容一定会被备份,不会丢。)
+
+type WriteState = Record<string, string>;
+let writeStateCache: WriteState | null = null;
+
+async function writeStateFile(): Promise<string> {
+  return await joinPath(await appConfigDir(), "write-state.json");
+}
+
+async function loadWriteState(): Promise<WriteState> {
+  if (writeStateCache) return writeStateCache;
+  try {
+    const raw = await readFile(await writeStateFile());
+    const parsed = JSON.parse(raw) as unknown;
+    writeStateCache = parsed && typeof parsed === "object" ? (parsed as WriteState) : {};
+  } catch {
+    writeStateCache = {};
+  }
+  return writeStateCache;
+}
+
+async function recordWrite(path: string, content: string): Promise<void> {
+  const state = await loadWriteState();
+  state[path] = contentHash(content);
+  try {
+    await writeFile(await writeStateFile(), JSON.stringify(state, null, 2) + "\n", 0o600);
+  } catch {
+    // 记录失败仅影响下次备份判断(退化为照常备份),不阻断写入
+  }
+}
+
+/**
+ * 写文件(只备份非密钥文件)。备份规则:
+ * - 文件不存在(首次写入)→ 无需备份;
+ * - 当前内容 == 本 app 上次写入的内容 → 不新建备份(原始/上次外部改动前的备份已保留);
+ * - 其余(外部改动过)→ 先备份为 .bak-<时间戳>,再写入。
+ * 返回 backup(新备份路径)/ backupSkipped(内容为本 app 产物故未备份),供日志说明。
+ */
+export async function writeWithBackup(path: string, content: string, mode?: number): Promise<{ path: string; backup?: string; backupSkipped?: boolean }> {
   let backup: string | undefined;
+  let backupSkipped = false;
   if (await exists(path)) {
     const existing = await readFile(path);
-    backup = `${path}.bak-${timestamp()}`;
-    await writeFile(backup, existing);
+    if (existing !== content) {
+      const state = await loadWriteState();
+      if (state[path] === contentHash(existing)) {
+        backupSkipped = true;
+      } else {
+        backup = `${path}.bak-${timestamp()}`;
+        await writeFile(backup, existing);
+      }
+    }
   }
   await writeFile(path, content, mode);
-  return { path, backup };
+  await recordWrite(path, content);
+  return { path, backup, backupSkipped };
 }
 
 /** 写密钥文件(不备份),固定 0600。 */

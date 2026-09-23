@@ -42,28 +42,43 @@
       ...HIDDEN.map((s) => entry(s, "hide", "axon")),
     ],
   }, null, 2) + "\n";
+  // 两套网关配置:公司网关(当前激活,已写入 codex/claude)+ 自建网关(带自己的 Codex 可见模型记忆)
+  const P2_LISTED = ["deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3", "kimi-k3", "qwen3.8-max", "gemini-3.7-flash", "claude-sonnet-5", "grok-4.6"];
+  const P2_KNOWN = GATEWAY_MODELS.filter((id) => id !== "doubao-pro").concat(["grok-5"]); // 含脚本后加的 grok-5:切换时不触发「超上限挑选」
   const CONFIG = JSON.stringify({
-    provider: "axon",
-    displayName: "Axon",
-    baseUrl: "https://gw.example/v1",
-    apiKey: "sk-test",
-    defaultModel: "",
-    anthropicBaseUrl: "",
+    activeProfileId: "p1",
     excludeDoubao: true,
     codexProxy: { enabled: true, port: 17321 },
-    models: GATEWAY_MODELS.map((id) => ({ id })),
+    profiles: [
+      {
+        id: "p1", provider: "axon", displayName: "公司网关", baseUrl: "https://gw.example/v1", apiKey: "sk-test",
+        anthropicBaseUrl: "", defaultModel: "", models: GATEWAY_MODELS.map((id) => ({ id })),
+      },
+      {
+        id: "p2", provider: "axon", displayName: "自建网关", baseUrl: "https://gw2.example/v1", apiKey: "sk-backup",
+        anthropicBaseUrl: "", defaultModel: "", codexListed: P2_LISTED, codexKnown: P2_KNOWN,
+      },
+    ],
   }, null, 2) + "\n";
-  const CODEX_TOML = 'model_provider = "axon"\nmodel = "deepseek-v4-flash"\n\n[model_providers.axon]\nbase_url = "http://localhost:17321/api/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n';
+  // 旧网关写下的 model 已不在网关模型列表里:配置时应改写为默认模型(切换 provider 时 model 跟随)
+  const CODEX_TOML = 'model_provider = "axon"\nmodel = "gw-a-only-model"\n\n[model_providers.axon]\nbase_url = "http://localhost:17321/api/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = "sk-test"\n';
+  const CLAUDE_SETTINGS = JSON.stringify({
+    env: { ANTHROPIC_BASE_URL: "https://gw.example/api/anthropic", ANTHROPIC_AUTH_TOKEN: "sk-test", ANTHROPIC_MODEL: "deepseek-v4-flash[1m]" },
+    permissions: { allow: ["Bash(ls:*)"] },
+  }, null, 2) + "\n";
 
   const initialFs = () => ({
     "/mock/home/.config/axon/config.json": CONFIG,
     "/mock/home/.codex/config.toml": CODEX_TOML,
     "/mock/home/.codex/models.json": CATALOG,
+    "/mock/home/.claude/settings.json": CLAUDE_SETTINGS,
   });
 
   const state = { fs: initialFs(), writes: [], calls: [] };
   window.__MOCK__ = state;
   window.__MOCK__.gatewayModels = GATEWAY_MODELS;
+  /** 写入过 .bak-* 备份的次数(断言「内容同上次本 app 写入时不重复备份」)。 */
+  window.__MOCK__.backupWrites = () => state.writes.filter((w) => w.path.includes(".bak-")).length;
   window.__MOCK__.seedVisible = VISIBLE;
   window.__MOCK__.seedHidden = HIDDEN;
 
@@ -84,7 +99,17 @@
     delete_file: (a) => { delete state.fs[a.path]; return null; },
     validate_config: () => null,
     exists: (a) => a.path in state.fs,
-    read_dir: () => [],
+    // 目录列表:按内存文件系统的同目录项返回;mtime 由备份名里的时间戳推导(清理保留最近 N 个要用)
+    read_dir: (a) => {
+      const prefix = a.path.endsWith("/") ? a.path : `${a.path}/`;
+      return Object.keys(state.fs)
+        .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
+        .map((p) => {
+          const name = p.slice(prefix.length);
+          const m = /(\d{8})-?(\d{6})/.exec(name);
+          return { name, isFile: true, size: (state.fs[p] ?? "").length, mtimeMs: m ? Number(m[1] + m[2]) : Date.now() };
+        });
+    },
     mkdir: () => null,
     detect_cli: () => null,
     detect_cli_in: () => null,

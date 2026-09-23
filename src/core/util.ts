@@ -9,6 +9,18 @@ export function timestamp(): string {
   return new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
 }
 
+/** 内容指纹(FNV-1a 双通道 32 位):用于判断文件当前内容是否为本 app 上次写入。 */
+export function contentHash(text: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b);
+  }
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
+}
+
 /** 脱敏展示 token:保留首尾便于辨认。 */
 export function maskToken(token: string): string {
   if (token.length <= 10) return "****";

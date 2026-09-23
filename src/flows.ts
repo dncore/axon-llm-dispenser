@@ -4,6 +4,7 @@ import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { escapeRegExp, generateToken, timestamp } from "./core/util";
+import { BACKUP_KEEP_AUTO, pickStaleAutoBackups } from "./core/backup";
 import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
 import { patchReasonixProvider, patchReasonixModels, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchGrokConfigToml, patchGrokModels, parseGrokStatus } from "./core/grok";
@@ -27,6 +28,23 @@ export type FlowResult = {
   changes: string[];
   lines: string[];
 };
+
+type WriteResult = { path: string; backup?: string; backupSkipped?: boolean };
+
+/** 写入结果里的备份说明行:未新建备份时说明原因(当前内容为本 app 上次写入),避免误以为没有保护。 */
+function backupLine(w: WriteResult | null | undefined): string | null {
+  if (!w) return null;
+  if (w.backup) return `备份: ${w.backup}`;
+  if (w.backupSkipped) return "未新建备份: 当前内容为本 app 上次写入(已有备份仍保留;文件被外部改动过才会再备份)";
+  return null;
+}
+
+/** 备份说明行(单行,供「xx 已更新(…)」拼接用)。 */
+function backupSuffix(w: WriteResult): string {
+  if (w.backup) return `,备份: ${w.backup}`;
+  if (w.backupSkipped) return ",未新建备份(内容同上次本 app 写入)";
+  return "";
+}
 
 /** 默认模型选择:配置的优先;否则优先网关内常见的 deepseek-v4-flash,再退回第一个。 */
 export function pickDefaultModel(modelIds: string[], configured?: string): string {
@@ -158,14 +176,47 @@ export function dshDeepseekEfforts(id: string): Record<string, string> {
 // Codex
 // ---------------------------------------------------------------------------
 
-/** Codex 可见模型规划(读现有 models.json,供 UI 判断是否需要弹「选模型」)。 */
-export async function codexListedPlan(cfg: bridge.AppConfig, modelIds: string[]): Promise<CodexListedPlan> {
+/**
+ * Codex 可见模型规划(供 UI 判断是否需要弹「选模型」):
+ * - 传入 memory(该 profile 上次的可见集合 + 当时的完整模型列表)时以其为准:切换网关后
+ *   沿用本 profile 自己的选择,网关之后新增的模型仍按「超上限即弹框」处理;
+ * - 无 memory(该 profile 还没做过选择)时沿用既有 models.json 的可见集合(旧行为)。
+ */
+export async function codexListedPlan(
+  cfg: bridge.AppConfig,
+  modelIds: string[],
+  memory?: { listed?: string[]; known?: string[] },
+): Promise<CodexListedPlan> {
   const home = await bridge.codexHome();
   const modelsPath = await bridge.joinPath(home, "models.json");
   const resolved = buildResolvedModels(modelIds);
-  return planCodexListed(resolved, await bridge.readFileOrEmpty(modelsPath), {
+  return codexListedPlanFrom(resolved, await bridge.readFileOrEmpty(modelsPath), cfg.defaultModel, memory);
+}
+
+/** 可见集合计划:优先用 profile 记忆,缺省用现有 models.json(旧行为)。 */
+function codexListedPlanFrom(
+  resolved: ResolvedModel[],
+  existingJson: string,
+  configuredDefault: string | undefined,
+  memory?: { listed?: string[]; known?: string[] },
+): CodexListedPlan {
+  const idSet = new Set(resolved.map((m) => m.id));
+  const listed = (memory?.listed ?? []).filter((id) => idSet.has(id));
+  const source = listed.length > 0 ? syntheticCatalogJson(listed, memory?.known ?? [], idSet) : existingJson;
+  return planCodexListed(resolved, source, {
     // 与写入 config.toml 的默认模型同规则(同一排序后的列表),避免预选与实际默认不一致
-    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), configuredDefault),
+  });
+}
+
+/** 由 profile 记忆合成等价的 models.json(可见=上次所选;已知但未选=hide;未知=算新增)。 */
+function syntheticCatalogJson(listed: string[], known: string[], idSet: Set<string>): string {
+  const listedSet = new Set(listed);
+  return JSON.stringify({
+    models: [
+      ...listed.map((slug) => ({ slug, visibility: "list" })),
+      ...known.filter((id) => idSet.has(id) && !listedSet.has(id)).map((slug) => ({ slug, visibility: "hide" })),
+    ],
   });
 }
 
@@ -200,15 +251,17 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
     apiKey: cfg.apiKey,
     defaultModel,
     modelsJsonPath: modelsPath,
+    // 顶层 model 不在本次模型列表里(切换网关后旧模型失效)时改写为默认模型
+    modelIds: resolved.map((m) => m.id),
   });
 
   // 内容无变化则不写盘、不产生备份
   const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
-  // 保留现有 models.json 里非当前 provider 的条目(兼容用户已有模型);
+  // 保留现有 models.json 里非本 app 写入的条目(兼容用户已有模型);
   // 可见集合沿用现有 models.json(用户上次的选择),上限 CODX_MAX_LISTED_MODELS,超出由 UI 先让用户挑选
   const existingModels = await bridge.readFileOrEmpty(modelsPath);
   const listedSet = listed ?? planCodexListed(resolved, existingModels, { defaultModel }).listed;
-  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels, listedSet);
+  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels, listedSet, ownProviderNames(cfg));
   const modelsWritten = modelsJson !== existingModels ? await bridge.writeWithBackup(modelsPath, modelsJson) : null;
 
   const lines = [
@@ -217,8 +270,14 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
     `models.json: ${modelsWritten ? `${modelsWritten.path}(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length},上限 ${CODX_MAX_LISTED_MODELS})` : "无变化,未写入"}`,
     ...proxyLines,
   ];
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const bl = backupLine(written);
+  if (bl) lines.push(bl);
   return { changes: patched.changes, lines };
+}
+
+/** 本 app 所有 profile 的 provider 名(models.json 归属判定:切换 provider 名后旧条目仍属本 app)。 */
+function ownProviderNames(cfg: bridge.AppConfig): string[] {
+  return (cfg.profiles ?? []).map((p) => p.provider).filter((n) => n.length > 0);
 }
 
 export async function codexStatus(): Promise<string[]> {
@@ -291,7 +350,8 @@ export async function configureReasonix(cfg: bridge.AppConfig, modelIds: string[
     `  ${patched.changes.join(", ") || "无变化"}`,
     `凭据: ${envWritten}(${apiKeyEnv}${envPatched.changed ? "" : ",已存在"})`,
   ];
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
   return { changes: patched.changes, lines };
 }
 
@@ -389,7 +449,8 @@ export async function configureDsh(cfg: bridge.AppConfig, modelIds: string[]): P
     `Web UI: http://127.0.0.1:3080`,
     `启动: npx @deepseek-ai/dsh web`,
   ];
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
   return { changes: allChanges, lines };
 }
 
@@ -441,7 +502,8 @@ export async function configureGrok(cfg: bridge.AppConfig, modelIds: string[]): 
     `API Key 以明文写入 [model_providers.${cfg.provider}](同 Codex experimental_bearer_token 先例;grok 不加载 home .env,env_key 需 shell 导出故不用)`,
     `官方 grok 模型保留走官方通道(grok 内 /model 随时切换,无需 grok logout)`,
   ];
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
   return { changes: patched.changes, lines };
 }
 
@@ -530,7 +592,8 @@ export async function configureClaude(cfg: bridge.AppConfig, roles: ClaudeRoleSe
     `  ${patched.changes.join(", ") || "无变化"}`,
     `Anthropic 端点: ${anthropicBaseUrl}`,
   ];
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
   return { changes: patched.changes, lines };
 }
 
@@ -636,7 +699,8 @@ export async function configureOmp(cfg: bridge.AppConfig, modelIds: string[]): P
   ];
   if (deepseekCount > 0) lines.push(`DeepSeek 模型 ${deepseekCount} 个:已应用官方特配(thinking 等级 + 完整 compat 块)`);
   lines.push(`使用: omp --model ${cfg.provider}/${defaultModel}`);
-  if (written?.backup) lines.push(`备份: ${written.backup}`);
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
   return { changes: [...p1.changes, ...p2.changes], lines };
 }
 
@@ -807,6 +871,18 @@ export async function renameBackup(oldPath: string, newName: string): Promise<st
   return newPath;
 }
 
+/** 规划清理某目标文件的自动备份:按时间保留最近 keep 个,其余列出(手动重命名的备份不动)。 */
+export async function planBackupCleanup(targetPath: string, keep = BACKUP_KEEP_AUTO): Promise<BackupInfo[]> {
+  const backups = await listBackups(targetPath);
+  return pickStaleAutoBackups(backups, bridge.basenamePath(targetPath), keep);
+}
+
+/** 删除备份文件(清理用),返回删除数量。 */
+export async function deleteBackups(paths: string[]): Promise<number> {
+  for (const p of paths) await bridge.deleteFile(p);
+  return paths.length;
+}
+
 // ---------------------------------------------------------------------------
 // Doubao 过滤(全局开关,默认开启;参考插件 CODEX_EXCLUDED_MODELS 团队排除名单)
 // ---------------------------------------------------------------------------
@@ -842,8 +918,13 @@ function noChangePlan(agent: string): ModelsRefreshPlan {
 }
 
 /** Codex:只刷新 ~/.codex/models.json(不碰 config.toml,不启动/不触碰转换代理)。
- *  listed 缺省时沿用现有 models.json 的可见集合(上限 CODX_MAX_LISTED_MODELS)。 */
-export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[], listed?: string[]): Promise<ModelsRefreshPlan> {
+ *  listed 缺省时按 profile 记忆(memory)/现有 models.json 推导可见集合(上限 CODX_MAX_LISTED_MODELS)。 */
+export async function planRefreshCodex(
+  cfg: bridge.AppConfig,
+  modelIds: string[],
+  listed?: string[],
+  memory?: { listed?: string[]; known?: string[] },
+): Promise<ModelsRefreshPlan> {
   const agent = "Codex";
   const home = await bridge.codexHome();
   const configPath = await bridge.joinPath(home, "config.toml");
@@ -854,15 +935,15 @@ export async function planRefreshCodex(cfg: bridge.AppConfig, modelIds: string[]
   }
   const resolved = buildResolvedModels(modelIds);
   const existing = await bridge.readFileOrEmpty(modelsPath);
-  const listedSet = listed ?? planCodexListed(resolved, existing, { defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel) }).listed;
-  const plan = patchCodexCatalog(resolved, cfg.provider, existing, listedSet);
+  const listedSet = listed ?? codexListedPlanFrom(resolved, existing, cfg.defaultModel, memory).listed;
+  const plan = patchCodexCatalog(resolved, cfg.provider, existing, listedSet, ownProviderNames(cfg));
   if (plan.unchanged) return noChangePlan(agent);
   return {
     agent,
     changes: [`models.json(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length})`, ...plan.changes],
     apply: async () => {
       const written = await bridge.writeWithBackup(modelsPath, plan.text);
-      return [`models.json 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : ",无变化")];
+      return [`models.json 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
@@ -883,7 +964,7 @@ export async function planRefreshDsh(cfg: bridge.AppConfig, modelIds: string[]):
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(settingsPath, r.text);
-      return [`settings.yaml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+      return [`settings.yaml 已更新(${written.path})` + + backupSuffix(written)];
     },
   };
 }
@@ -904,7 +985,7 @@ export async function planRefreshOmp(cfg: bridge.AppConfig, modelIds: string[]):
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(modelsPath, r.text);
-      return [`models.yml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+      return [`models.yml 已更新(${written.path})` + + backupSuffix(written)];
     },
   };
 }
@@ -929,7 +1010,7 @@ export async function planRefreshReasonix(cfg: bridge.AppConfig, modelIds: strin
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`config.toml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+      return [`config.toml 已更新(${written.path})` + + backupSuffix(written)];
     },
   };
 }
@@ -950,7 +1031,7 @@ export async function planRefreshOpenCode(cfg: bridge.AppConfig, modelIds: strin
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`opencode.json 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+      return [`opencode.json 已更新(${written.path})` + + backupSuffix(written)];
     },
   };
 }
@@ -974,15 +1055,21 @@ export async function planRefreshGrok(cfg: bridge.AppConfig, modelIds: string[])
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`config.toml 已更新(${written.path})` + (written.backup ? `,备份: ${written.backup}` : "")];
+      return [`config.toml 已更新(${written.path})` + + backupSuffix(written)];
     },
   };
 }
 
-/** 全部目标的刷新计划(未接入的自动跳过)。codexListed 为 Codex 已确认的可见集合(可选)。 */
-export async function planRefreshAll(cfg: bridge.AppConfig, modelIds: string[], codexListed?: string[]): Promise<ModelsRefreshPlan[]> {
+/** 全部目标的刷新计划(未接入的自动跳过)。codexListed 为 Codex 已确认的可见集合(可选);
+ *  codexMemory 为该 profile 的可见集合记忆(未显式给出 codexListed 时用于推导)。 */
+export async function planRefreshAll(
+  cfg: bridge.AppConfig,
+  modelIds: string[],
+  codexListed?: string[],
+  codexMemory?: { listed?: string[]; known?: string[] },
+): Promise<ModelsRefreshPlan[]> {
   return [
-    await planRefreshCodex(cfg, modelIds, codexListed),
+    await planRefreshCodex(cfg, modelIds, codexListed, codexMemory),
     await planRefreshDsh(cfg, modelIds),
     await planRefreshOmp(cfg, modelIds),
     await planRefreshReasonix(cfg, modelIds),

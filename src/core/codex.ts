@@ -52,6 +52,8 @@ export type CodexConfigInput = {
   defaultModel?: string;
   /** models.json 的绝对路径(用于写顶层 model_catalog_json)。 */
   modelsJsonPath: string;
+  /** 本次写入 models.json 的模型 id 集合:顶层 model 不在其中(切换网关后旧模型失效)时改写为默认模型。 */
+  modelIds?: string[];
 };
 
 function upsertKey(text: string, key: string, value: string): { text: string; changed: boolean } {
@@ -106,10 +108,16 @@ export function patchCodexConfigToml(text: string, input: CodexConfigInput): { t
   out = provider.text;
   if (provider.changed) changes.push(`model_provider = ${providerName}`);
 
-  if (defaultModel && !/^model\s*=.*$/m.test(out)) {
+  // model 跟随 provider:键缺失时写入默认模型;已存在但不在本次写入的模型列表里
+  // (切换网关后旧模型已失效)时改写为默认模型;仍在列表内则保留(尊重用户在 Codex 里的选择)。
+  const currentModel = out.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+  const staleModel = currentModel !== null && !!defaultModel && (input.modelIds?.length ?? 0) > 0 && !input.modelIds!.includes(currentModel);
+  if (defaultModel && (currentModel === null || staleModel)) {
     const model = upsertKey(out, "model", defaultModel);
     out = model.text;
-    if (model.changed) changes.push(`model = ${defaultModel}`);
+    if (model.changed) {
+      changes.push(staleModel ? `model: ${currentModel} → ${defaultModel}(旧模型不在新网关模型列表)` : `model = ${defaultModel}`);
+    }
   }
 
   // 顶层 model_catalog_json 必须写:codex-cli 不写它就读不到 models.json。
@@ -236,7 +244,9 @@ export function planCodexListed(
 /**
  * 规划 models.json 目录内容:
  * - 本 provider 条目按 description 前缀(`${providerName}: `)归属;已不在模型列表的自家条目移除;
- * - 非本 provider 条目(不含可识别 slug 的、或描述前缀不匹配的)原样保留(兼容用户已有模型目录);
+ *   opts.ownProviders 传入本 app 其它 profile 的 provider 名:它们写的条目同属本 app(切换
+ *   provider 名后旧条目不该继续留在选择器里),一并按下架处理;
+ * - 非本 app 条目(不含可识别 slug 的、或描述前缀不匹配的)原样保留(兼容用户已有模型目录);
  * - opts.preserveExisting(仅更新模型列表):既有 slug 沿用其 description,其余字段随模型表刷新;
  * - opts.listed:可见集合(visibility="list"),其余自家条目写 hide;缺省按 planCodexListed 推导(带上限)。
  */
@@ -244,9 +254,15 @@ function planCodexCatalog(
   models: ResolvedModel[],
   providerName: string,
   existingJson: string | undefined,
-  opts?: { preserveExisting?: boolean; listed?: string[] },
+  opts?: { preserveExisting?: boolean; listed?: string[]; ownProviders?: string[] },
 ): CodexCatalogPlan {
   const newIds = new Set(models.map((m) => m.id));
+  const ownNames = new Set<string>([providerName, ...(opts?.ownProviders ?? [])]);
+  const isOurs = (desc: unknown): boolean => {
+    if (typeof desc !== "string") return false;
+    const i = desc.indexOf(": "); // provider 名校验不含空格,首个 ": " 即前缀边界
+    return i > 0 && ownNames.has(desc.slice(0, i));
+  };
   const prevSlugs = new Set<string>();
   const prevBySlug = new Map<string, Record<string, unknown>>();
   const kept: unknown[] = [];
@@ -261,7 +277,7 @@ function planCodexCatalog(
           continue;
         }
         prevSlugs.add(slug);
-        const ours = typeof m.description === "string" && m.description.startsWith(`${providerName}: `);
+        const ours = isOurs(m.description);
         if (newIds.has(slug)) {
           prevBySlug.set(slug, m);
           continue;
@@ -299,8 +315,9 @@ export function renderCodexModelsJson(
   providerName: string,
   existingJson?: string,
   listed?: string[],
+  ownProviders?: string[],
 ): string {
-  const plan = planCodexCatalog(models, providerName, existingJson, { listed });
+  const plan = planCodexCatalog(models, providerName, existingJson, { listed, ownProviders });
   return JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
 }
 
@@ -326,8 +343,9 @@ export function patchCodexCatalog(
   providerName: string,
   existingJson: string,
   listed?: string[],
+  ownProviders?: string[],
 ): CodexCatalogResult {
-  const plan = planCodexCatalog(models, providerName, existingJson, { preserveExisting: true, listed });
+  const plan = planCodexCatalog(models, providerName, existingJson, { preserveExisting: true, listed, ownProviders });
   const text = JSON.stringify({ models: [...plan.kept, ...plan.entries] }, null, 2) + "\n";
   const unchanged = text === existingJson;
   const changes: string[] = [];
