@@ -49,7 +49,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ 167f79c7 · 131 models
+// canonical: gist b8931f4c @ e0320eee · 136 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -134,6 +134,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "kimi-k2.5": { contextWindow: 262144, maxTokens: 8192, reasoning: true, deprecated: true },
   "kimi-k2.6": { contextWindow: 262144, maxTokens: 8192, reasoning: true },
   "kimi-k2.7-code": { contextWindow: 262144, maxTokens: 96000, reasoning: true, name: "Kimi K2.7 Code" },
+  "kimi-k2.8": { name: "Kimi K2.8 Preview", contextWindow: 1048576, maxTokens: 32768, reasoning: true, input: ["text", "image"], compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "kimi-lastest": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "kimi-k3": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "abab6.5s-chat": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
@@ -141,6 +142,8 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "minimax-m1": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
   "MiMo-V2.5": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiMo-V2.5-Pro": { name: "MiMo V2.5 Pro (Xiaomi 旗舰)", contextWindow: 1000000, maxTokens: 32768, reasoning: true, input: ["text", "image"] },
+  "mimo-v2.6-pro": { name: "MiMo V2.6 Pro (Xiaomi 旗舰)", contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"] },
+  "mimo-v2.6-flash": { contextWindow: 1000000, maxTokens: 131072, reasoning: true, input: ["text", "image"] },
   "MiniMax-M2.5": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M2.7": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M2.7-highspeed": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
@@ -166,6 +169,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "gpt-5.6-luna": { contextWindow: 400000, maxTokens: 100000, reasoning: true, input: ["text", "image"] },
   "gpt-5.6-terra": { contextWindow: 400000, maxTokens: 100000, reasoning: true, input: ["text", "image"] },
   "gpt-5.6-sol": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
+  "gpt-6-luna": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }, compat: { maxTokensField: "max_completion_tokens" } },
   "gemini-2.5-pro-preview": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
   "gemini-2.5-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
   "gemini-3.1-pro-preview": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
@@ -178,6 +182,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "hy3": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
   "hy4": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
   "step-3.7-flash": { name: "Step 3.7 Flash (StepFun)", contextWindow: 262144, maxTokens: 262144, reasoning: true, input: ["text", "image"], cost: { input: 1.44, output: 8.28, cacheRead: 0.29, cacheWrite: 0 }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "step-5-preview": { name: "Step 5 Preview (StepFun)", contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], cost: { input: 7, output: 20, cacheRead: 0.35, cacheWrite: 0 }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "deepseek-v3.1-terminus": { contextWindow: 128000, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } }, deprecated: true },
   "gitee-ai-deepseek-v3": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true } },
   "gitee-ai-deepseek-r1": { contextWindow: 131072, maxTokens: 32768, reasoning: true, compat: { supportsReasoningEffort: true, thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, reasoningEffortMap: { minimal: "high", low: "high", medium: "high", high: "high", xhigh: "max" } } },
