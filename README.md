@@ -97,6 +97,18 @@
 
 pi 与 omp 的 DeepSeek 模型按 **DeepSeek 官方接入指南**写入优化配置：thinking 等级锁定（`minLevel: high / maxLevel: xhigh / mode: effort`）+ 完整 compat 块（`supportsToolChoice: false` 等三关键字段，缺省思考模式下工具调用会 400）+ pi 的 `thinkingLevelMap`，并自动去 `/v1`（omp）。
 
+### 网关兼容层（已知网关缺陷的请求形状修正）
+
+canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道的实测行为与规格不符，修正放在两处本地层，不入 canonical、不受 `sync:models` 覆盖，网关修好后删对应条目即回到原生形状：
+
+| 网关缺陷 | 表现 | 本项目的兼容处理 |
+|---|---|---|
+| `gpt-6-luna`（七牛渠道）在 `/chat/completions` 上 **function tools 与 `reasoning_effort` 互斥**，且**省略该参数时按非 `none` 默认处理** | 带工具的 agent 请求 100% 失败：省略 / `low` / `medium` / `high` 均 400；流式还会被网关降级成 200 + 无信息量的 `Provider returned 400` | pi 侧：`src/core/models.ts` 的 `GATEWAY_OVERLAYS` 把该模型所有思考档（含 `off`、`max`）一律映射为 `reasoning_effort=none`，并置 `supportsReasoningEffort: true`，写入 `~/.pi/agent/models.json`（实测该形状可正常返回 `finish_reason=tool_calls`）<br>Codex 侧：转换代理在带 `tools` 且命中 `gpt-6` 族时显式发 `none`（不再沿用「`none` 一律省略」的旧规则——省略正是该路由的 400 形状），并且不做无意义的剥参数重试 |
+| 同模型的 `/responses` 被网关转成 chat 并注入 `thinking` 参数 | 400 `Unknown parameter: 'thinking'`，即报错里「use /v1/responses」的建议在本网关不成立 | 该模型列入 `CODX_PROXY_CONVERT_PATTERN`，Codex 走 Responses→Chat 转换而非透传 |
+| 流式请求挂起（30~60s 连 HTTP 状态都不回） | 客户端只能干等到总超时 | 转换代理对**流式**请求的「上游响应头 / SSE 首字节」设 60s deadline，超时即回明确错误；上游以 200 + 带内 `{"error":…}` 返回时转成 `response.failed` 并保留原始 message，不退化成笼统报错 |
+
+**代价与限制**：`gpt-6-luna` 在本网关上带工具时拿不到思考输出（模型侧 `reasoning_tokens=0`）——这是网关不支持 tools×reasoning 的必然结果，不是代理可绕开的；改走 `/responses` 保思考也被上面的 `thinking` 注入卡住。若网关后续修复，删除 overlay 条目即恢复。
+
 ### 备份还原
 
 - **按需备份，不重复备份自己的产物**：写入前比对内容指纹——文件当前内容就是本 app 上次写入的（频繁切换 Provider 覆盖的通常正是这种）则**不新建备份**（最初/上次外部改动前的备份仍在）；

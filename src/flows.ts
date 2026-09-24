@@ -2,7 +2,7 @@
 
 import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
-import { buildResolvedModels, deriveKeyRef, isDeepseekModel, type ResolvedModel } from "./core/models";
+import { buildResolvedModels, deriveKeyRef, gatewayOverlayFor, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { escapeRegExp, generateToken, timestamp } from "./core/util";
 import { BACKUP_KEEP_AUTO, pickStaleAutoBackups } from "./core/backup";
 import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
@@ -645,6 +645,10 @@ export async function configurePi(cfg: bridge.AppConfig, modelIds: string[]): Pr
     `  ${p2.changes.join(", ") || "无变化"}`,
     `默认模型: ${cfg.provider}/${defaultModel}(Pi 内用 /model 切换,重启 Pi 生效)`,
   ];
+  const overlaid = resolved.filter((m) => gatewayOverlayFor(m.id)).map((m) => m.id);
+  if (overlaid.length > 0) {
+    lines.push(`网关兼容层: ${overlaid.join(", ")} 思考档一律强制 reasoning_effort=none(该网关 chat 路由 tools×reasoning 互斥,且省略按非 none 默认处理 → 带工具必 400)`);
+  }
   if (w1?.backup) lines.push(`备份: ${w1.backup}`);
   return { changes: allChanges, lines };
 }

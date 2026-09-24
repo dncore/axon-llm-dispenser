@@ -29,6 +29,11 @@ futures-util = "0.3"
 bytes = "1"
 async-stream = "0.3"
 
+[dev-dependencies]
+# 仅测试用:test-util 提供 tokio 的 paused time(start_paused),用于断言
+# 流式首字节 deadline 会真的触发 response.failed,而不必在测试里干等 60s。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

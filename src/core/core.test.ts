@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveKeyRef, buildResolvedModels, isKnownModel } from "./models";
+import { deriveKeyRef, buildResolvedModels, isKnownModel, gatewayOverlayFor } from "./models";
 import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
@@ -356,6 +356,47 @@ describe("pi", () => {
     expect(s.providerConfigured).toBe(true);
     expect(s.providerModels).toBe(1);
     expect(s.defaultProvider).toBe("axon");
+  });
+});
+
+describe("网关兼容层", () => {
+  const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+  it("gpt-6-luna:思考档一律 none 且保留 canonical 的 maxTokensField", () => {
+    const [m] = buildResolvedModels(["gpt-6-luna"]);
+    // 该网关 chat 路由:省略 reasoning_effort 按非 none 处理 → 带 tools 必 400,
+    // 所以 supportsReasoningEffort 必须为 true(pi 才会真的发这个参数),且不能漏档。
+    expect(m.compat.supportsReasoningEffort).toBe(true);
+    expect(m.compat.maxTokensField).toBe("max_completion_tokens");
+    expect(m.reasoning).toBe(true); // 仍是推理模型(能力不变,只是不发 effort)
+    for (const lv of LEVELS) expect(m.thinkingLevelMap?.[lv]).toBe("none");
+    expect(Object.keys(m.thinkingLevelMap ?? {})).toHaveLength(LEVELS.length);
+  });
+
+  it("写进 pi models.json 的形状能让 pi 恒发 reasoning_effort=none", () => {
+    const [m] = buildResolvedModels(["gpt-6-luna"]);
+    const r = patchPiModelsJson("", { providerName: "axon", baseUrl: "https://gw/v1", apiKey: "sk-x", models: [m] });
+    const doc = JSON.parse(r.text) as { providers: Record<string, { models: Array<Record<string, never>> }> };
+    const entry = doc.providers.axon.models[0];
+    expect((entry.compat as { supportsReasoningEffort?: boolean }).supportsReasoningEffort).toBe(true);
+    expect((entry.thinkingLevelMap as Record<string, string>).max).toBe("none");
+    expect((entry.thinkingLevelMap as Record<string, string>).off).toBe("none");
+  });
+
+  it("未命中的模型不被改写(gpt-5.6-luna / 未知模型保持 canonical 形状)", () => {
+    const [five] = buildResolvedModels(["gpt-5.6-luna"]);
+    expect(gatewayOverlayFor("gpt-5.6-luna")).toBeUndefined();
+    expect(five.compat.supportsReasoningEffort).toBeFalsy();
+    expect(five.thinkingLevelMap).toBeUndefined();
+
+    const [unknown] = buildResolvedModels(["some-gateway-model"]);
+    expect(unknown.compat.supportsReasoningEffort).toBeFalsy();
+  });
+
+  it("每条 overlay 都带 reason(失效条件可追溯)", () => {
+    const o = gatewayOverlayFor("gpt-6-luna");
+    expect(o?.reason).toContain("reasoning_effort");
+    expect(o?.reason).toContain("失效条件");
   });
 });
 

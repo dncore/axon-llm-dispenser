@@ -31,6 +31,19 @@ pub const DEFAULT_PORT: u16 = 17321;
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
+/// 网关 chat 路由上「function tools 与 reasoning_effort 互斥」且「省略该参数按非 none
+/// 默认处理」的模型族(实测 2026-09-24 迈金网关 gpt-6-luna,owned_by 七牛:tools + 省略
+/// /low/medium/high 一律 400「Function tools with reasoning_effort are not supported for
+/// gpt-6-luna in /v1/chat/completions」;tools + 显式 none 才正常出 tool_calls)。
+/// Codex 每个请求都带 tools,所以该族在转换路径上必须显式发 "none" —— 沿用「none 一律
+/// 省略」的旧规则正好落进 400 那一侧。
+const TOOLS_EFFORT_EXCLUSIVE_PATTERN: &str = "gpt-6";
+
+/// 流式请求的「上游响应头 / 首字节」deadline。实测该网关会挂住流式请求 30~60s 零字节
+/// (HTTP 状态都不回),而 client 总超时是 600s —— 等于永远等不到。取 60s:成功样本首字节
+/// 3.5s,而 1M 上下文的 Codex 大 prompt 预填确实可能要几十秒,压到 20s 会误杀正常慢启动。
+const STREAM_FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_id(prefix: &str) -> String {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -53,6 +66,11 @@ pub fn should_convert(model: &str, pattern: &str) -> bool {
         .map(|p| p.trim().to_lowercase())
         .filter(|p| !p.is_empty())
         .any(|p| m.contains(&p))
+}
+
+/// 模型在网关 chat 路由上是否「tools × reasoning_effort 互斥,且省略即非 none 默认」。
+fn tools_effort_exclusive(model: &str) -> bool {
+    should_convert(model, TOOLS_EFFORT_EXCLUSIVE_PATTERN)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +498,13 @@ pub fn responses_to_chat(body: &Value) -> Value {
     // 唯 "none"/"off"/"disabled" 不作为该参数发送:实测 claude-* / gemini-3.7-flash /
     // grok-4.6 拒收 "none"(报 Invalid reasoning_effort / THINKING_LEVEL_MINIMAL),
     // 发送则 400;改用 omit(让上游走默认),安全且不崩。
-    if let Some(effort) = body
+    // 例外见下面 tools_effort_exclusive 分支:对 gpt-6 族「省略」恰恰是坏形状。
+    let has_tools = out.contains_key("tools");
+    if has_tools && tools_effort_exclusive(model) {
+        // 该族在 chat 路由上 tools×reasoning 互斥,且「省略」按非 none 处理 → 显式发 none
+        // 是唯一可用形状。代价:Codex 侧这些模型不再思考(网关不支持,不是代理的选择)。
+        out.insert("reasoning_effort".into(), json!("none"));
+    } else if let Some(effort) = body
         .get("reasoning")
         .and_then(|v| v.get("effort"))
         .and_then(|v| v.as_str())
@@ -759,7 +783,25 @@ where
         let meta_id = next_id("resp");
 
         let mut input = Box::pin(input);
-        while let Some(chunk) = input.next().await {
+        let mut waiting_first = true;
+        loop {
+            // 只给「第一个字节」设 deadline(后续块不设:长回答正常就会几十秒不出块)。
+            let chunk = if waiting_first {
+                match tokio::time::timeout(STREAM_FIRST_BYTE_TIMEOUT, input.next()).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        failed = Some(json!({
+                            "type": "upstream_timeout",
+                            "message": format!("upstream sent no SSE data within {}s (gateway hang)", STREAM_FIRST_BYTE_TIMEOUT.as_secs())
+                        }));
+                        break;
+                    }
+                }
+            } else {
+                input.next().await
+            };
+            waiting_first = false;
+            let Some(chunk) = chunk else { break };
             match chunk {
                 Err(e) => {
                     // 上游 SSE 流中断:设置 failed,并 break 落到收尾 —— 收尾恒发终点事件
@@ -931,6 +973,17 @@ where
                     if failed.is_some() { break; }
                 }
             }
+        }
+
+        // 上游一个字节都没发(首字节超时 / 空 200 流)时仍要先开 response.created:
+        // Codex 按 created → … → 终点事件解析事件流,直接喂 failed 会被判成协议错误、
+        // 把最有信息量的上游原因丢掉。
+        if !started {
+            yield sse_event("response.created", json!({
+                "type": "response.created",
+                "response": {"id": meta_id, "object": "response", "created_at": chrono_ts(), "status": "in_progress", "model": model, "output": []}
+            }));
+            yield sse_event("response.in_progress", json!({"type": "response.in_progress"}));
         }
 
         // 收尾:完成挂起 items
@@ -1124,6 +1177,14 @@ fn strip_effort_param(body: &Value, convert: bool) -> Option<Value> {
     let mut out = body.clone();
     let obj = out.as_object_mut()?;
     if convert {
+        // tools×reasoning 互斥族:能带 tools 的请求只有 reasoning_effort="none" 一种形状
+        // (实测省略即 400)。剥掉它正好落回那个 400 形状,重试只是白跑一次上游,
+        // 所以这里不回 retry 体,让首个 400 的原始 body 直接透传给 Codex。
+        if obj.contains_key("tools")
+            && tools_effort_exclusive(body.get("model").and_then(|v| v.as_str()).unwrap_or(""))
+        {
+            return None;
+        }
         if obj.remove("reasoning_effort").is_some() {
             return Some(out);
         }
@@ -1175,7 +1236,22 @@ async fn handle_responses(
         (format!("{}/responses", st.upstream_base_url.trim_end_matches('/')), body.clone())
     };
 
-    let mut upstream = match post_upstream(&st, &headers, &target, &out_body).await {
+    // 流式请求给上游「回响应头」设 deadline:网关挂起时(实测 30~60s 连状态码都不发)
+    // 600s 总超时等于永久卡死。非流式不设 —— 大上下文模型的整段生成本来就可能几十秒。
+    let sent = if stream_req {
+        match tokio::time::timeout(STREAM_FIRST_BYTE_TIMEOUT, post_upstream(&st, &headers, &target, &out_body)).await {
+            Ok(r) => r,
+            Err(_) => {
+                return json_err(
+                    504,
+                    format!("upstream returned no response headers within {}s (gateway hang)", STREAM_FIRST_BYTE_TIMEOUT.as_secs()),
+                )
+            }
+        }
+    } else {
+        post_upstream(&st, &headers, &target, &out_body).await
+    };
+    let mut upstream = match sent {
         Ok(r) => r,
         Err(e) => return json_err(502, format!("upstream connect failed: {e}")),
     };
@@ -2042,6 +2118,70 @@ mod tests {
         assert!(!text.contains("event: response.completed"));
         assert!(text.contains("\"status\":\"failed\""));
         assert!(text.contains("rate_limit_exceeded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_byte_timeout_emits_failed_after_created() {
+        // 网关挂起(200 + 零字节)时必须以带内 response.failed 收场,而不是让 Codex
+        // 干等到 600s 总超时;且 failed 之前要有 created(Codex 严格事件序)。
+        let s = transform_chat_sse(futures_util::stream::pending(), "gpt-6-luna".to_string());
+        let out = futures_util::StreamExt::collect::<Vec<_>>(Box::pin(s)).await;
+        let text = out
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("event: response.created"), "缺 created: {text}");
+        assert!(text.contains("event: response.failed"));
+        assert!(!text.contains("event: response.completed"));
+        assert!(text.contains("upstream_timeout"));
+    }
+
+    #[test]
+    fn gpt6_tools_force_reasoning_effort_none() {
+        // 该族在 chat 路由上 tools×reasoning 互斥,且「省略」按非 none 默认处理 →
+        // 带 tools(= Codex 的恒定形状)时只有显式 none 可用。
+        // 工具用 Responses 扁平形(type/name/parameters),不是 chat 的嵌套 function 形。
+        let with_tools = json!({
+            "model": "gpt-6-luna",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "name": "dummy", "parameters": {"type": "object"}}],
+            "reasoning": {"effort": "high"}
+        });
+        assert_eq!(responses_to_chat(&with_tools)["tools"][0]["function"]["name"], "dummy");
+        assert_eq!(responses_to_chat(&with_tools)["reasoning_effort"], "none");
+
+        let no_effort = json!({
+            "model": "gpt-6-luna",
+            "input": "hi",
+            "tools": [{"type": "function", "name": "dummy", "parameters": {"type": "object"}}]
+        });
+        assert_eq!(responses_to_chat(&no_effort)["reasoning_effort"], "none");
+
+        // 不带 tools 时思考照常(该路由的限制只在带工具时生效)。
+        let plain = json!({"model": "gpt-6-luna", "input": "hi", "reasoning": {"effort": "high"}});
+        assert_eq!(responses_to_chat(&plain)["reasoning_effort"], "high");
+
+        // 规则不外溢:gpt-5.6 带 tools 仍按用户选的档位转发(实测该路由可用)。
+        let gpt56 = json!({
+            "model": "gpt-5.6-luna",
+            "input": "hi",
+            "tools": [{"type": "function", "name": "dummy", "parameters": {"type": "object"}}],
+            "reasoning": {"effort": "high"}
+        });
+        assert_eq!(responses_to_chat(&gpt56)["tools"][0]["function"]["name"], "dummy");
+        assert_eq!(responses_to_chat(&gpt56)["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn strip_effort_retry_skipped_for_exclusive_tools() {
+        // 互斥族带 tools:剥掉 reasoning_effort 正好落回 400 形状,不该再白跑一次上游。
+        let bad = json!({"model": "gpt-6-luna", "tools": [{"type": "function", "function": {"name": "d"}}], "reasoning_effort": "none", "messages": []});
+        assert!(strip_effort_param(&bad, true).is_none());
+        // 其它模型维持原行为:能剥就剥一次。
+        let ok = json!({"model": "gpt-5.6-luna", "tools": [{"type": "function", "function": {"name": "d"}}], "reasoning_effort": "max", "messages": []});
+        assert!(strip_effort_param(&ok, true).is_some());
+        assert!(strip_effort_param(&ok, true).unwrap().get("reasoning_effort").is_none());
     }
 
     /// 把 SSE 文本解析成事件 JSON 列表(serde_json::Value 键按字典序序列化,

@@ -1,9 +1,13 @@
 // 模型元数据:KNOWN_MODELS(已知模型精确规格)+ inferFromId(正则推断兜底)。
 // 数据来自通用模型规格(DeepSeek/Qwen/GLM/Kimi/MiniMax/Claude/GPT/Gemini 等),
-// 不包含任何公司/网关专属信息。
+// KNOWN_MODELS 表段本身不包含任何公司/网关专属信息;网关侧已知缺陷的请求形状修正
+// 单独放在表段之外的「网关兼容层」(见 GATEWAY_OVERLAYS),不受 canonical gist 同步覆盖。
 
 export type InputType = "text" | "image";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+/** pi 的实际档位集(含 max;见 @earendil-works/pi-coding-agent ThinkingLevelMapSchema)。
+ * canonical gist 表只允许前 6 档(scripts/sync-model-meta.mjs 的 levels 校验),max 档
+ * 目前只有下面的网关兼容层会写 —— 少一档就意味着该档请求省略 reasoning_effort。 */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingValue = string | null;
 
 export type CompatConfig = {
@@ -190,6 +194,41 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
 };
 // @model-meta:end
 
+// ---------------------------------------------------------------------------
+// 网关兼容层:canonical gist 表(@model-meta 表段)只记模型官方规格,这里放
+// 「某模型经某网关渠道实测后的请求形状修正」。它不是模型规格,所以不入 canonical、
+// 不参与 sync:models / check:models;渠道或网关修好后删掉对应条目即回到原生行为。
+// ---------------------------------------------------------------------------
+
+export type GatewayOverlay = {
+  /** 修正理由 + 实测证据 + 失效条件。改这条必须连证据一起更新,否则后人无法判断能否删。 */
+  reason: string;
+  compat?: CompatConfig;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, ThinkingValue>>;
+};
+
+/** 只按精确 id 匹配:正则误伤一个模型的思考档位,比漏配一条更难排查。 */
+const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
+  "gpt-6-luna": {
+    reason:
+      "迈金网关 gpt-6-luna(owned_by 七牛)的 /chat/completions 路由上 function tools 与 reasoning_effort 互斥," +
+      "且请求**省略**该参数时按非 none 默认处理 → 任何带工具的 agent 客户端必 400。" +
+      "实测 2026-09-24:省略/low/medium/high 均 400「Function tools with reasoning_effort are not supported for " +
+      "gpt-6-luna in /v1/chat/completions … or set reasoning_effort to 'none'」;显式 none 正常出 finish_reason=tool_calls。" +
+      "报错建议的 /v1/responses 在同一网关也被卡:网关会把 Responses 请求转成 chat 并注入 thinking 参数 → " +
+      "400「Unknown parameter: 'thinking'」(request_id 前缀 chatcmpl-,即又走了 chat 上游),无法改走 Responses 保思考。" +
+      "因此 off 也必须显式发 none(省略即回到 400)。代价:该模型在本网关上拿不到思考输出。" +
+      "失效条件:网关在同模型的 chat 路由上允许 tools×非 none reasoning_effort(或 /responses 不再注入 thinking)后,删除本条即回到 canonical 形状。",
+    compat: { supportsReasoningEffort: true },
+    thinkingLevelMap: { off: "none", minimal: "none", low: "none", medium: "none", high: "none", xhigh: "none", max: "none" },
+  },
+};
+
+/** 某模型是否命中网关兼容层(供日志/摘要说明「思考档被强制改写」及其原因)。 */
+export function gatewayOverlayFor(id: string): GatewayOverlay | undefined {
+  return GATEWAY_OVERLAYS[id];
+}
+
 interface InferredMeta {
   reasoning: boolean;
   thinkingLevelMap?: Partial<Record<ThinkingLevel, ThinkingValue>>;
@@ -248,7 +287,7 @@ function resolveModel(id: string): ResolvedModel {
   const maxTokens = known?.maxTokens ?? inferred.maxTokens ?? DEFAULT_MAX_TOKENS;
   const name = known?.name ?? id;
 
-  return {
+  const model: ResolvedModel = {
     id,
     name,
     reasoning,
@@ -259,6 +298,18 @@ function resolveModel(id: string): ResolvedModel {
     thinkingLevelMap,
     compat: modelCompat,
   };
+  applyGatewayOverlay(model);
+  return model;
+}
+
+/** 就地套用网关兼容修正(compat 逐键覆盖;档位表合并后覆盖,保证不漏档)。 */
+function applyGatewayOverlay(model: ResolvedModel): void {
+  const overlay = GATEWAY_OVERLAYS[model.id];
+  if (!overlay) return;
+  if (overlay.compat) model.compat = mergeCompat(model.compat, overlay.compat);
+  if (overlay.thinkingLevelMap) {
+    model.thinkingLevelMap = { ...model.thinkingLevelMap, ...overlay.thinkingLevelMap };
+  }
 }
 
 /** 把模型 id 列表解析为完整元数据(已知模型精确规格,未知模型按 id 正则推断)。 */
