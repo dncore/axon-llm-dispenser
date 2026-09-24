@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 pub const DEFAULT_PORT: u16 = 17321;
 /// OpenAI-compatible function name 最大长度(chat 上游校验 ^[a-zA-Z0-9_-]+$,且有长度上限)。
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
-pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
+pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_id(prefix: &str) -> String {
@@ -466,11 +466,12 @@ pub fn responses_to_chat(body: &Value) -> Value {
         out.insert("response_format".into(), rf);
     }
 
-    // max_output_tokens → max_completion_tokens(gpt-5/o 系)或 max_tokens
+    // max_output_tokens → max_completion_tokens(gpt-5/gpt-6/o 系)或 max_tokens
+    // (gpt-6 实测只收 max_completion_tokens,发 max_tokens 直接 400)
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let ml = model.to_lowercase();
     if let Some(m) = body.get("max_output_tokens") {
-        let key = if ml.starts_with("o") || ml.contains("gpt-5") { "max_completion_tokens" } else { "max_tokens" };
+        let key = if ml.starts_with("o") || ml.contains("gpt-5") || ml.contains("gpt-6") { "max_completion_tokens" } else { "max_tokens" };
         out.insert(key.into(), m.clone());
     }
 
@@ -1680,6 +1681,31 @@ mod tests {
         assert!(should_convert("GPT-5.6-TERRA", "gpt-5.6"));
         assert!(!should_convert("deepseek-v4-flash", "gpt-5.6"));
         assert!(!should_convert("qwen3.8-max", "gpt-5.6"));
+        assert!(should_convert("gpt-6-luna", DEFAULT_CONVERT_PATTERN));
+        assert!(should_convert("GPT-6-LUNA", DEFAULT_CONVERT_PATTERN));
+        // kimi-k2.8 / step-5-preview 原生 /responses 可用,不进转换名单
+        assert!(!should_convert("kimi-k2.8", DEFAULT_CONVERT_PATTERN));
+        assert!(!should_convert("step-5-preview", DEFAULT_CONVERT_PATTERN));
+        // mimo-v2.6 命中既有的 MiMo 规则(大小写不敏感)
+        assert!(should_convert("mimo-v2.6-pro", DEFAULT_CONVERT_PATTERN));
+    }
+
+    #[test]
+    fn responses_to_chat_max_tokens_field_by_model() {
+        let mk = |model: &str| {
+            responses_to_chat(&json!({"model": model, "input": "hi", "max_output_tokens": 1000}))
+        };
+        // gpt-6 只收 max_completion_tokens(发 max_tokens 上游 400)
+        let gpt6 = mk("gpt-6-luna");
+        assert_eq!(gpt6["max_completion_tokens"], 1000);
+        assert!(gpt6.get("max_tokens").is_none());
+        let gpt5 = mk("gpt-5.6-luna");
+        assert_eq!(gpt5["max_completion_tokens"], 1000);
+        let o = mk("o4-mini");
+        assert_eq!(o["max_completion_tokens"], 1000);
+        let other = mk("kimi-k2.8");
+        assert_eq!(other["max_tokens"], 1000);
+        assert!(other.get("max_completion_tokens").is_none());
     }
 
     #[test]

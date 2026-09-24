@@ -17,9 +17,11 @@ export const CODX_PROXY_DEFAULT_PORT = 17321;
 /** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。
  * 静态规则由当前网关卡预探测生成(2026-08-27):网关对这些模型的原生 /responses
  * 不可用(502/参数错误),chat/completions 可用;其余模型(qwen 系/hy3/MiniMax/
- * deepseek-v4-pro/kimi-k2.7-code 等)原生 responses 可用,走透传。 */
+ * deepseek-v4-pro/kimi-k2.7-code 等)原生 responses 可用,走透传。
+ * gpt-6(2026-09-24 补测):/responses 直接 400「Unknown parameter: 'thinking'」,
+ * 同 gpt-5.6 家族的表征,归入转换;kimi-k2.8 / step-5-preview 实测原生可用,不列。 */
 export const CODX_PROXY_CONVERT_PATTERN =
-  "gpt-5.6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
+  "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
 /** Codex 客户端模型选择器可见条目上限(visibility="list")。超过该数量,客户端渲染的模型
  * 列表布局会挤压错乱;Codex 官方内置目录也只保留 5 条可见(list)+ 4 条 hide。
