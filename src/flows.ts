@@ -2,7 +2,7 @@
 
 import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
-import { buildResolvedModels, deriveKeyRef, gatewayOverlayFor, isDeepseekModel, type ResolvedModel } from "./core/models";
+import { buildResolvedModels, deriveKeyRef, gatewayOverlayFor, gatewayThinkingDisabled, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { escapeRegExp, generateToken, timestamp } from "./core/util";
 import { BACKUP_KEEP_AUTO, pickStaleAutoBackups } from "./core/backup";
 import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
@@ -49,8 +49,13 @@ function backupSuffix(w: WriteResult): string {
 /** 默认模型选择:配置的优先;否则优先网关内常见的 deepseek-v4-flash,再退回第一个。 */
 export function pickDefaultModel(modelIds: string[], configured?: string): string {
   if (configured) return configured;
-  if (modelIds.includes("deepseek-v4-flash")) return "deepseek-v4-flash";
-  return modelIds[0] ?? "";
+  // 自动挑默认模型时跳过「被网关兼容层强制关思考」的模型(gpt-6-luna 这类):
+  // 它们在带工具的 agent 循环里等于纯无思考模型,当默认会静默降低质量。
+  // 只影响自动挑选;用户显式配置的默认模型(上一行的 configured)一概不动。
+  const usable = modelIds.filter((id) => !gatewayThinkingDisabled(id));
+  if (usable.includes("deepseek-v4-flash")) return "deepseek-v4-flash";
+  // 全部模型都被关思考(极端情况)时仍退回原列表,不返回空串。
+  return usable[0] ?? modelIds[0] ?? "";
 }
 
 export async function testConnection(baseUrl: string, apiKey: string): Promise<bridge.ModelInfo[]> {

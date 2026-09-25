@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveKeyRef, buildResolvedModels, isKnownModel, gatewayOverlayFor } from "./models";
+import { deriveKeyRef, buildResolvedModels, isKnownModel, gatewayOverlayFor, gatewayThinkingDisabled } from "./models";
 import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
@@ -393,6 +393,27 @@ describe("网关兼容层", () => {
     expect(unknown.compat.supportsReasoningEffort).toBeFalsy();
   });
 
+  it("thinkingDisabled 标记与档位表一致(UI 标注/默认模型跳过的依据)", () => {
+    expect(gatewayThinkingDisabled("gpt-6-luna")).toBe(true);
+    expect(gatewayThinkingDisabled("gpt-5.6-luna")).toBe(false);
+    expect(gatewayThinkingDisabled("some-unknown-model")).toBe(false);
+    // 标了 thinkingDisabled 的条目,所有档位必须都映射到关思考的取值,
+    // 否则 UI 会标「无思考」而实际某档还在思考。
+    const o = gatewayOverlayFor("gpt-6-luna")!;
+    expect(o.thinkingDisabled).toBe(true);
+    for (const lv of LEVELS) expect(["none", "off", "disabled"]).toContain(o.thinkingLevelMap?.[lv]);
+  });
+
+  it("自动默认模型跳过被强制关思考的模型(显式配置不动)", () => {
+    // 不带 tools 时也拿不到思考,当默认会静默降质 → 自动挑时跳过
+    expect(pickDefaultModel(["gpt-6-luna", "glm-5.3"], undefined)).toBe("glm-5.3");
+    expect(pickDefaultModel(["gpt-6-luna", "deepseek-v4-flash"], undefined)).toBe("deepseek-v4-flash");
+    // 显式配置的默认模型(用户选择)永远尊重,包括被关思考的模型
+    expect(pickDefaultModel(["gpt-6-luna", "glm-5.3"], "gpt-6-luna")).toBe("gpt-6-luna");
+    // 全是关思考模型时仍返回一个 id,不返回空串
+    expect(pickDefaultModel(["gpt-6-luna"], undefined)).toBe("gpt-6-luna");
+  });
+
   it("每条 overlay 都带 reason(失效条件可追溯)", () => {
     const o = gatewayOverlayFor("gpt-6-luna");
     expect(o?.reason).toContain("reasoning_effort");
@@ -400,7 +421,7 @@ describe("网关兼容层", () => {
   });
 });
 
-import { isDoubaoModel, filterDoubao, dshDeepseekEfforts } from "../flows";
+import { isDoubaoModel, filterDoubao, dshDeepseekEfforts, pickDefaultModel } from "../flows";
 
 describe("dsh DeepSeek reasoningEfforts 映射", () => {
   it("对齐 pi-ai 内置目录:max 档(非 xhigh),flash 额外 low", () => {

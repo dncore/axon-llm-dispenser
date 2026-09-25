@@ -7,7 +7,7 @@ import * as flows from "./flows";
 import { AGENT_CLIS } from "./core/agents";
 import { BACKUP_KEEP_AUTO } from "./core/backup";
 import { claudeModelSuffix } from "./core/claude";
-import { buildResolvedModels, isKnownModel } from "./core/models";
+import { buildResolvedModels, gatewayThinkingDisabled, isKnownModel } from "./core/models";
 import { CODX_MAX_LISTED_MODELS, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT } from "./core/codex";
 import { fallbackAutostartChecked } from "./core/autostart";
 // 开机自启(macOS LaunchAgent / Windows 注册表),状态由系统侧查询,不入 AppConfig。
@@ -1198,6 +1198,10 @@ function renderModelsList(): void {
       h("span", { class: "model-row-id" }, [r.id]),
       // 未命中元数据表(规格为推断值)的模型标 "new"
       ...(isKnownModel(r.id) ? [] : [h("span", { class: "model-row-new", title: "未命中模型元数据表,规格按 id 推断" }, ["new"])]),
+      // 网关兼容层强制关思考的模型:显式标注,避免用户以为它是常规推理模型
+      ...(gatewayThinkingDisabled(r.id)
+        ? [h("span", { class: "model-row-warn", title: "该模型在本网关上带工具时思考被强制关闭(上游限制:function tools 与 reasoning_effort 互斥)。需要思考+工具请换模型;自动挑选默认模型时会跳过它" }, ["无思考"])]
+        : []),
       r.ownedBy ? h("span", { class: "model-row-owner" }, [r.ownedBy]) : h("span", { class: "model-row-owner" }, ["—"]),
       h("button", { class: "model-row-del", type: "button", title: "移除" }, ["×"]),
     ]);

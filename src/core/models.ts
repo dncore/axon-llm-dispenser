@@ -205,6 +205,9 @@ export type GatewayOverlay = {
   reason: string;
   compat?: CompatConfig;
   thinkingLevelMap?: Partial<Record<ThinkingLevel, ThinkingValue>>;
+  /** 该修正是「全档位强制关思考」:模型在本网关带工具时拿不到思考输出。
+   * 标记出来供 UI 提示与默认模型挑选跳过(别再让用户以为它是常规推理模型)。 */
+  thinkingDisabled?: boolean;
 };
 
 /** 只按精确 id 匹配:正则误伤一个模型的思考档位,比漏配一条更难排查。 */
@@ -221,12 +224,18 @@ const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
       "失效条件:网关在同模型的 chat 路由上允许 tools×非 none reasoning_effort(或 /responses 不再注入 thinking)后,删除本条即回到 canonical 形状。",
     compat: { supportsReasoningEffort: true },
     thinkingLevelMap: { off: "none", minimal: "none", low: "none", medium: "none", high: "none", xhigh: "none", max: "none" },
+    thinkingDisabled: true,
   },
 };
 
 /** 某模型是否命中网关兼容层(供日志/摘要说明「思考档被强制改写」及其原因)。 */
 export function gatewayOverlayFor(id: string): GatewayOverlay | undefined {
   return GATEWAY_OVERLAYS[id];
+}
+
+/** 该模型是否被兼容层强制关思考(UI 标注「无思考」、自动默认模型跳过它)。 */
+export function gatewayThinkingDisabled(id: string): boolean {
+  return GATEWAY_OVERLAYS[id]?.thinkingDisabled === true;
 }
 
 interface InferredMeta {
