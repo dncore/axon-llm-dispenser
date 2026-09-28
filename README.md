@@ -20,18 +20,19 @@
 
 ## 功能
 
-### 连接设置（多 Provider）
+### 连接设置（单套网关 + Codex 账号模式）
 
-- **Provider 配置**：可保存**多套网关配置**（各自的 baseUrl / API Key / Anthropic 端点 / 模型列表），下拉选择即切换；`＋新建` / 🗑删除 / **「应用到已接入工具」** 一键把当前配置写入所有已接入的 Agent
-  - **切换 = 载入表单 + 拉取该网关模型 + 确认后写入已接入工具**（未接入的自动跳过；Claude 沿用 settings.json 现有角色映射，Codex 自动处理转换代理与可见模型）；确认框取消则只切换表单、不写工具
-  - 状态徽标：绿=与当前 Provider 一致，**紫=指向本 app 的另一个 Provider**（频繁来回切换时一眼看出各工具当前指向哪套网关），橙=不一致，灰=未配置
-  - 旧版单套配置（config.json）首次启动自动迁移为一条 Provider，配置不丢
-- **Provider 名 / 显示名**：写入各工具的路由名与展示名（默认 `axon` / `Axon`）；多套配置可共用同一路由名（切换时就地改写，文件里不留旧段）
+- **一套网关配置**：baseUrl / API Key / Anthropic 端点 / 模型列表一份；**「应用到已接入工具」** 一键把当前配置写入所有已接入的 Agent（未接入的自动跳过；Claude 沿用 settings.json 现有角色映射，Codex 自动处理转换代理与可见模型）
+- **Codex 卡片上的「官方账号 / 自建网关」二选一**（本项目唯一与 Codex 专属语义相关的开关）
+  - **自建网关**（默认）：config.toml 写 `model_provider` / 顶层 `model` / `model_catalog_json`，经本机转换代理指向你填的网关
+  - **官方账号**：撤掉上面三样（`model_provider` 置 `openai`），Codex 走 ChatGPT 登录 + 自带模型目录；`[model_providers.*]` 段保留，随时切回
+- **Provider 名 / 显示名**：写入各工具的路由名与展示名（默认 `axon` / `Axon`）；用过的名字会记进 `knownProviders`（改名后旧产物仍能被认出并清理）
 - **Base URL / API Key**：你的 OpenAI 兼容网关地址与凭据；API Key 输入框带 👁 明文/密文切换
 - **Anthropic 端点**（Claude 用，可留空自动推导 `/api/v1 → /api/anthropic`）
 - 「测试连接」：`GET /models` 拉取模型并**自动保存配置**；标题行红绿点实时指示连接状态（灰=未测试 / 蓝脉冲=连接中 / 绿=成功 / 红=失败）
-- 「删除配置」：清除保存的全部 Provider 配置（config.json），表单恢复初始状态
-- 配置保存后重启自动加载并**自动拉取模型列表**（模型列表按 Provider 持久化，切换后立即恢复、刷新不丢）
+- 「删除配置」：清除保存的网关配置（config.json），表单恢复初始状态
+- 配置保存后重启自动加载并**自动拉取模型列表**（模型列表持久化，刷新不丢）
+- **历史配置自动迁移**：早期单套配置原样沿用；一度出现过的「多 Provider」配置首次启动收敛为**当前激活的那一套**（其余配置随之删除，它们写进 Codex 的残留由下方「归属与残留清理」规则清理）
 
 ### 模型列表（左侧全高卡片）
 
@@ -83,6 +84,7 @@
   其他 provider、顶层键、其他 `[model.*]` 块一概不动
 - 模型条目按 id 识别合并；归属本工具的条目在网关下架后会随同步移除，**非本工具写入的条目/模型块一律保留**
   （Codex `models.json` 按 description 前缀识别归属，Grok 按 `model_provider` 识别，其余按模型列表归属）
+- **归属与残留清理**：Codex 目录条目按 `<provider 名>: …` 前缀 + **本 app 家族署名尾**（`— openai-compatible gateway` / `— /responses OK` / `— /responses not selected`）判定归属。**三个条件同时满足**才清理：① 署名属本 app 家族 ② 该 provider 名既不是当前值、也不在 `knownProviders` 里（典型：那套配置已被删）③ 该模型已不在网关模型列表。同时移除 config.toml 里对应的 `[model_providers.<name>]` 残留段。用户手写、或没有本 app 署名的条目/段一概不动
 - 全量「配置」与「刷新模型」遵循同一套规则；密钥文件（`.env` / `auth.json` / `.credentials.yaml`）不备份、固定 0600
 
 ### 升级 / 安装（按现有安装方式）
@@ -151,7 +153,7 @@ canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道�
 2. 点「测试连接」拉取模型列表（自动应用 Doubao 过滤并保存配置）
 3. 在「工具接入」点对应 Agent 的 ▶ 配置（Claude 会弹出角色映射），确认后写入其官方配置文件；
    只更新模型列表（不动 base_url / 密钥）时点该 Agent 的 ⟳ 刷新模型，或标题行 ⟳ 一次刷新全部
-4. 有第二套网关时点「＋新建」存成另一个 Provider；之后在下拉里切换即载入表单并（确认后）写入所有已接入工具
+4. 换网关:改 Base URL / API Key → 「测试连接」拉模型 → 「应用到已接入工具」一键改写所有已接入的 Agent;Codex 想临时用官方账号,点它卡片上的「官方账号」即可(切回点「自建网关」)
 5. 图标变橙色 ↑ 时点击升级；未安装的 Agent 点击图标选择官方方式安装
 6. 需要时用 ⟲ 从备份还原（支持重命名 / 删除 / 编辑备份内容 / 清理自动备份）
 
@@ -196,7 +198,7 @@ npx tauri build    # 产物 .app/.dmg(macOS) 或便携 zip(Windows, 经 CI)
 
 UI 冒烟: `npm run smoke:ui` —— 无头 Chrome 打开真实构建产物、mock 掉 Tauri IPC（内存文件系统），
 跑两组交互断言：**Codex 可见模型上限**（超限弹选择框 / 上限内勾选 / 写盘可见性 / ESC 取消 / 不超限不打扰 / 新增模型再次触发）、
-**多 Provider 一键切换与备份策略**（切换确认与写盘 / Claude+Codex 同时改指新网关 / model 跟随改写 / 切回不再产生备份 / 清理自动备份保留最近 10 个）。
+**应用到已接入工具与备份策略**（确认框列出目标工具 / Claude+Codex 同时改指 / model 跟随改写 / 旧配置迁移 / 残留 provider 清理 / 重复应用不再产生备份 / 清理自动备份保留最近 10 个）。
 需要系统 Chrome/Chromium（或用 `CHROME_BIN=` 指定）；脚本在 `scripts/ui-smoke/`。
 
 ## 技术栈

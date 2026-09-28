@@ -1,160 +1,73 @@
-// 应用自身配置(多 Provider profile):迁移 / 激活 / 增删 / 落盘序列化,纯函数无 I/O。
-// 内存中的 AppConfig 顶层字段始终等于「当前激活 profile」的字段(各流程直接读顶层),
-// 落盘则序列化为 { profiles, activeProfileId, excludeDoubao, codexProxy }:profile 是唯一数据源。
+// 应用自身配置(单套网关 + Codex 账号模式):迁移 / 序列化,纯函数无 I/O。
+// 历史:早期为单套配置;0.5.2x 一度引入「多 Provider profile」,与设计意图(只给 Codex 做
+// 「官方账号 / 自建网关」切换)不符,已移除。落盘 schema 见 serializeAppConfig;
+// 旧的多 profile config.json 由 migrateAppConfig 自动收敛(见该函数注释)。
 
 export type ConfigModelRow = { id: string; ownedBy?: string };
 
-export type ProviderProfile = {
-  id: string;
+/** Codex 用哪条路:官方账号(ChatGPT 登录,Codex 自带目录)或本 app 写入的自建网关。 */
+export type CodexAccount = "official" | "custom";
+
+export type AppConfig = {
   /** 写入各工具的 provider 路由名。 */
   provider: string;
+  /** 展示名(各工具里的 provider 显示名)。 */
   displayName: string;
   baseUrl: string;
   apiKey: string;
   /** Anthropic 兼容端点(Claude 用);留空时自动从 baseUrl 推导。 */
   anthropicBaseUrl: string;
-  /** 该网关的默认模型;留空时按模型列表自动挑选。 */
+  /** 默认模型;留空时按模型列表自动挑选(见 flows.pickDefaultModel)。 */
   defaultModel: string;
-  /** 上次拉取到的模型列表:按 profile 保存,切回该网关时立即恢复展示。 */
+  /** 上次拉取到的模型列表(启动后自动拉取并持久化)。 */
   models?: ConfigModelRow[];
-  /** Codex 可见模型选择(visibility="list"):每个 profile 独立记忆,切换网关不互相覆盖。 */
+  /** Codex 可见模型选择(visibility="list"):网关新增模型时仍会触发「超上限挑选」。 */
   codexListed?: string[];
-  /** 做出上述选择时的完整模型列表:其后网关新增的模型仍会触发「超上限挑选」。 */
+  /** 做出上述选择时的完整模型列表。 */
   codexKnown?: string[];
-};
-
-export type AppConfig = {
-  // 以下字段 = 当前激活 profile 的视图(内存便利字段,落盘时写入对应 profile)
-  provider: string;
-  displayName: string;
-  baseUrl: string;
-  apiKey: string;
-  anthropicBaseUrl: string;
-  defaultModel: string;
-  models?: ConfigModelRow[];
-  profiles: ProviderProfile[];
-  activeProfileId: string;
+  /** Codex 账号模式:官方账号 / 自建网关(默认)。 */
+  codexAccount: CodexAccount;
+  /** 本 app 曾用过的 provider 路由名(含已改名的):Codex 目录归属判定用,只增不减。 */
+  knownProviders: string[];
   /** 全局过滤 Doubao 系模型(默认开启,生成配置不含 doubao)。 */
   excludeDoubao: boolean;
   /** Codex Responses 转换代理(网关 /responses 对部分模型如 gpt-5.6 转换不可用时开启)。 */
   codexProxy?: { enabled: boolean; port: number };
 };
 
-export function emptyProfile(id: string, provider = "axon", displayName = "Axon"): ProviderProfile {
-  return { id, provider, displayName, baseUrl: "", apiKey: "", anthropicBaseUrl: "", defaultModel: "" };
-}
-
-/** profile 的字段视图(铺到 AppConfig 顶层用)。 */
-function fieldsOf(p: ProviderProfile): Omit<AppConfig, "profiles" | "activeProfileId" | "excludeDoubao" | "codexProxy"> {
-  const out: Omit<AppConfig, "profiles" | "activeProfileId" | "excludeDoubao" | "codexProxy"> = {
-    provider: p.provider,
-    displayName: p.displayName,
-    baseUrl: p.baseUrl,
-    apiKey: p.apiKey,
-    anthropicBaseUrl: p.anthropicBaseUrl,
-    defaultModel: p.defaultModel,
-  };
-  if (p.models) out.models = p.models;
-  return out;
-}
-
-const DEFAULT_PROFILE = emptyProfile("p1");
+/** 本 app 的默认路由名:即使当前改名,它写下的东西仍属本 app(归属判定与残留清理用)。 */
+export const DEFAULT_PROVIDER_NAME = "axon";
 
 export const DEFAULT_CONFIG: AppConfig = {
-  ...fieldsOf(DEFAULT_PROFILE),
-  profiles: [DEFAULT_PROFILE],
-  activeProfileId: DEFAULT_PROFILE.id,
+  provider: DEFAULT_PROVIDER_NAME,
+  displayName: "Axon",
+  baseUrl: "",
+  apiKey: "",
+  anthropicBaseUrl: "",
+  defaultModel: "",
+  codexAccount: "custom",
+  knownProviders: [DEFAULT_PROVIDER_NAME],
   excludeDoubao: true,
   codexProxy: { enabled: true, port: 17321 },
 };
 
 /** 深拷贝一份配置(默认配置是模块级单例,避免就地修改污染)。 */
 export function cloneConfig(cfg: AppConfig): AppConfig {
-  return { ...cfg, profiles: cfg.profiles.map((p) => ({ ...p, models: p.models?.map((m) => ({ ...m })), codexListed: p.codexListed ? [...p.codexListed] : undefined, codexKnown: p.codexKnown ? [...p.codexKnown] : undefined })) };
-}
-
-/** 生成未被占用的 profile id(p1/p2/…,稳定可读,便于对照 config.json 排障)。 */
-export function newProfileId(profiles: ProviderProfile[]): string {
-  const ids = new Set(profiles.map((p) => p.id));
-  let n = 1;
-  while (ids.has(`p${n}`)) n++;
-  return `p${n}`;
-}
-
-/** 当前激活 profile(profiles 至少有一个,见 migrateAppConfig/removeProfile)。 */
-export function activeProfile(cfg: AppConfig): ProviderProfile {
-  return cfg.profiles.find((p) => p.id === cfg.activeProfileId) ?? cfg.profiles[0];
-}
-
-/** 顶层字段 → 激活 profile(落盘前调用;保证表单改动写回所属 profile)。 */
-export function syncActiveProfile(cfg: AppConfig): AppConfig {
-  const active = activeProfile(cfg);
-  const next: ProviderProfile = {
-    ...active,
-    provider: cfg.provider,
-    displayName: cfg.displayName,
-    baseUrl: cfg.baseUrl,
-    apiKey: cfg.apiKey,
-    anthropicBaseUrl: cfg.anthropicBaseUrl,
-    defaultModel: cfg.defaultModel,
+  return {
+    ...cfg,
+    models: cfg.models?.map((m) => ({ ...m })),
+    codexListed: cfg.codexListed ? [...cfg.codexListed] : undefined,
+    codexKnown: cfg.codexKnown ? [...cfg.codexKnown] : undefined,
+    knownProviders: [...cfg.knownProviders],
+    codexProxy: cfg.codexProxy ? { ...cfg.codexProxy } : undefined,
   };
-  if (cfg.models) next.models = cfg.models;
-  else delete next.models;
-  return { ...cfg, profiles: cfg.profiles.map((p) => (p.id === active.id ? next : p)) };
 }
 
-/** 激活指定 profile:顶层字段换成该 profile 的字段(其余 profile 先同步保存)。 */
-export function activateProfile(cfg: AppConfig, id: string): AppConfig {
-  const synced = syncActiveProfile(cfg);
-  const target = synced.profiles.find((p) => p.id === id);
-  if (!target) return synced;
-  return { ...synced, ...fieldsOf(target), activeProfileId: target.id };
-}
-
-/** 新增 profile 并激活(表单切到新 profile 的字段视图)。 */
-export function addProfile(cfg: AppConfig, profile: ProviderProfile): AppConfig {
-  const synced = syncActiveProfile(cfg);
-  return { ...synced, profiles: [...synced.profiles, profile], ...fieldsOf(profile), activeProfileId: profile.id };
-}
-
-/** 删除 profile(删到最后一个时重置为默认空 profile,保证始终有激活项)。 */
-export function removeProfile(cfg: AppConfig, id: string): AppConfig {
-  const synced = syncActiveProfile(cfg);
-  const rest = synced.profiles.filter((p) => p.id !== id);
-  if (rest.length === 0) {
-    const fresh = emptyProfile(newProfileId([]));
-    return { ...DEFAULT_CONFIG, profiles: [fresh], activeProfileId: fresh.id };
-  }
-  const next = synced.activeProfileId === id ? rest[0] : activeProfile({ ...synced, profiles: rest });
-  return { ...synced, profiles: rest, ...fieldsOf(next), activeProfileId: next.id };
-}
-
-function cleanProfile(p: ProviderProfile): Record<string, unknown> {
-  const out: Record<string, unknown> = {
-    id: p.id,
-    provider: p.provider,
-    displayName: p.displayName,
-    baseUrl: p.baseUrl,
-    apiKey: p.apiKey,
-    anthropicBaseUrl: p.anthropicBaseUrl,
-    defaultModel: p.defaultModel,
-  };
-  if (p.models) out.models = p.models;
-  if (p.codexListed && p.codexListed.length > 0) out.codexListed = p.codexListed;
-  if (p.codexKnown && p.codexKnown.length > 0) out.codexKnown = p.codexKnown;
-  return out;
-}
-
-/** 落盘 schema:profiles 为单一数据源,顶层不再冗余保存字段视图。 */
-export function serializeAppConfig(cfg: AppConfig): Record<string, unknown> {
-  const synced = syncActiveProfile(cfg);
-  const out: Record<string, unknown> = {
-    profiles: synced.profiles.map(cleanProfile),
-    activeProfileId: synced.activeProfileId,
-    excludeDoubao: synced.excludeDoubao,
-  };
-  if (synced.codexProxy) out.codexProxy = { enabled: synced.codexProxy.enabled, port: synced.codexProxy.port };
-  return out;
+/** 记下用过的 provider 名(只增不减:改名后旧名下的产物仍能被认出来并清理)。 */
+export function rememberProvider(cfg: AppConfig, name?: string): AppConfig {
+  const n = (name ?? cfg.provider).trim();
+  if (!n || cfg.knownProviders.includes(n)) return cfg;
+  return { ...cfg, knownProviders: [...cfg.knownProviders, n] };
 }
 
 function asString(v: unknown, fallback = ""): string {
@@ -167,60 +80,87 @@ function asStringList(v: unknown): string[] | undefined {
   return list.length > 0 ? list : undefined;
 }
 
-function normalizeProfile(src: Record<string, unknown>, fallbackId: string): ProviderProfile {
-  const provider = asString(src.provider) || "axon";
-  const out: ProviderProfile = {
-    id: asString(src.id) || fallbackId,
-    provider,
-    displayName: asString(src.displayName) || provider,
-    baseUrl: asString(src.baseUrl),
-    apiKey: asString(src.apiKey),
-    anthropicBaseUrl: asString(src.anthropicBaseUrl),
-    defaultModel: asString(src.defaultModel),
-  };
-  const models = Array.isArray(src.models) ? src.models : null;
-  if (models) {
-    const rows: ConfigModelRow[] = [];
-    for (const m of models) {
-      if (!m || typeof m !== "object") continue;
-      const row = m as Record<string, unknown>;
-      if (typeof row.id !== "string" || row.id.length === 0) continue;
-      rows.push(typeof row.ownedBy === "string" ? { id: row.id, ownedBy: row.ownedBy } : { id: row.id });
-    }
-    if (rows.length > 0) out.models = rows;
+function asModelRows(v: unknown): ConfigModelRow[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const rows: ConfigModelRow[] = [];
+  for (const m of v) {
+    if (!m || typeof m !== "object") continue;
+    const row = m as Record<string, unknown>;
+    if (typeof row.id !== "string" || row.id.length === 0) continue;
+    rows.push(typeof row.ownedBy === "string" ? { id: row.id, ownedBy: row.ownedBy } : { id: row.id });
   }
-  out.codexListed = asStringList(src.codexListed);
-  out.codexKnown = asStringList(src.codexKnown);
+  return rows.length > 0 ? rows : undefined;
+}
+
+/** 落盘 schema:单套配置(顶层字段即唯一数据源)。 */
+export function serializeAppConfig(cfg: AppConfig): Record<string, unknown> {
+  const remembered = rememberProvider(cfg);
+  const out: Record<string, unknown> = {
+    provider: remembered.provider,
+    displayName: remembered.displayName,
+    baseUrl: remembered.baseUrl,
+    apiKey: remembered.apiKey,
+    anthropicBaseUrl: remembered.anthropicBaseUrl,
+    defaultModel: remembered.defaultModel,
+    codexAccount: remembered.codexAccount,
+    knownProviders: remembered.knownProviders,
+    excludeDoubao: remembered.excludeDoubao,
+  };
+  if (remembered.models) out.models = remembered.models;
+  if (remembered.codexListed && remembered.codexListed.length > 0) out.codexListed = remembered.codexListed;
+  if (remembered.codexKnown && remembered.codexKnown.length > 0) out.codexKnown = remembered.codexKnown;
+  if (remembered.codexProxy) out.codexProxy = { enabled: remembered.codexProxy.enabled, port: remembered.codexProxy.port };
   return out;
 }
 
 /**
- * 读取(含旧版单 provider 配置迁移):profiles 缺失时把顶层字段迁移为一个 profile,
- * 旧 config.json 里的 baseUrl / apiKey / 模型列表原样保留,用户无感升级。
+ * 读取配置(含两种旧格式的迁移):
+ * 1) 多 Provider profile(0.5.2x):收敛为「当前激活的那一套」,其余 profile 一并删除——
+ *    它们写进 Codex 的目录条目与 provider 段由 flows 的残留清理负责(判定依据在那边);
+ *    同时把所有 profile 名记进 knownProviders,避免改名后认不出自家产物。
+ * 2) 单套配置(更早):顶层字段即结果。
  */
 export function migrateAppConfig(parsed: unknown): AppConfig {
   const src = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>;
-  const rawProfiles = Array.isArray(src.profiles) ? src.profiles.filter((p) => p && typeof p === "object") : [];
-  const seen = new Set<string>();
-  const profiles: ProviderProfile[] = [];
-  rawProfiles.forEach((p, i) => {
-    const prof = normalizeProfile(p as Record<string, unknown>, `p${i + 1}`);
-    if (seen.has(prof.id)) prof.id = newProfileId(profiles); // 手改配置可能重 id:保证唯一
-    seen.add(prof.id);
-    profiles.push(prof);
-  });
-  if (profiles.length === 0) profiles.push(normalizeProfile(src, "p1"));
 
-  const active = profiles.find((p) => p.id === asString(src.activeProfileId)) ?? profiles[0];
+  // 旧多 profile:取激活项(缺失时取第一个)作为唯一配置
+  const rawProfiles = Array.isArray(src.profiles) ? src.profiles.filter((p) => p && typeof p === "object") : [];
+  const profiles = rawProfiles as Array<Record<string, unknown>>;
+  const active =
+    profiles.find((p) => asString(p.id) === asString(src.activeProfileId)) ?? profiles[0] ?? (src as Record<string, unknown>);
+  const provider = asString(active.provider) || DEFAULT_PROVIDER_NAME;
+
   const proxy = (src.codexProxy && typeof src.codexProxy === "object" ? src.codexProxy : {}) as Record<string, unknown>;
-  return {
-    ...fieldsOf(active),
-    profiles,
-    activeProfileId: active.id,
+
+  // knownProviders:旧 profile 名 + 曾记录过的名字 + 默认名,全部保留
+  const known = new Set<string>([DEFAULT_PROVIDER_NAME, provider]);
+  for (const p of profiles) {
+    const n = asString(p.provider).trim();
+    if (n) known.add(n);
+  }
+  for (const n of asStringList(src.knownProviders) ?? []) known.add(n);
+
+  const cfg: AppConfig = {
+    provider,
+    displayName: asString(active.displayName) || provider,
+    baseUrl: asString(active.baseUrl),
+    apiKey: asString(active.apiKey),
+    anthropicBaseUrl: asString(active.anthropicBaseUrl),
+    defaultModel: asString(active.defaultModel),
+    codexAccount: asString(src.codexAccount) === "official" ? "official" : "custom",
+    knownProviders: [...known],
     excludeDoubao: typeof src.excludeDoubao === "boolean" ? src.excludeDoubao : true,
     codexProxy: {
       enabled: typeof proxy.enabled === "boolean" ? proxy.enabled : true,
       port: typeof proxy.port === "number" && proxy.port > 0 ? proxy.port : 17321,
     },
   };
+  // 可见集合记忆原本按 profile 存:迁移时从激活项带过来
+  const listed = asStringList(active.codexListed) ?? asStringList(src.codexListed);
+  const knownIds = asStringList(active.codexKnown) ?? asStringList(src.codexKnown);
+  if (listed) cfg.codexListed = listed;
+  if (knownIds) cfg.codexKnown = knownIds;
+  const models = asModelRows(active.models) ?? asModelRows(src.models);
+  if (models) cfg.models = models;
+  return cfg;
 }

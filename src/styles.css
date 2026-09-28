@@ -745,3 +745,9 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
 .progress-pct { font-size: 13px; font-weight: 600; color: var(--accent); }
 .progress-size { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .progress-hint { color: var(--muted); font-size: 11px; margin-top: 10px; }
+
+/* Codex 卡片:账号模式二选一(官方账号 / 自建网关) */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg-item { border: none; background: none; color: var(--muted); font-size: 11px; line-height: 18px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+.seg-item:hover { color: var(--text); }
+.seg-item.active { background: var(--accent); color: #fff; }

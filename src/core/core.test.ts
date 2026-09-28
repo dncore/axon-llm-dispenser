@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels, isKnownModel, gatewayOverlayFor, gatewayThinkingDisabled } from "./models";
-import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
+import { patchCodexConfigToml, patchCodexCatalog, removeModelProviderSections, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
@@ -450,6 +450,73 @@ describe("doubao 过滤", () => {
     const ids = ["deepseek-v4-flash", "Doubao-Seed-2.0-Code", "doubao-pro-256k", "qwen3.8-max"];
     expect(filterDoubao(ids, true)).toEqual(["deepseek-v4-flash", "qwen3.8-max"]);
     expect(filterDoubao(ids, false)).toEqual(ids);
+  });
+});
+
+describe("Codex 账号模式(官方账号 / 自建网关)", () => {
+  const custom = 'model = "gpt-6-luna"\nmodel_provider = "magene"\nmodel_catalog_json = "/Users/u/.codex/models.json"\n\n[model_providers.magene]\nname = "magene"\nbase_url = "http://localhost:17321/api/v1"\n';
+  const input = { providerName: "magene", baseUrl: "http://localhost:17321/api/v1", apiKey: "sk-x", defaultModel: "gpt-6-luna", modelsJsonPath: "/Users/u/.codex/models.json", modelIds: ["gpt-6-luna"] };
+
+  it("切到官方账号:撤掉 provider 指向 / 顶层 model / 目录,provider 段保留", () => {
+    const r = patchCodexConfigToml(custom, { ...input, account: "official" });
+    expect(r.text).toContain('model_provider = "openai"');
+    expect(r.text).not.toMatch(/^model\s*=/m); // 官方账号用 Codex 自带默认模型
+    expect(r.text).not.toContain("model_catalog_json"); // 否则官方模型被网关目录遮蔽
+    expect(r.text).toContain("[model_providers.magene]"); // 段保留,便于切回
+    expect(r.changes.join(" ")).toContain("官方账号");
+  });
+
+  it("切回自建网关:provider 指向 / model / 目录全部写回", () => {
+    const official = patchCodexConfigToml(custom, { ...input, account: "official" }).text;
+    const back = patchCodexConfigToml(official, { ...input, account: "custom" });
+    expect(back.text).toContain('model_provider = "magene"');
+    expect(back.text).toContain('model = "gpt-6-luna"');
+    expect(back.text).toContain('model_catalog_json = "/Users/u/.codex/models.json"');
+  });
+
+  it("幂等:同模式重复写入内容不变", () => {
+    const once = patchCodexConfigToml(custom, { ...input, account: "official" }).text;
+    const twice = patchCodexConfigToml(once, { ...input, account: "official" }).text;
+    expect(twice).toBe(once);
+  });
+});
+
+describe("残留 provider 段清理", () => {
+  const text = [
+    'model_provider = "magene"',
+    "",
+    "[model_providers.magene]",
+    'name = "magene"',
+    "",
+    "[model_providers.powerding]",
+    'name = "powerding"',
+    'base_url = "https://old.example/v1"',
+    "",
+    "[model_providers.axon]",
+    'name = "axon"',
+    "",
+    "[features]",
+    "memories = true",
+    "",
+  ].join("\n");
+
+  it("只删给定名字的段,其余内容(含后续无关段)原样保留", () => {
+    const r = removeModelProviderSections(text, ["powerding", "axon", "不存在"]);
+    expect(r.removed).toEqual(["powerding", "axon"]);
+    expect(r.text).not.toContain("powerding");
+    expect(r.text).not.toContain("[model_providers.axon]");
+    expect(r.text).toContain("[model_providers.magene]");
+    expect(r.text).toContain("[features]");
+    expect(r.text).toContain("memories = true");
+    expect(r.text).toMatch(/^model_provider = "magene"$/m);
+    // 不残留连续空行
+    expect(r.text).not.toMatch(/\n{3,}/);
+  });
+
+  it("没命中时原样返回", () => {
+    const r = removeModelProviderSections(text, ["nope"]);
+    expect(r.text).toBe(text);
+    expect(r.removed).toEqual([]);
   });
 });
 
@@ -1075,10 +1142,54 @@ describe("patchCodexCatalog(仅更新模型列表)", () => {
     expect(doc.models.map((m) => m.slug).sort()).toEqual(["gpt-5", "m1"]);
     expect(r.removed).toEqual(["m9"]); // 旧 provider 名下架条目被清理;保留的 m1 仍是本 app 条目(前缀在登记表内)
     expect(doc.models.find((m) => m.slug === "m1")?.description).toBe("axon-old: M1 — openai-compatible gateway");
-    // 未登记的 provider 名(用户自己或其它工具写的)一律保留
-    const foreign = patchCodexCatalog(buildResolvedModels(["m1"]), "axon", existing);
+    // 未登记的 provider 名:署名仍属本 app 家族(带 "— openai-compatible gateway" 等署名尾)
+    // 且模型已下架 → 视为旧配置残留,一并清理(删掉那套配置后名字就不在登记表里了)
+    const stale = patchCodexCatalog(buildResolvedModels(["m1"]), "axon", existing);
+    const sdoc = JSON.parse(stale.text) as { models: Array<{ slug: string }> };
+    expect(sdoc.models.map((m) => m.slug).sort()).toEqual(["gpt-5", "m1"]);
+    expect(stale.orphans).toEqual(["m9"]);
+    expect(stale.orphanProviders).toEqual(["axon-old"]);
+
+    // 用户/别家自己写的条目一律保留:名字像但无本 app 署名尾 → 不算自家产物
+    const foreign = patchCodexCatalog(
+      buildResolvedModels(["m1"]),
+      "axon",
+      JSON.stringify({
+        models: [
+          { slug: "m9", description: "axon-old: M9" }, // 前缀像自家,但没有署名尾 → 保留
+          { slug: "m8", description: "某网关的模型" }, // 完全无关 → 保留
+          { slug: "m7", description: "powerding proxy: M7 — /responses not selected (hidden; codex -m still works)" }, // 同族 dispenser 写的旧配置 → 清理
+        ],
+      }),
+    );
     const fdoc = JSON.parse(foreign.text) as { models: Array<{ slug: string }> };
-    expect(fdoc.models.map((m) => m.slug).sort()).toEqual(["gpt-5", "m1", "m9"]);
+    expect(fdoc.models.map((m) => m.slug).sort()).toEqual(["m1", "m8", "m9"]);
+    expect(foreign.orphans).toEqual(["m7"]);
+  });
+
+  it("旧 provider 残留清理:三条件同时满足才动(署名 / 名字不在配置里 / 模型已下架)", () => {
+    const existing = JSON.stringify({
+      models: [
+        // 旧 provider(powerding,已从配置里删掉)的可见条目 + 隐藏条目
+        { slug: "deepseek-v4-flash", description: "powerding proxy: DeepSeek V4 Flash — /responses OK", visibility: "list" },
+        { slug: "glm-5.3", description: "powerding proxy: glm-5.3 — /responses OK", visibility: "list" },
+        { slug: "hy3", description: "powerding proxy: hy3 — /responses not selected (hidden; codex -m still works)", visibility: "hide" },
+        // 同名的模型仍在网关在售(条件③不满足)→ 保留,不误删
+        { slug: "kimi-lastest", description: "powerding proxy: kimi-lastest — /responses OK", visibility: "list" },
+        // 当前 provider 的下架条目 → 走既有 removed 通道,不算残留
+        { slug: "gone-model", description: "magene: Gone — openai-compatible gateway", visibility: "list" },
+        // 用户手写条目 → 绝不触碰
+        { slug: "my-custom", description: "我自己加的模型", visibility: "list" },
+      ],
+    });
+    const r = patchCodexCatalog(buildResolvedModels(["kimi-lastest", "m1"]), "magene", existing);
+    const doc = JSON.parse(r.text) as { models: Array<{ slug: string }> };
+    const slugs = doc.models.map((m) => m.slug).sort();
+    expect(slugs).toEqual(["kimi-lastest", "m1", "my-custom"]);
+    expect(r.orphans.sort()).toEqual(["deepseek-v4-flash", "glm-5.3", "hy3"]);
+    expect(r.orphanProviders).toEqual(["powerding"]);
+    expect(r.removed).toEqual(["gone-model"]);
+    expect(r.changes.some((c) => c.includes("旧 provider 残留") && c.includes("powerding"))).toBe(true);
   });
 });
 

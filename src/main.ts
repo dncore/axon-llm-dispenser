@@ -94,7 +94,7 @@ function build(): void {
       h("span", { id: "conn-status", class: "conn-status-dot status-idle", title: "未测试连接" }, []),
     ]),
     h("div", { class: "card-body" }, [
-      providerBar(),
+      gatewayBar(),
       h("div", { class: "grid2" }, [
         field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
         field("显示名", "input-display", "配置界面展示名", "Axon"),
@@ -137,7 +137,7 @@ function build(): void {
     ]),
     h("div", { class: "card-body" }, [
       toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-      toolCard("codex", "Codex", ["配置", "刷新模型", "选模型", "状态", "还原"]),
+      toolCard("codex", "Codex", ["配置", "刷新模型", "选模型", "状态", "还原"], codexAccountToggle()),
       toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "刷新模型", "状态", "还原"]),
       toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
       toolCard("omp", "Oh My Pi", ["配置", "刷新模型", "状态", "还原"]),
@@ -213,17 +213,7 @@ function field(label: string, id: string, placeholder: string, value: string, ty
 // 多 Provider 配置:保存多套网关(baseUrl/key/模型列表各自独立),一键切换并写入已接入工具
 // ---------------------------------------------------------------------------
 
-/** 下拉选项(引用共享:customSelect 每次展开时按当前内容渲染,profile 增删后无需重建控件)。 */
-const providerOptions: string[] = [];
-const providerLabels: string[] = [];
-let providerSelect: { el: El; value: () => string; set: (v: string) => void } | null = null;
-
-/** profile 下拉显示名:名称 + 网关主机(便于区分同名/同 provider 路由的多套配置)。 */
-function providerLabel(p: appcfg.ProviderProfile): string {
-  const host = hostOf(p.baseUrl);
-  return `${p.displayName || p.provider}${host ? ` · ${host}` : ""}`;
-}
-
+/** 网关主机(连接设置标题旁展示,替代原多 Provider 下拉里的主机提示)。 */
 function hostOf(url: string): string {
   if (!url) return "";
   try {
@@ -233,34 +223,20 @@ function hostOf(url: string): string {
   }
 }
 
-/** 把当前 profiles 灌进下拉选项并同步当前选中项。 */
-function renderProviderSelect(): void {
-  providerOptions.length = 0;
-  providerLabels.length = 0;
-  for (const p of config.profiles) {
-    providerOptions.push(p.id);
-    providerLabels.push(providerLabel(p));
-  }
-  providerSelect?.set(config.activeProfileId);
-}
-
-/** 连接设置卡片顶部的 Provider 切换条:选择即切换(载入表单 + 可选写入已接入工具)。 */
-function providerBar(): El {
-  providerSelect = customSelect(providerOptions, config.activeProfileId, (id) => void switchProvider(id), {
-    labels: providerLabels,
-    filterPlaceholder: "搜索 Provider…",
-  });
-  const add = h("button", { id: "btn-provider-add", class: "btn btn-small", type: "button", title: "新建 Provider 配置(以当前表单的 Provider 名 / Anthropic 端点为模板)" }, ["＋ 新建"]);
-  const del = h("button", { id: "btn-provider-del", class: "btn btn-small btn-danger", type: "button", title: "删除当前 Provider 配置(仅本 app 内保存的配置,各工具已写入的不受影响)" }, [icon("trash")]);
-  const apply = h("button", { id: "btn-provider-apply", class: "btn btn-small", type: "button", title: "把当前 Provider 应用到所有「已接入」的工具" }, ["应用到已接入工具"]);
+/** 连接设置卡片顶部:单套网关配置(多 Provider 配置已移除,见 core/appconfig.ts 注释)。 */
+function gatewayBar(): El {
+  const apply = h("button", { id: "btn-provider-apply", class: "btn btn-small", type: "button", title: "把当前网关配置应用到所有「已接入」的工具" }, ["应用到已接入工具"]);
   return h("div", { class: "provider-bar" }, [
-    h("span", { class: "field-label" }, ["Provider 配置"]),
-    providerSelect.el,
-    add,
-    del,
+    h("span", { class: "field-label", id: "gateway-host" }, ["网关配置"]),
     h("span", { class: "provider-bar-gap" }, []),
     apply,
   ]);
+}
+
+/** 网关主机提示(保存/测试连接/载入表单后刷新)。 */
+function renderGatewayHost(): void {
+  const el = document.getElementById("gateway-host");
+  if (el) el.textContent = config.baseUrl ? `网关配置 · ${hostOf(config.baseUrl)}` : "网关配置";
 }
 
 /** 内联 SVG 图标(Lucide 风格 stroke 图标)。 */
@@ -412,6 +388,62 @@ async function proxySwitchOff(box: HTMLInputElement): Promise<void> {
 function updateProxyBadge(host: string | undefined, port: number | undefined): void {
   const el = document.getElementById("proxy-port");
   if (el) el.textContent = `${host ?? "localhost"}:${port ?? CODX_PROXY_DEFAULT_PORT}`;
+}
+
+// ---------------------------------------------------------------------------
+// Codex 账号模式:官方账号(ChatGPT 登录)/ 自建网关(本 app 写入)
+// ---------------------------------------------------------------------------
+
+/** Codex 卡片上的二选一切换条。 */
+function codexAccountToggle(): El {
+  const wrap = h("div", { class: "seg", id: "codex-account-seg" }, []);
+  const item = (mode: appcfg.CodexAccount, text: string, title: string): El => {
+    const b = h("button", { class: "seg-item", type: "button", title, "data-mode": mode }, [text]);
+    b.addEventListener("click", () => void run("切换 Codex 账号模式", () => setCodexAccount(mode)));
+    return b;
+  };
+  wrap.append(
+    item("custom", "自建网关", "Codex 指向你填写的网关(经本机转换代理);config.toml 写 model_provider / model / model_catalog_json"),
+    item("official", "官方账号", "Codex 用 ChatGPT 登录与自带模型目录:撤掉指向自建 provider 的 model_provider / model / model_catalog_json(provider 段保留,便于切回)"),
+  );
+  return wrap;
+}
+
+/** 同步切换条选中态(载入表单 / 重置表单后调用)。 */
+function syncCodexAccountToggle(): void {
+  document.querySelectorAll("#codex-account-seg .seg-item").forEach((el) => {
+    el.classList.toggle("active", el.getAttribute("data-mode") === config.codexAccount);
+  });
+}
+
+/** 切换账号模式:落盘后立刻按新模式改写 config.toml(已接入 Codex 时)。 */
+async function setCodexAccount(mode: appcfg.CodexAccount): Promise<void> {
+  if (config.codexAccount === mode) return;
+  config.codexAccount = mode;
+  syncCodexAccountToggle();
+  await persistConfig();
+  const chk = await flows.detectAgentConfig("codex", config);
+  const label = mode === "official" ? "官方账号" : "自建网关";
+  if (chk.state === "missing") {
+    notify(`已切换为${label}。Codex 尚未接入本 app 的 provider,下次点「配置」会按该模式写入`, "info");
+    return;
+  }
+  if (mode === "official") {
+    // 官方模式不需要网关模型列表:不写 models.json、不启动转换代理(见 flows.configureCodex)
+    const r = await flows.configureCodex(config, []);
+    log(["—— Codex 账号模式:官方账号 ——", ...r.lines]);
+    notify("Codex 已切到官方账号(ChatGPT 登录 + 自带模型目录);转换代理未启动", "info");
+    void detectAgentConfigOne("codex");
+    return;
+  }
+  const ids = await ensureModels();
+  if (!ids) return;
+  const sel = await resolveCodexListed(ids);
+  if (!sel) return;
+  const r = await flows.configureCodex(config, ids, sel);
+  log(["—— Codex 账号模式:自建网关 ——", ...r.lines]);
+  notify("Codex 已切回自建网关(写入 provider 指向与本机转换代理)", "info");
+  void detectAgentConfigOne("codex");
 }
 
 /** Header 右侧组件:端口 + 开关 + 帮助。 */
@@ -580,7 +612,7 @@ const ACTION_TITLES: Record<string, string> = {
   "关闭鉴权": "关闭鉴权",
 };
 
-function toolCard(id: string, name: string, actions: string[]): El {
+function toolCard(id: string, name: string, actions: string[], extra?: El | null): El {
   const buttons = actions.map((a) =>
     h("button", { class: "btn btn-small btn-icon-only", id: `btn-${id}-${a}`, title: ACTION_TITLES[a] ?? a }, [icon(ACTION_ICONS[a] ?? "config")]),
   );
@@ -595,6 +627,7 @@ function toolCard(id: string, name: string, actions: string[]): El {
       h("span", { class: "tool-name" }, [name]),
       // Pi 扩展角标放名字之后,避免把 agent 名与其他行横向错位
       ...(extBadge ? [extBadge] : []),
+      ...(extra ? [extra] : []),
     ]),
     h("div", { class: "tool-actions" }, buttons),
   ]);
@@ -878,27 +911,13 @@ function syncOnboarding(): void {
   syncCardLock();
 }
 
-/** 该工具的配置是否命中了其它已保存的 Provider(频繁切换时一眼看出各工具指向哪套网关)。 */
-async function matchOtherProvider(tool: string): Promise<appcfg.ProviderProfile | null> {
-  for (const p of config.profiles) {
-    if (p.id === config.activeProfileId) continue;
-    try {
-      const r = await flows.detectAgentConfig(tool, { ...config, ...p });
-      if (r.state === "ok") return p;
-    } catch {
-      // 单个 profile 检测失败不影响其它判断
-    }
-  }
-  return null;
-}
-
-/** 检测单个 agent 的网关配置一致性并更新方形徽标(绿=一致,橙=不一致,蓝=其它 Provider,灰=未配置)。 */
+/** 检测单个 agent 的网关配置一致性并更新方形徽标(绿=一致,橙=不一致,灰=未配置)。 */
 async function detectAgentConfigOne(tool: string): Promise<void> {
   const dot = document.getElementById(`agent-cfg-dot-${tool}`);
   if (!dot) return;
   readFields();
   dot.classList.add("checking");
-  dot.classList.remove("ok", "stale", "missing", "other");
+  dot.classList.remove("ok", "stale", "missing");
   dot.title = "检测配置中…";
   try {
     const r = await flows.detectAgentConfig(tool, config);
@@ -907,11 +926,7 @@ async function detectAgentConfigOne(tool: string): Promise<void> {
       dot.classList.add("ok");
       dot.title = "已配置且一致:provider 的 baseUrl 与 Key 同当前网关配置(点击重新检测)";
     } else {
-      const other = await matchOtherProvider(tool);
-      if (other) {
-        dot.classList.add("other");
-        dot.title = `当前写入的是本 app 的另一个 Provider:「${providerLabel(other)}」(点击重新检测;切到该 Provider,或点「应用到已接入工具」改指当前 Provider)`;
-      } else if (r.state === "stale") {
+      if (r.state === "stale") {
         dot.classList.add("stale");
         dot.title = `检测到 provider 但配置不一致: baseUrl=${r.baseUrl ?? "(无)"},Key ${r.keyMatches ? "一致" : "不一致"}(点击重新检测)`;
       } else {
@@ -959,6 +974,8 @@ function fillForm(cfg: bridge.AppConfig): void {
   ($("input-key") as HTMLInputElement).value = cfg.apiKey;
   ($("input-anthropic") as HTMLInputElement).value = cfg.anthropicBaseUrl;
   ($("chk-exclude-doubao") as HTMLInputElement).checked = cfg.excludeDoubao;
+  syncCodexAccountToggle();
+  renderGatewayHost();
 }
 
 /** 表单恢复刚安装时的初始状态(含 API Key 眼睛与模型列表)。 */
@@ -977,20 +994,22 @@ function resetForm(): void {
   setModelRows([]);
   gatewayConnected = false;
   syncCardLock();
-  renderProviderSelect();
+  syncCodexAccountToggle();
+  renderGatewayHost();
 }
 
 // ---------------------------------------------------------------------------
-// Provider 配置切换:载入表单 → 拉取模型 →(可选)写入已接入工具
+// 网关配置落盘 / 模型拉取
 // ---------------------------------------------------------------------------
 
-/** 保存配置:先把表单(顶层字段)写回激活 profile,再落盘;内存 profiles 同步更新。 */
+/** 保存配置;provider 名顺带记进 knownProviders(改名后仍能认出并清理自家残留)。 */
 async function persistConfig(): Promise<string> {
-  config = appcfg.syncActiveProfile(config);
+  config = appcfg.rememberProvider(config);
+  renderGatewayHost();
   return await bridge.saveAppConfig(config);
 }
 
-/** 拉取当前 profile 的模型列表并持久化(切换 profile 后自动调用)。 */
+/** 拉取模型列表并持久化(启动、测试连接、保存后调用)。 */
 async function refreshModelsForActive(): Promise<string[] | null> {
   try {
     await fetchAndRenderModels();
@@ -1022,10 +1041,10 @@ async function detectConfiguredTools(cfg: bridge.AppConfig): Promise<string[]> {
 }
 
 /**
- * 把当前 profile 写入指定工具(调用方保证 ids 已就绪、codexListed 已定):
+ * 把当前网关配置写入指定工具(调用方保证 ids 已就绪、codexListed 已定):
  * Claude 沿用 settings.json 现有角色映射;Codex 用给定可见集合(并记入 profile)。
  */
-async function applyProfileToTools(tools: string[], ids: string[], codexListed?: string[]): Promise<void> {
+async function applyConfigToTools(tools: string[], ids: string[], codexListed?: string[]): Promise<void> {
   for (const tool of tools) {
     const label = TOOL_LABELS[tool];
     try {
@@ -1074,90 +1093,7 @@ function confirmApplyText(action: string, tools: string[]): string {
   return `${action}\n将写入已接入的工具:${names}(未接入的自动跳过)\nCodex 会重启转换代理并刷新模型目录;Claude 沿用现有角色映射;各文件仅在检测到外部改动时才备份(.bak-*)。\n确认?`;
 }
 
-/** 切换到指定 profile:保存当前表单 → 载入新 profile → 拉模型 → 确认后写入已接入工具。 */
-async function switchProvider(id: string): Promise<void> {
-  if (id === config.activeProfileId) return;
-  readFields(); // 表单 → 顶层字段(activateProfile 会写回旧 profile)
-  const before = config; // 旧 profile 视图:判定「已接入」用它(工具当前指向的是它)
-  config = appcfg.activateProfile(config, id);
-  fillForm(config);
-  setModelRows(config.models ?? []);
-  setConnStatus("idle");
-  gatewayConnected = false;
-  syncCardLock();
-  renderProviderSelect();
-  await persistConfig();
-  const label = providerLabel(appcfg.activeProfile(config));
-  log([`已切换 Provider: ${label}(${config.baseUrl || "未填 Base URL"})`]);
-  syncOnboarding();
-
-  const ids = await refreshModelsForActive();
-  if (!ids) {
-    notify(`已切换到「${label}」(仅表单,未写入工具:新网关不可用或无模型)`, "info");
-    return;
-  }
-
-  const tools = await detectConfiguredTools(before);
-  if (tools.length === 0) {
-    notify(`已切换到「${label}」;未检测到已接入的工具,需要时点各工具的「配置」`, "info");
-    return;
-  }
-  // Codex 可见集合先定(可能弹选择框),再统一确认写入
-  let codexListed: string[] | undefined;
-  if (tools.includes("codex")) {
-    const sel = await resolveCodexListed(ids);
-    if (!sel) return;
-    codexListed = sel;
-  }
-  const ok = await confirmDialogAsync(confirmApplyText(`已切换到 Provider「${label}」。`, tools));
-  if (!ok) {
-    notify(`已切换到「${label}」,各工具仍指向原 Provider(可点「应用到已接入工具」再写入)`, "info");
-    return;
-  }
-  await applyProfileToTools(tools, ids, codexListed);
-  notify(`已把「${label}」写入 ${tools.length} 个已接入工具`, "info");
-}
-
-/** 新建 profile(以当前表单的 Provider 名 / 显示名为模板,Base URL 与密钥留空重填)。 */
-async function createProvider(): Promise<void> {
-  readFields();
-  await persistConfig();
-  const name = await promptDialog("新建 Provider 配置", "名称(仅本 app 内用于区分,如 公司网关 / 自建 A5000)", `gateway-${config.profiles.length + 1}`);
-  if (!name) return;
-  const p = appcfg.emptyProfile(appcfg.newProfileId(config.profiles), config.provider || "axon", name);
-  p.anthropicBaseUrl = config.anthropicBaseUrl; // 同一网关家族常用同一 Anthropic 端点
-  config = appcfg.addProfile(config, p);
-  fillForm(config);
-  setModelRows([]);
-  setConnStatus("idle");
-  gatewayConnected = false;
-  syncCardLock();
-  renderProviderSelect();
-  await persistConfig();
-  notify(`已新建 Provider「${name}」:填写 Base URL / API Key 后点「测试连接」`, "info");
-  syncOnboarding();
-}
-
-/** 删除当前 profile(仅删本 app 内保存的配置;各工具已写入的内容不受影响)。 */
-async function deleteProvider(): Promise<void> {
-  const active = appcfg.activeProfile(config);
-  const rest = config.profiles.filter((p) => p.id !== active.id);
-  const next = rest.length > 0 ? `;删除后切换到「${providerLabel(rest[0])}」` : ";删除后表单恢复初始状态";
-  const ok = await confirmDialogAsync(`删除 Provider 配置「${providerLabel(active)}」?\n仅删除本 app 内保存的这套配置,各工具已写入的配置不受影响${next}。`, "删除", "取消", "btn-danger-solid");
-  if (!ok) return;
-  config = appcfg.removeProfile(config, active.id);
-  fillForm(config);
-  setModelRows(config.models ?? []);
-  setConnStatus("idle");
-  gatewayConnected = false;
-  syncCardLock();
-  renderProviderSelect();
-  await persistConfig();
-  notify(`已删除 Provider 配置「${providerLabel(active)}」`, "info");
-  syncOnboarding();
-}
-
-/** 把当前 profile 应用到所有已接入工具(不下发切换表单的副作用)。 */
+/** 把当前网关配置应用到所有已接入工具(不下发其它副作用)。 */
 async function applyActiveToConfiguredTools(): Promise<void> {
   readFields();
   if (!validateProvider()) return;
@@ -1168,17 +1104,16 @@ async function applyActiveToConfiguredTools(): Promise<void> {
     notify("未检测到已接入的工具(先在各工具卡片点「配置」写入一次)", "error");
     return;
   }
-  const label = providerLabel(appcfg.activeProfile(config));
   let codexListed: string[] | undefined;
   if (tools.includes("codex")) {
     const sel = await resolveCodexListed(ids);
     if (!sel) return;
     codexListed = sel;
   }
-  const ok = await confirmDialogAsync(confirmApplyText(`把 Provider「${label}」应用到已接入工具?`, tools));
+  const ok = await confirmDialogAsync(confirmApplyText("把当前网关配置应用到已接入工具?", tools));
   if (!ok) return;
-  await applyProfileToTools(tools, ids, codexListed);
-  notify(`已把「${label}」写入 ${tools.length} 个已接入工具`, "info");
+  await applyConfigToTools(tools, ids, codexListed);
+  notify(`已写入 ${tools.length} 个已接入工具`, "info");
 }
 
 function readModelIds(): string[] {
@@ -1372,45 +1307,6 @@ function confirmDialogAsync(message: string, okLabel = "确认", cancelLabel = "
   });
 }
 
-/** 文本输入弹窗(window.prompt 在 Tauri WebView 下不可用),确认返回去空格后的值,取消返回 null。 */
-function promptDialog(title: string, label: string, initial = ""): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = h("div", { class: "modal-overlay" }, []);
-    const input = h("input", { class: "input", type: "text", placeholder: label }, []);
-    input.value = initial;
-    const modal = h("div", { class: "modal modal-sm" }, [
-      h("h3", {}, [title]),
-      h("div", { class: "modal-sub" }, [label]),
-      input,
-    ]);
-    const cancel = h("button", { class: "btn btn-ghost" }, ["取消"]);
-    const ok = h("button", { class: "btn" }, ["确认"]);
-    const close = (value: string | null): void => {
-      overlay.remove();
-      resolve(value);
-    };
-    cancel.addEventListener("click", () => close(null));
-    ok.addEventListener("click", () => close(input.value.trim() || null));
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") close(input.value.trim() || null);
-    });
-    overlayDismissers.set(overlay, () => close(null));
-    modal.append(h("div", { class: "modal-footer" }, [cancel, ok]));
-    overlay.append(modal);
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) close(null);
-    });
-    document.body.append(overlay);
-    input.focus();
-    input.select();
-  });
-}
-
-/**
- * Codex 可见模型选择弹窗:Codex 客户端模型列表超过上限会渲染错乱,
- * 让用户在上限内挑选要显示的模型(其余以 visibility="hide" 写入,仍可用 codex -m <id> 指定)。
- * 返回选中的 id 集合(取消返回 null)。
- */
 function openCodexModelPicker(ids: string[], preselect: string[], cap: number, defaultModel: string): Promise<string[] | null> {
   return new Promise((resolve) => {
     const selected = new Set(preselect);
@@ -1481,13 +1377,12 @@ function openCodexModelPicker(ids: string[], preselect: string[], cap: number, d
   });
 }
 
-/** 当前 profile 的 Codex 可见集合记忆(切换网关后各自沿用,不互相覆盖)。 */
+/** Codex 可见集合记忆(上次的选择 + 当时的模型列表)。 */
 function codexMemory(): { listed?: string[]; known?: string[] } {
-  const p = appcfg.activeProfile(config);
-  return { listed: p.codexListed, known: p.codexKnown };
+  return { listed: config.codexListed, known: config.codexKnown };
 }
 
-/** 计算 Codex 可见集合:沿用该 profile 上次的选择(网关后续新增的模型仍会触发超上限弹框);
+/** 计算 Codex 可见集合:沿用上次的选择(网关后续新增的模型仍会触发超上限弹框);
  *  超上限时弹选择框;返回最终集合(用户取消返回 null)。 */
 async function resolveCodexListed(ids: string[]): Promise<string[] | null> {
   const p = await flows.codexListedPlan(config, ids, codexMemory());
@@ -1495,10 +1390,10 @@ async function resolveCodexListed(ids: string[]): Promise<string[] | null> {
   return await openCodexModelPicker(ids, p.listed, CODX_MAX_LISTED_MODELS, p.defaultModel);
 }
 
-/** 记住当前 profile 的 Codex 可见选择与当时的模型列表(切换网关后互不覆盖)。 */
+/** 记住 Codex 可见选择与当时的模型列表。 */
 function rememberCodexChoice(listed: string[], known: string[]): void {
-  const id = config.activeProfileId;
-  config.profiles = config.profiles.map((p) => (p.id === id ? { ...p, codexListed: [...listed], codexKnown: [...known] } : p));
+  config.codexListed = [...listed];
+  config.codexKnown = [...known];
 }
 
 /** Claude 模型映射弹窗:为每个角色选模型,按上下文映射表自动加 [1m]/[200k] 后缀。 */
@@ -1915,9 +1810,7 @@ function bind(): void {
     window.addEventListener("pointercancel", stop);
   });
 
-  // Provider 配置:新建 / 删除 / 应用到已接入工具(切换由下拉 onChange 触发)
-  $("btn-provider-add").addEventListener("click", () => void run("新建 Provider", createProvider));
-  $("btn-provider-del").addEventListener("click", () => void run("删除 Provider", deleteProvider));
+  // 网关配置:应用到已接入工具(单套配置,多 Provider 已移除)
   $("btn-provider-apply").addEventListener("click", () => void run("应用到已接入工具", applyActiveToConfiguredTools));
 
   $("btn-save").addEventListener("click", () =>
@@ -1928,7 +1821,6 @@ function bind(): void {
         return;
       }
       const path = await persistConfig();
-      renderProviderSelect(); // 名称/网关变化同步下拉显示
       notify(`配置已保存: ${path}`);
       syncOnboarding();
       void detectAgentConfigs(); // 网关变化后重检各 agent 配置一致性(同步引导条)
@@ -1936,7 +1828,7 @@ function bind(): void {
   );
 
   $("btn-del-config").addEventListener("click", () =>
-    confirmDialog(`将删除保存的网关配置(config.json,含全部 ${config.profiles.length} 个 Provider),表单恢复刚安装时的初始状态;各 Agent 已写入的配置不受影响。`, () => {
+    confirmDialog("将删除保存的网关配置(config.json),表单恢复刚安装时的初始状态;各 Agent 已写入的配置不受影响。", () => {
       void run("删除配置", async () => {
         const path = await bridge.appConfigFile();
         if (await bridge.exists(path)) await bridge.deleteFile(path);
@@ -1958,7 +1850,6 @@ function bind(): void {
       await fetchAndRenderModels();
       // 连接成功即自动保存配置,无需再手动点「保存配置」
       const path = await persistConfig();
-      renderProviderSelect(); // 网关主机变化同步下拉显示
       notify(`配置已保存: ${path}`, "info");
       syncOnboarding();
     }),
@@ -2346,7 +2237,8 @@ async function boot(): Promise<void> {
   } catch {
     // 使用默认配置
   }
-  renderProviderSelect(); // Provider 下拉:按已保存的配置列表(旧版单 provider 配置自动迁移为一条)
+  // 模型列表:有已保存的网关配置时刷新一次(过滤后为空会提示,不阻塞启动)
+  if (config.baseUrl) void refreshModelsForActive();
   // Header 开关/端口与配置同步(默认开启;端口固定展示)
   const proxySw = document.getElementById("chk-proxy-switch") as HTMLInputElement | null;
   if (proxySw) proxySw.checked = config.codexProxy?.enabled ?? true;

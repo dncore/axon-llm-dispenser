@@ -280,64 +280,87 @@ async function runScenarios(cdp) {
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await sleep(200);
 
-  // ---- 多 Provider:一键切换(公司网关 → 自建网关 → 切回)+ 备份去重 ----
   const F = (path) => `(window.__MOCK__.fs[${JSON.stringify(path)}] ?? '')`;
-  const switchTo = async (label) => {
-    await evaluate(`document.querySelector('.provider-bar .cselect-btn').click()`);
-    await waitFor(`[...document.querySelectorAll('.provider-bar .cselect-item')].some(x => x.textContent === ${JSON.stringify(label)})`);
-    await evaluate(`[...document.querySelectorAll('.provider-bar .cselect-item')].find(x => x.textContent === ${JSON.stringify(label)}).click()`);
-  };
+
+  // ---- 旧 provider 残留清理(目录条目 + config.toml 段) ----
+  check("残留清理:旧 provider 的死模型条目已从目录移除", await evaluate(`!${F("/mock/home/.codex/models.json")}.includes('legacy-gw-model')`));
+  check("残留清理:config.toml 里的残留 provider 段已移除", await evaluate(`!${F("/mock/home/.codex/config.toml")}.includes('[model_providers.powerding]')`));
+  check("残留清理:在售模型的旧前缀条目被接管而非删除", await evaluate(`(() => { const c = JSON.parse(${F("/mock/home/.codex/models.json")}); return c.models.some(m => m.slug === 'qwen3.7-plus' && (m.description || '').startsWith('axon: ')); })()`));
+  check("残留清理:日志写明清理了哪些条目", (await evaluate(LOGS)).some((l) => l.includes("旧 provider 残留") && l.includes("powerding")));
+
+  // ---- 应用到已接入工具 + 备份去重(外部改过的文件才备份) ----
   const bakDelta = async () => ({
     codex: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('config.toml.bak-')).length`),
     claude: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('settings.json.bak-')).length`),
   });
   const bakBefore = await bakDelta();
-  await switchTo("自建网关 · gw2.example");
+  await evaluate(`document.getElementById('btn-provider-apply').click()`);
+  await sleep(700);
+  // 场景前面往网关加了 grok-5 → 可见集合超上限,先弹「Codex 可见模型」选择框,确认后才是应用确认框
+  if (await evaluate(`!!document.querySelector('.picker-row')`)) {
+    await evaluate(CLICK_MODAL_BTN("确认("));
+    await sleep(300);
+  }
   check(
-    "切换 Provider:确认框列出已接入的工具",
+    "应用确认框列出已接入的工具",
     await waitFor(`(() => { const o = [...document.querySelectorAll('.modal-overlay')].pop(); return !!o && o.textContent.includes('将写入已接入的工具') && o.textContent.includes('Claude Code') && o.textContent.includes('Codex'); })()`),
+    await evaluate(`(() => {
+      const o = [...document.querySelectorAll('.modal-overlay')].pop();
+      if (o) return '弹窗文本: ' + o.textContent.replace(/\\s+/g, ' ').slice(0, 160);
+      const logs = [...document.querySelectorAll('#output .log-block div')].slice(-4).map((d) => d.textContent);
+      const dots = [...document.querySelectorAll('[id^=agent-cfg-dot-]')].map((d) => d.id.replace('agent-cfg-dot-', '') + ':' + [...d.classList].join(','));
+      return '无弹窗 | 末尾日志: ' + logs.join(' / ') + ' | 徽标: ' + dots.join(' ');
+    })()`),
   );
   await evaluate(CLICK_MODAL_BTN("确认"));
-  await waitFor(`${F("/mock/home/.claude/settings.json")}.includes("gw2.example")`);
-  check(
-    "切换写入已接入的 Claude(端点与密钥换成新网关,permissions 保留)",
-    await evaluate(`(() => { const d = JSON.parse(${F("/mock/home/.claude/settings.json")}); return d.env.ANTHROPIC_BASE_URL === 'https://gw2.example/api/anthropic' && d.env.ANTHROPIC_AUTH_TOKEN === 'sk-backup' && Array.isArray(d.permissions.allow); })()`),
-  );
-  check(
-    "切换写入 Codex(provider 段换密钥,代理地址不变)",
-    await evaluate(`(() => { const t = ${F("/mock/home/.codex/config.toml")}; return t.includes('experimental_bearer_token = "sk-backup"') && t.includes('base_url = "http://localhost:17321/api/v1"') && !t.includes('sk-test'); })()`),
-  );
-  check(
-    "切换持久化到 config.json(activeProfileId=p2,两套配置都在)",
-    await evaluate(`(() => { const c = JSON.parse(${F("/mock/home/.config/axon/config.json")}); return c.activeProfileId === 'p2' && c.profiles.length === 2 && c.profiles.find(p => p.id === 'p2').apiKey === 'sk-backup' && c.profiles.find(p => p.id === 'p1').baseUrl === 'https://gw.example/v1'; })()`),
-  );
-  // 备份去重:Claude 的 settings.json 是外部(种子)内容 → 备份;Codex config.toml 是本 app 上次写入 → 不备份
+  await waitFor(`${F("/mock/home/.claude/settings.json")}.includes("gw.example")`);
   const bakAfter = await bakDelta();
   check(
     "备份去重:外部改过的文件才备份(Claude +1,Codex 不变)",
     bakAfter.claude === bakBefore.claude + 1 && bakAfter.codex === bakBefore.codex,
     JSON.stringify({ before: bakBefore, after: bakAfter }),
   );
-  const bakAfterSwitch = await evaluate(`window.__MOCK__.backupWrites()`);
+  const bakAfterApply = await evaluate(`window.__MOCK__.backupWrites()`);
 
-  // 切回:p1 的记忆里没有 grok-5(网关后加的)→ 新增模型触发一次可见集合选择,再确认写入
-  await switchTo("公司网关 · gw.example");
-  check("切回 Provider:p1 记忆里没有 grok-5,新模型触发可见集合选择", await waitFor(`!!document.querySelector('.picker-row')`));
-  const backPicker = await evaluate(PICKER_STATE);
-  check("可见集合选择预选=p1 上次所选 8 个", backPicker.counter === "已选 8/8", backPicker.counter);
-  await evaluate(CLICK_MODAL_BTN("确认("));
-  await waitFor(`!document.querySelector('.picker-row')`);
-  await evaluate(CLICK_MODAL_BTN("确认"));
-  await waitFor(`${F("/mock/home/.codex/config.toml")}.includes("sk-test")`);
+  // ---- 旧多 profile 配置自动收敛为单套(迁移) ----
   check(
-    "切回写入成功且不再新增备份(内容均同上次本 app 写入)",
-    (await evaluate(`window.__MOCK__.backupWrites()`)) === bakAfterSwitch,
+    "迁移:config.json 落盘为单套 schema(无 profiles/activeProfileId,provider 名进 knownProviders)",
+    await evaluate(`(() => {
+      const c = JSON.parse(${F("/mock/home/.config/axon/config.json")});
+      return !('profiles' in c) && !('activeProfileId' in c)
+        && c.provider === 'axon' && c.baseUrl === 'https://gw.example/v1' && c.apiKey === 'sk-test'
+        && Array.isArray(c.knownProviders) && c.knownProviders.includes('axon')
+        && c.codexAccount === 'custom';
+    })()`),
+  );
+
+  // ---- Codex 账号模式:官方账号 / 自建网关 ----
+  await evaluate(`document.querySelector('#codex-account-seg .seg-item[data-mode="official"]').click()`);
+  check(
+    "切到官方账号:撤掉指向自建网关的 model_provider / 顶层 model / 目录",
+    await waitFor(`(() => { const t = ${F("/mock/home/.codex/config.toml")}; return t.includes('model_provider = "openai"') && !t.includes('model_catalog_json') && !/^model = /m.test(t); })()`),
+  );
+  check("官方账号:provider 段保留(便于切回)", await evaluate(`${F("/mock/home/.codex/config.toml")}.includes('[model_providers.axon]')`));
+  check(
+    "官方账号:落盘记录模式",
+    await evaluate(`JSON.parse(${F("/mock/home/.config/axon/config.json")}).codexAccount === 'official'`),
+  );
+  await evaluate(`document.querySelector('#codex-account-seg .seg-item[data-mode="custom"]').click()`);
+  await sleep(700); // 切回要拉模型 + 可能弹可见集合选择
+  if (await evaluate(`!!document.querySelector('.picker-row')`)) {
+    await evaluate(CLICK_MODAL_BTN("确认("));
+    await sleep(300);
+  }
+  check(
+    "切回自建网关:provider 指向 / model / 目录全部写回",
+    await waitFor(`(() => { const t = ${F("/mock/home/.codex/config.toml")}; return t.includes('model_provider = "axon"') && /^model = "/m.test(t) && t.includes('model_catalog_json'); })()`),
+  );
+  check(
+    "切回不重复备份(内容均同上次本 app 写入)",
+    (await evaluate(`window.__MOCK__.backupWrites()`)) === bakAfterApply,
     `backupWrites=${await evaluate(`window.__MOCK__.backupWrites()`)}`,
   );
-  check(
-    "还原弹窗展示各工具已配置徽标(切换后回到当前 Provider)",
-    await waitFor(`document.getElementById('agent-cfg-dot-codex').classList.contains('ok')`),
-  );
+  check("配置一致性徽标回到已配置", await waitFor(`document.getElementById('agent-cfg-dot-codex').classList.contains('ok')`));
 
   // ---- 备份清理:自动备份保留最近 10 个,手动重命名的保留 ----
   await evaluate(`(() => {

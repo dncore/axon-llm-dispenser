@@ -5,7 +5,7 @@ import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, gatewayOverlayFor, gatewayThinkingDisabled, isDeepseekModel, type ResolvedModel } from "./core/models";
 import { escapeRegExp, generateToken, timestamp } from "./core/util";
 import { BACKUP_KEEP_AUTO, pickStaleAutoBackups } from "./core/backup";
-import { patchCodexConfigToml, patchCodexCatalog, renderCodexModelsJson, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
+import { patchCodexConfigToml, patchCodexCatalog, codexCatalogPlan, removeModelProviderSections, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
 import { patchReasonixProvider, patchReasonixModels, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchGrokConfigToml, patchGrokModels, parseGrokStatus } from "./core/grok";
 import { patchDshProvider, patchDshProviderModels, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
@@ -183,9 +183,9 @@ export function dshDeepseekEfforts(id: string): Record<string, string> {
 
 /**
  * Codex 可见模型规划(供 UI 判断是否需要弹「选模型」):
- * - 传入 memory(该 profile 上次的可见集合 + 当时的完整模型列表)时以其为准:切换网关后
- *   沿用本 profile 自己的选择,网关之后新增的模型仍按「超上限即弹框」处理;
- * - 无 memory(该 profile 还没做过选择)时沿用既有 models.json 的可见集合(旧行为)。
+ * - 传入 memory(上次的可见集合 + 当时的完整模型列表)时以其为准:网关之后新增的模型
+ *   仍按「超上限即弹框」处理;
+ * - 无 memory(还没做过选择)时沿用既有 models.json 的可见集合(旧行为)。
  */
 export async function codexListedPlan(
   cfg: bridge.AppConfig,
@@ -198,7 +198,7 @@ export async function codexListedPlan(
   return codexListedPlanFrom(resolved, await bridge.readFileOrEmpty(modelsPath), cfg.defaultModel, memory);
 }
 
-/** 可见集合计划:优先用 profile 记忆,缺省用现有 models.json(旧行为)。 */
+/** 可见集合计划:优先用配置里的记忆(cfg.codexListed/codexKnown),缺省用现有 models.json(旧行为)。 */
 function codexListedPlanFrom(
   resolved: ResolvedModel[],
   existingJson: string,
@@ -235,9 +235,12 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
   // Codex 转换代理:开启时把 Codex 的 base_url 指向本机代理(独立常驻进程),
   // 代理按模型规则把 Responses 翻译成 Chat 打到网关(网关对 gpt-5.6 家族
   // /responses 转换不可用);其它模型代理原样透传。
+  const official = cfg.codexAccount === "official";
   let baseUrl = cfg.baseUrl;
   const proxyLines: string[] = [];
-  if (cfg.codexProxy?.enabled ?? true) {
+  if (official) {
+    proxyLines.push("官方账号模式:Codex 走 ChatGPT 登录与自带目录(不写自建 provider 指向)");
+  } else if (cfg.codexProxy?.enabled ?? true) {
     const st = await bridge.proxyStart(cfg.codexProxy?.port ?? CODX_PROXY_DEFAULT_PORT, cfg.baseUrl, CODX_PROXY_CONVERT_PATTERN, modelsPath);
     baseUrl = codexProxyBaseUrl(st.port, st.codexHost);
     proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}`);
@@ -249,9 +252,18 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
     }
   }
 
+  // 模型目录先规划:保留现有 models.json 里非本 app 写入的条目(兼容用户已有模型);
+  // 可见集合沿用现有 models.json(用户上次的选择),上限 CODX_MAX_LISTED_MODELS,超出由 UI 先让用户挑选。
+  // 先规划的原因:残留 provider 段清理要用到目录里发现的残留 provider 名。
+  const existingModels = await bridge.readFileOrEmpty(modelsPath);
+  const listedSet = listed ?? planCodexListed(resolved, existingModels, { defaultModel }).listed;
+  const catPlan = codexCatalogPlan(resolved, cfg.provider, existingModels, listedSet, ownProviderNames(cfg));
+  const modelsJson = JSON.stringify({ models: [...catPlan.kept, ...catPlan.entries] }, null, 2) + "\n";
+
   const cfgText = await bridge.readFileOrEmpty(configPath);
   const patched = patchCodexConfigToml(cfgText, {
     providerName: cfg.provider,
+    account: cfg.codexAccount,
     baseUrl,
     apiKey: cfg.apiKey,
     defaultModel,
@@ -259,20 +271,24 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
     // 顶层 model 不在本次模型列表里(切换网关后旧模型失效)时改写为默认模型
     modelIds: resolved.map((m) => m.id),
   });
+  // 残留 provider 段清理:与 models.json 的残留条目同一次判定(只清本 app 写过、且已不在配置里的名字)
+  const orphanNames = [...new Set([...cfg.knownProviders.filter((n) => n !== cfg.provider), ...catPlan.orphanProviders])];
+  const sections = orphanNames.length > 0 ? removeModelProviderSections(patched.text, orphanNames) : { text: patched.text, removed: [] };
+  const nextText = sections.text;
+  for (const n of sections.removed) patched.changes.push(`清理残留 provider 段 [model_providers.${n}]`);
 
   // 内容无变化则不写盘、不产生备份
-  const written = patched.text !== cfgText ? await bridge.writeWithBackup(configPath, patched.text) : null;
-  // 保留现有 models.json 里非本 app 写入的条目(兼容用户已有模型);
-  // 可见集合沿用现有 models.json(用户上次的选择),上限 CODX_MAX_LISTED_MODELS,超出由 UI 先让用户挑选
-  const existingModels = await bridge.readFileOrEmpty(modelsPath);
-  const listedSet = listed ?? planCodexListed(resolved, existingModels, { defaultModel }).listed;
-  const modelsJson = renderCodexModelsJson(resolved, cfg.provider, existingModels, listedSet, ownProviderNames(cfg));
+  const written = nextText !== cfgText ? await bridge.writeWithBackup(configPath, nextText) : null;
   const modelsWritten = modelsJson !== existingModels ? await bridge.writeWithBackup(modelsPath, modelsJson) : null;
 
   const lines = [
     `config.toml: ${written ? written.path : "无变化,未写入"}`,
     `  ${patched.changes.join(", ") || "无变化"}`,
     `models.json: ${modelsWritten ? `${modelsWritten.path}(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length},上限 ${CODX_MAX_LISTED_MODELS})` : "无变化,未写入"}`,
+    ...(catPlan.orphans.length > 0
+      ? [`清理旧 provider 残留 ${catPlan.orphans.length} 条(${catPlan.orphanProviders.join(", ")}: ${catPlan.orphans.slice(0, 5).join(", ")}${catPlan.orphans.length > 5 ? " …" : ""})`]
+      : []),
+    ...(sections.removed.length > 0 ? [`清理残留 provider 段:${sections.removed.map((n) => `[model_providers.${n}]`).join(", ")}`] : []),
     ...proxyLines,
   ];
   const bl = backupLine(written);
@@ -280,9 +296,9 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
   return { changes: patched.changes, lines };
 }
 
-/** 本 app 所有 profile 的 provider 名(models.json 归属判定:切换 provider 名后旧条目仍属本 app)。 */
+/** 本 app 用过的 provider 名(当前值 + 历史值:改过名后旧条目仍属本 app,并可在下架时一并清理)。 */
 function ownProviderNames(cfg: bridge.AppConfig): string[] {
-  return (cfg.profiles ?? []).map((p) => p.provider).filter((n) => n.length > 0);
+  return [...new Set([cfg.provider, ...(cfg.knownProviders ?? [])])].filter((n) => n.length > 0);
 }
 
 export async function codexStatus(): Promise<string[]> {
@@ -946,13 +962,23 @@ export async function planRefreshCodex(
   const existing = await bridge.readFileOrEmpty(modelsPath);
   const listedSet = listed ?? codexListedPlanFrom(resolved, existing, cfg.defaultModel, memory).listed;
   const plan = patchCodexCatalog(resolved, cfg.provider, existing, listedSet, ownProviderNames(cfg));
-  if (plan.unchanged) return noChangePlan(agent);
+  // 残留 provider 的 config.toml 段一并清理(与目录条目同一次判定,见 patchCodexCatalog)
+  const sectionPlan = plan.orphanProviders.length > 0 ? removeModelProviderSections(cfgText, plan.orphanProviders) : { text: cfgText, removed: [] };
+  if (plan.unchanged && sectionPlan.removed.length === 0) return noChangePlan(agent);
   return {
     agent,
     changes: [`models.json(${resolved.length} 个模型,可见 ${listedSet.length} / 隐藏 ${resolved.length - listedSet.length})`, ...plan.changes],
     apply: async () => {
-      const written = await bridge.writeWithBackup(modelsPath, plan.text);
-      return [`models.json 已更新(${written.path})` + backupSuffix(written)];
+      const lines: string[] = [];
+      if (!plan.unchanged) {
+        const written = await bridge.writeWithBackup(modelsPath, plan.text);
+        lines.push(`models.json 已更新(${written.path})` + backupSuffix(written));
+      }
+      if (sectionPlan.removed.length > 0) {
+        const w = await bridge.writeWithBackup(configPath, sectionPlan.text);
+        lines.push(`config.toml 残留 provider 段已清理:${sectionPlan.removed.join(", ")}(${w.path})` + backupSuffix(w));
+      }
+      return lines;
     },
   };
 }

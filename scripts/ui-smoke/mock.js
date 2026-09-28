@@ -36,10 +36,15 @@
   const VISIBLE = ["glm-5.3", "deepseek-v4-flash", "kimi-k3", "qwen3.8-max", "gemini-3.7-flash",
     "claude-sonnet-5", "grok-4.6", "deepseek-v4-pro", "hy3", "step-3.7-flash"];
   const HIDDEN = ["hy4", "MiMo-V2.5"];
+  // 旧 provider("powerding",配置里已删)留下的残留:死模型条目(应被清理)+ 在售模型条目(应保留)
+  const ORPHAN_DEAD = ["legacy-gw-model"];
+  const ORPHAN_LIVE = ["qwen3.7-plus"];
   const CATALOG = JSON.stringify({
     models: [
       ...VISIBLE.map((s, i) => entry(s, "list", i % 2 ? "axon" : "legacy tool")),
       ...HIDDEN.map((s) => entry(s, "hide", "axon")),
+      ...ORPHAN_DEAD.map((s) => entry(s, "list", "powerding proxy")),
+      ...ORPHAN_LIVE.map((s) => entry(s, "list", "powerding proxy")),
     ],
   }, null, 2) + "\n";
   // 两套网关配置:公司网关(当前激活,已写入 codex/claude)+ 自建网关(带自己的 Codex 可见模型记忆)
@@ -61,7 +66,7 @@
     ],
   }, null, 2) + "\n";
   // 旧网关写下的 model 已不在网关模型列表里:配置时应改写为默认模型(切换 provider 时 model 跟随)
-  const CODEX_TOML = 'model_provider = "axon"\nmodel = "gw-a-only-model"\n\n[model_providers.axon]\nbase_url = "http://localhost:17321/api/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = "sk-test"\n';
+  const CODEX_TOML = 'model_provider = "axon"\nmodel = "gw-a-only-model"\n\n[model_providers.axon]\nbase_url = "http://localhost:17321/api/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = "sk-test"\n\n[model_providers.powerding]\nname = "powerding"\nbase_url = "https://old.example/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = "sk-old"\n';
   const CLAUDE_SETTINGS = JSON.stringify({
     env: { ANTHROPIC_BASE_URL: "https://gw.example/api/anthropic", ANTHROPIC_AUTH_TOKEN: "sk-test", ANTHROPIC_MODEL: "deepseek-v4-flash[1m]" },
     permissions: { allow: ["Bash(ls:*)"] },
@@ -81,6 +86,8 @@
   window.__MOCK__.backupWrites = () => state.writes.filter((w) => w.path.includes(".bak-")).length;
   window.__MOCK__.seedVisible = VISIBLE;
   window.__MOCK__.seedHidden = HIDDEN;
+  window.__MOCK__.seedOrphanDead = ORPHAN_DEAD;
+  window.__MOCK__.seedOrphanLive = ORPHAN_LIVE;
 
   let cbId = 1;
   const callbacks = {};

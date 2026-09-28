@@ -1,22 +1,10 @@
 import { describe, expect, it } from "vitest";
-import {
-  activateProfile,
-  addProfile,
-  activeProfile,
-  DEFAULT_CONFIG,
-  emptyProfile,
-  migrateAppConfig,
-  newProfileId,
-  removeProfile,
-  serializeAppConfig,
-  syncActiveProfile,
-  type AppConfig,
-} from "./appconfig";
+import { cloneConfig, DEFAULT_CONFIG, DEFAULT_PROVIDER_NAME, migrateAppConfig, rememberProvider, serializeAppConfig } from "./appconfig";
 import { BACKUP_KEEP_AUTO, isAutoBackupName, pickStaleAutoBackups } from "./backup";
 import { contentHash } from "./util";
 
-describe("migrateAppConfig(旧版单 provider 配置迁移)", () => {
-  it("顶层字段迁移为一个 profile,模型列表与代理设置保留", () => {
+describe("migrateAppConfig", () => {
+  it("更早的单套配置:顶层字段直接沿用,knownProviders 含默认名", () => {
     const cfg = migrateAppConfig({
       provider: "axon",
       displayName: "Axon",
@@ -28,94 +16,117 @@ describe("migrateAppConfig(旧版单 provider 配置迁移)", () => {
       codexProxy: { enabled: false, port: 18000 },
       models: [{ id: "m1", ownedBy: "vendor" }],
     });
-    expect(cfg.profiles).toHaveLength(1);
-    expect(cfg.activeProfileId).toBe("p1");
+    expect(cfg.provider).toBe("axon");
     expect(cfg.baseUrl).toBe("https://gw.example/v1");
-    expect(cfg.apiKey).toBe("sk-old");
     expect(cfg.defaultModel).toBe("deepseek-v4-pro");
     expect(cfg.models).toEqual([{ id: "m1", ownedBy: "vendor" }]);
     expect(cfg.excludeDoubao).toBe(false);
     expect(cfg.codexProxy).toEqual({ enabled: false, port: 18000 });
-    expect(activeProfile(cfg).baseUrl).toBe("https://gw.example/v1");
+    expect(cfg.codexAccount).toBe("custom"); // 默认自建网关
+    expect(cfg.knownProviders).toContain(DEFAULT_PROVIDER_NAME);
   });
 
-  it("空/损坏配置回落到默认 profile,不抛错", () => {
-    for (const bad of [null, undefined, {}, "nope", { profiles: "x" }]) {
-      const cfg = migrateAppConfig(bad);
-      expect(cfg.profiles).toHaveLength(1);
-      expect(cfg.provider).toBe("axon");
+  it("多 Provider 配置:收敛到激活那套,其余名字进 knownProviders(供残留清理)", () => {
+    const cfg = migrateAppConfig({
+      profiles: [
+        { id: "p1", provider: "axon", displayName: "Axon", baseUrl: "https://a.example/v1", apiKey: "k1", anthropicBaseUrl: "", defaultModel: "" },
+        { id: "p2", provider: "magene", displayName: "magene", baseUrl: "https://b.example/v1", apiKey: "k2", anthropicBaseUrl: "", defaultModel: "gpt-6-luna", models: [{ id: "gpt-6-luna" }], codexListed: ["gpt-6-luna"], codexKnown: ["gpt-6-luna", "qwen3.8-flash"] },
+        { id: "p3", provider: "powerding", displayName: "powerding", baseUrl: "https://c.example/v1", apiKey: "k3", anthropicBaseUrl: "", defaultModel: "" },
+      ],
+      activeProfileId: "p2",
+      excludeDoubao: true,
+      codexProxy: { enabled: true, port: 17321 },
+    });
+    // 收敛到 p2
+    expect(cfg.provider).toBe("magene");
+    expect(cfg.baseUrl).toBe("https://b.example/v1");
+    expect(cfg.apiKey).toBe("k2");
+    expect(cfg.defaultModel).toBe("gpt-6-luna");
+    expect(cfg.models).toEqual([{ id: "gpt-6-luna" }]);
+    // 可见集合记忆从激活项带过来(原按 profile 存)
+    expect(cfg.codexListed).toEqual(["gpt-6-luna"]);
+    expect(cfg.codexKnown).toEqual(["gpt-6-luna", "qwen3.8-flash"]);
+    // 所有旧名字都记下:改名/删配置后仍能认出并清理自家产物
+    expect(cfg.knownProviders).toEqual(expect.arrayContaining(["axon", "magene", "powerding"]));
+    expect(cfg.knownProviders).toContain(DEFAULT_PROVIDER_NAME);
+  });
+
+  it("激活项缺失时取第一个 profile;knownProviders 保留已记录的名字", () => {
+    const cfg = migrateAppConfig({
+      profiles: [{ id: "px", provider: "gw-a", displayName: "gw-a", baseUrl: "", apiKey: "", anthropicBaseUrl: "", defaultModel: "" }],
+      activeProfileId: "不存在",
+      knownProviders: ["old-name"],
+    });
+    expect(cfg.provider).toBe("gw-a");
+    expect(cfg.knownProviders).toEqual(expect.arrayContaining(["gw-a", "old-name", DEFAULT_PROVIDER_NAME]));
+  });
+
+  it("空配置/坏数据 → 默认值", () => {
+    for (const bad of [null, undefined, {}, { profiles: "x" }, 42]) {
+      const cfg = migrateAppConfig(bad as unknown);
+      expect(cfg.provider).toBe(DEFAULT_PROVIDER_NAME);
+      expect(cfg.baseUrl).toBe("");
       expect(cfg.excludeDoubao).toBe(true);
       expect(cfg.codexProxy).toEqual({ enabled: true, port: 17321 });
+      expect(cfg.codexAccount).toBe("custom");
     }
   });
 
-  it("profiles 结构原样读取,activeProfileId 失配时回落到第一个;重 id 去重", () => {
-    const cfg = migrateAppConfig({
-      activeProfileId: "gone",
-      excludeDoubao: true,
-      codexProxy: { enabled: true, port: 17321 },
-      profiles: [
-        { id: "a", provider: "axon", displayName: "A", baseUrl: "https://a.example/v1", apiKey: "ka", anthropicBaseUrl: "", defaultModel: "", codexListed: ["m1"], codexKnown: ["m1", "m2"] },
-        { id: "a", provider: "gw2", displayName: "B", baseUrl: "https://b.example/v1", apiKey: "kb", anthropicBaseUrl: "", defaultModel: "" },
-      ],
-    });
-    expect(cfg.profiles.map((p) => p.id)).toEqual(["a", "p1"]); // 重 id 换成未占用的最小可用 id
-    expect(cfg.activeProfileId).toBe("a");
-    expect(cfg.baseUrl).toBe("https://a.example/v1");
-    expect(activeProfile(cfg).codexListed).toEqual(["m1"]);
-    expect(activeProfile(cfg).codexKnown).toEqual(["m1", "m2"]);
+  it("codexAccount 只认 official,其余一律 custom", () => {
+    expect(migrateAppConfig({ codexAccount: "official" }).codexAccount).toBe("official");
+    expect(migrateAppConfig({ codexAccount: "OFFICIAL" }).codexAccount).toBe("custom");
+    expect(migrateAppConfig({ codexAccount: "custom" }).codexAccount).toBe("custom");
   });
 });
 
-describe("profile 切换/增删(顶层字段 = 激活 profile 视图)", () => {
-  const twoProfiles = (): AppConfig =>
-    migrateAppConfig({
-      activeProfileId: "p1",
-      profiles: [
-        { id: "p1", provider: "axon", displayName: "公司", baseUrl: "https://a.example/v1", apiKey: "ka", anthropicBaseUrl: "", defaultModel: "", models: [{ id: "m1" }] },
-        { id: "p2", provider: "axon", displayName: "自建", baseUrl: "https://b.example/v1", apiKey: "kb", anthropicBaseUrl: "", defaultModel: "m2" },
-      ],
-    });
-
-  it("激活另一个 profile:顶层字段切换,表单改动写回原 profile", () => {
-    const cfg = twoProfiles();
-    const edited: AppConfig = { ...cfg, apiKey: "ka-new" }; // 表单改动(readFields 的效果)
-    const switched = activateProfile(edited, "p2");
-    expect(switched.baseUrl).toBe("https://b.example/v1");
-    expect(switched.defaultModel).toBe("m2");
-    expect(switched.activeProfileId).toBe("p2");
-    expect(switched.profiles.find((p) => p.id === "p1")?.apiKey).toBe("ka-new"); // 改动没有丢
-    expect(switched.profiles.find((p) => p.id === "p2")?.apiKey).toBe("kb");
+describe("serializeAppConfig", () => {
+  it("落盘只含单套字段,且 provider 名自动进 knownProviders", () => {
+    const cfg = migrateAppConfig({ provider: "新网关", baseUrl: "https://gw/v1", apiKey: "k", knownProviders: ["axon"] });
+    const out = serializeAppConfig(cfg);
+    expect(out.provider).toBe("新网关");
+    expect(out.knownProviders).toEqual(["axon", "新网关"]);
+    expect(out.codexAccount).toBe("custom");
+    expect(out).not.toHaveProperty("profiles");
+    expect(out).not.toHaveProperty("activeProfileId");
+    expect(out).not.toHaveProperty("codexListed"); // 空记忆不落盘
+    // 落盘 → 再读回:等价(除 provider 名已记入 known)
+    const round = migrateAppConfig(out);
+    expect(round.baseUrl).toBe("https://gw/v1");
+    expect(round.knownProviders).toEqual(["axon", "新网关"]);
   });
 
-  it("落盘 schema 只存 profiles,顶层字段写入激活 profile", () => {
-    const cfg = syncActiveProfile({ ...twoProfiles(), apiKey: "ka2", models: [{ id: "m1" }, { id: "m3" }] });
-    const out = serializeAppConfig(cfg) as { profiles: Array<Record<string, unknown>>; activeProfileId: string; excludeDoubao: boolean };
-    expect(Object.keys(out).sort()).toEqual(["activeProfileId", "codexProxy", "excludeDoubao", "profiles"]);
-    expect(out.activeProfileId).toBe("p1");
-    expect(out.profiles[0].apiKey).toBe("ka2");
-    expect(out.profiles[0].models).toEqual([{ id: "m1" }, { id: "m3" }]);
-    expect(out.profiles[1].apiKey).toBe("kb");
+  it("空字符串 provider 名不写进 knownProviders", () => {
+    const cfg = { ...migrateAppConfig({}), provider: "", knownProviders: [] };
+    const out = serializeAppConfig(cfg);
+    expect(out.knownProviders).toEqual([]);
+    expect(out.provider).toBe("");
   });
+});
 
-  it("新建 profile 后激活;id 递增且不重复", () => {
-    const cfg = twoProfiles();
-    expect(newProfileId(cfg.profiles)).toBe("p3");
-    const added = addProfile(cfg, emptyProfile("p3", "axon", "备用"));
-    expect(added.activeProfileId).toBe("p3");
-    expect(added.profiles).toHaveLength(3);
-    expect(added.baseUrl).toBe(""); // 新 profile 表单为空
+describe("rememberProvider", () => {
+  it("只增不减且去重(改名后旧名保留)", () => {
+    let cfg = migrateAppConfig({});
+    cfg = rememberProvider(cfg, "gw-a");
+    cfg = rememberProvider(cfg, "gw-b");
+    cfg = rememberProvider(cfg, "gw-a");
+    expect(cfg.knownProviders).toEqual([DEFAULT_PROVIDER_NAME, "gw-a", "gw-b"]);
+    // 未显式传名时用当前 provider
+    const next = rememberProvider({ ...cfg, provider: "gw-c" });
+    expect(next.knownProviders).toContain("gw-c");
+    // 空名忽略
+    expect(rememberProvider(cfg, "  ").knownProviders).toEqual(cfg.knownProviders);
   });
+});
 
-  it("删除激活 profile 后落到剩余第一个;删最后一个回到默认空 profile", () => {
-    const cfg = twoProfiles();
-    const afterP1 = removeProfile(activateProfile(cfg, "p1"), "p1");
-    expect(afterP1.activeProfileId).toBe("p2");
-    expect(afterP1.baseUrl).toBe("https://b.example/v1");
-    const last = removeProfile(afterP1, "p2");
-    expect(last.profiles).toHaveLength(1);
-    expect(last.baseUrl).toBe("");
-    expect(last.provider).toBe(DEFAULT_CONFIG.provider);
+describe("cloneConfig", () => {
+  it("深拷贝:改副本不影响原配置(默认配置是模块级单例)", () => {
+    const cfg = cloneConfig({ ...DEFAULT_CONFIG, models: [{ id: "m1" }], codexListed: ["m1"], knownProviders: ["axon"] });
+    cfg.models![0].id = "changed";
+    cfg.codexListed!.push("m2");
+    cfg.knownProviders.push("other");
+    expect(DEFAULT_CONFIG.models).toBeUndefined();
+    expect(cfg.codexListed).toEqual(["m1", "m2"]);
+    expect(cfg.knownProviders).toEqual(["axon", "other"]);
   });
 });
 
@@ -136,14 +147,13 @@ describe("备份分类与清理(自动备份轮转,手动重命名不动)", () =
       { name: "config.toml.bak-manual", mtimeMs: 1 },
       ...Array.from({ length: BACKUP_KEEP_AUTO + 3 }, (_, i) => ({
         name: `config.toml.bak-2026082701${String(i).padStart(2, "0")}00`,
-        mtimeMs: 1000 + i, // i 越大越新
+        mtimeMs: 1000 + i,
       })),
     ];
     const stale = pickStaleAutoBackups(files, "config.toml");
     expect(stale).toHaveLength(3);
     expect(stale.map((f) => f.mtimeMs).sort((a, b) => a - b)).toEqual([1000, 1001, 1002]);
     expect(stale.some((f) => f.name === "config.toml.bak-manual")).toBe(false);
-    // 保留数之内不清理
     expect(pickStaleAutoBackups(files.slice(1, 5), "config.toml")).toEqual([]);
   });
 });

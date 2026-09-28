@@ -7,9 +7,9 @@ import { listen } from "@tauri-apps/api/event";
 import { contentHash, timestamp } from "./core/util";
 import { migrateAppConfig, serializeAppConfig, type AppConfig } from "./core/appconfig";
 
-// 应用配置结构(多 Provider profile)见 core/appconfig.ts;此处仅做 I/O 与再导出。
+// 应用配置结构(单套网关 + Codex 账号模式)见 core/appconfig.ts;此处仅做 I/O 与再导出。
 export { DEFAULT_CONFIG } from "./core/appconfig";
-export type { AppConfig, ProviderProfile } from "./core/appconfig";
+export type { AppConfig, CodexAccount } from "./core/appconfig";
 
 // ---------------------------------------------------------------------------
 // 基础 invoke 封装
@@ -253,7 +253,7 @@ export async function opencodeDataHome(): Promise<string> {
 // 应用自身配置
 // ---------------------------------------------------------------------------
 
-/** 读取应用配置(旧版单 provider 的 config.json 自动迁移为一个 profile)。 */
+/** 读取应用配置(旧的多 profile / 更早的单套 config.json 均自动迁移)。 */
 export async function loadAppConfig(): Promise<AppConfig> {
   try {
     const path = await appConfigFile();
@@ -265,7 +265,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
   }
 }
 
-/** 保存应用配置:先把顶层字段(表单)写回激活 profile,再按 profiles schema 落盘。 */
+/** 保存应用配置:按单套 schema 落盘(provider 名顺带记入 knownProviders)。 */
 export async function saveAppConfig(cfg: AppConfig): Promise<string> {
   const path = await appConfigFile();
   // Rust write_file 会自动创建父目录

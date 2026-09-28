@@ -49,6 +49,8 @@ export function codexProxyNeeded(modelIds: string[]): boolean {
 
 export type CodexConfigInput = {
   providerName: string;
+  /** Codex 账号模式:官方账号(撤掉自建 provider/目录)/ 自建网关(默认,写 provider 段)。 */
+  account?: "official" | "custom";
   baseUrl: string;
   apiKey: string;
   defaultModel?: string;
@@ -66,6 +68,35 @@ function upsertKey(text: string, key: string, value: string): { text: string; ch
     return { text: next, changed: next !== text };
   }
   return { text: line + "\n" + text, changed: true };
+}
+
+/** 删除顶层键(连同整行);不存在则原样返回。 */
+function removeKey(text: string, key: string): { text: string; removed: boolean } {
+  const re = new RegExp(`^${escapeRegExp(key)}\\s*=.*\\r?\\n?`, "m");
+  if (!re.test(text)) return { text, removed: false };
+  return { text: text.replace(re, ""), removed: true };
+}
+
+/** 移除 `[model_providers.<name>]` 段(残留 provider 清理;范围 = 段头到下一个段头/文件末)。
+ *  只按给定名字删除,调用方负责确认这些名字确是本 app 写过、且已不在当前配置里。 */
+export function removeModelProviderSections(text: string, names: string[]): { text: string; removed: string[] } {
+  let out = text;
+  const removed: string[] = [];
+  for (const name of names) {
+    const headerRe = new RegExp(`^\\[model_providers\\.${escapeRegExp(name)}\\]\\s*$`, "m");
+    const m = headerRe.exec(out);
+    if (!m) continue;
+    const start = m.index;
+    const afterHeader = out.indexOf("\n", start);
+    const bodyStart = afterHeader === -1 ? out.length : afterHeader + 1;
+    const next = /^\[/m.exec(out.slice(bodyStart));
+    const end = next ? bodyStart + next.index : out.length;
+    // 连同上方的空行一起吃掉(只吃一行,保留文件原有的段落间隔风格)
+    const cutStart = out.slice(0, start).endsWith("\n\n") ? start - 1 : start;
+    out = (out.slice(0, cutStart) + out.slice(end)).replace(/\n{3,}/g, "\n\n");
+    removed.push(name);
+  }
+  return { text: out, removed };
 }
 
 function upsertProviderSection(
@@ -100,11 +131,32 @@ function upsertProviderSection(
   return { text: next, changed: next !== text };
 }
 
-/** 生成/更新 codex config.toml 的 provider 配置(文本级修改,幂等)。 */
+/** 生成/更新 codex config.toml 的 provider 配置(文本级修改,幂等)。
+ *  account="official" 时切到官方账号形态(见下方 applyOfficialAccount);默认 "custom" = 自建网关。 */
 export function patchCodexConfigToml(text: string, input: CodexConfigInput): { text: string; changes: string[] } {
   const changes: string[] = [];
   let out = text;
   const { providerName, baseUrl, apiKey, defaultModel, modelsJsonPath } = input;
+
+  // 官方账号模式:Codex 用自带目录 + ChatGPT 登录,必须撤掉指向自建网关的三样东西
+  // (model_provider / 顶层 model / model_catalog_json),否则官方模型被我们的网关目录与
+  // 只存在于网关的模型 id 顶掉。provider 段本身保留,切回自建网关时复用。
+  if (input.account === "official") {
+    const mp = upsertKey(out, "model_provider", "openai");
+    if (mp.changed) changes.push(`model_provider = openai(官方账号)`);
+    out = mp.text;
+    const m = removeKey(out, "model");
+    if (m.removed) {
+      out = m.text;
+      changes.push(`model 键已移除(官方账号用 Codex 自带默认模型)`);
+    }
+    const c = removeKey(out, "model_catalog_json");
+    if (c.removed) {
+      out = c.text;
+      changes.push(`model_catalog_json 已移除(官方账号用 Codex 自带目录)`);
+    }
+    return { text: out, changes };
+  }
 
   const provider = upsertKey(out, "model_provider", providerName);
   out = provider.text;
@@ -180,11 +232,38 @@ function buildCodexEntry(m: ResolvedModel, providerName: string, priority: numbe
   return entry;
 }
 
+/** 本 app 家族写进 Codex 目录的条目署名(把自家残留与用户/别家写的条目区分开)。 */
+const OWN_ENTRY_TAILS = ["openai-compatible gateway", "/responses OK", "/responses not selected"];
+
+/** `<name> proxy` / `<name> gateway` → 裸名字(同族 dispenser 写目录时会给 provider 名加后缀)。 */
+function normalizeProviderPrefix(prefix: string): string {
+  return prefix.replace(/\s+(proxy|gateway)$/i, "").trim();
+}
+
+/** 条目的 provider 归属前缀:描述形如 `<name>: …` / `<name> proxy: …`(名字不含空格,取首个 ": ")。 */
+export function codexEntryProviderName(desc: unknown): string | null {
+  if (typeof desc !== "string") return null;
+  const i = desc.indexOf(": ");
+  if (i <= 0) return null;
+  const name = normalizeProviderPrefix(desc.slice(0, i));
+  return name.includes(" ") ? null : name;
+}
+
+/** 该条目是否由本 app 家族写入(前缀可解析 + 署名尾命中)。 */
+export function isOwnCodexEntry(desc: unknown): boolean {
+  if (typeof desc !== "string") return false;
+  return codexEntryProviderName(desc) !== null && OWN_ENTRY_TAILS.some((t) => desc.includes(t));
+}
+
 type CodexCatalogPlan = {
   kept: unknown[];
   entries: Record<string, unknown>[];
   added: string[];
   removed: string[];
+  /** 旧 provider 残留(署名属本 app、provider 名已不在配置里、且模型已下架):随本次写入清理。 */
+  orphans: string[];
+  /** orphans 的归属 provider 名(用于同步清理 config.toml 里的残留 provider 段)。 */
+  orphanProviders: string[];
   /** 本 provider 条目中可见 / 隐藏的数量。 */
   visible: number;
   hidden: number;
@@ -246,9 +325,11 @@ export function planCodexListed(
 /**
  * 规划 models.json 目录内容:
  * - 本 provider 条目按 description 前缀(`${providerName}: `)归属;已不在模型列表的自家条目移除;
- *   opts.ownProviders 传入本 app 其它 profile 的 provider 名:它们写的条目同属本 app(切换
- *   provider 名后旧条目不该继续留在选择器里),一并按下架处理;
- * - 非本 app 条目(不含可识别 slug 的、或描述前缀不匹配的)原样保留(兼容用户已有模型目录);
+ *   opts.ownProviders 传入本 app 用过的 provider 名(含改名前的):它们写的条目同属本 app,一并按下架处理;
+ * - **残留清理**:描述署名属本 app 家族、但 provider 名既不是当前值也不在 ownProviders 里的条目
+ *   (典型来源:本 app 或同族 dispenser 早先用另一个 provider 名写过,该配置后来被删),
+ *   且 slug 已不在网关模型列表 → 移除。三条件同时满足才动,避免误删用户手写的条目;
+ * - 其它非本 app 条目(描述前缀认不出、或署名不是本 app 家族)原样保留(兼容用户已有模型目录);
  * - opts.preserveExisting(仅更新模型列表):既有 slug 沿用其 description,其余字段随模型表刷新;
  * - opts.listed:可见集合(visibility="list"),其余自家条目写 hide;缺省按 planCodexListed 推导(带上限)。
  */
@@ -261,14 +342,15 @@ function planCodexCatalog(
   const newIds = new Set(models.map((m) => m.id));
   const ownNames = new Set<string>([providerName, ...(opts?.ownProviders ?? [])]);
   const isOurs = (desc: unknown): boolean => {
-    if (typeof desc !== "string") return false;
-    const i = desc.indexOf(": "); // provider 名校验不含空格,首个 ": " 即前缀边界
-    return i > 0 && ownNames.has(desc.slice(0, i));
+    const name = codexEntryProviderName(desc);
+    return name !== null && ownNames.has(name);
   };
   const prevSlugs = new Set<string>();
   const prevBySlug = new Map<string, Record<string, unknown>>();
   const kept: unknown[] = [];
   const removed: string[] = [];
+  const orphans: string[] = [];
+  const orphanProviders = new Set<string>();
   if (existingJson && existingJson.trim()) {
     try {
       const data = JSON.parse(existingJson) as { models?: Array<Record<string, unknown>> };
@@ -286,6 +368,14 @@ function planCodexCatalog(
         }
         if (ours) {
           removed.push(slug);
+          continue;
+        }
+        // 旧 provider 残留:署名确属本 app 家族、但 provider 名不在当前配置里
+        // (典型:该配置后来被删)、且模型已不在网关列表 → 三条件同时满足才清理。
+        const owner = codexEntryProviderName(m.description);
+        if (isOwnCodexEntry(m.description) && owner !== null && !ownNames.has(owner)) {
+          orphans.push(slug);
+          orphanProviders.add(owner);
           continue;
         }
         kept.push(m);
@@ -308,7 +398,18 @@ function planCodexCatalog(
     return e;
   });
   const visible = entries.filter((e) => e.visibility === "list").length;
-  return { kept, entries, added, removed, visible, hidden: entries.length - visible };
+  return { kept, entries, added, removed, orphans, orphanProviders: [...orphanProviders], visible, hidden: entries.length - visible };
+}
+
+/** 「配置」流程用:拿到目录计划(含待清理的残留 provider 名),文本由调用方按 kept+entries 渲染。 */
+export function codexCatalogPlan(
+  models: ResolvedModel[],
+  providerName: string,
+  existingJson: string | undefined,
+  listed?: string[],
+  ownProviders?: string[],
+): CodexCatalogPlan {
+  return planCodexCatalog(models, providerName, existingJson, { listed, ownProviders });
 }
 
 /** 生成 codex models.json 内容(listed 之外的自家条目写 hide,上限默认 CODX_MAX_LISTED_MODELS)。 */
@@ -328,6 +429,10 @@ export type CodexCatalogResult = {
   changes: string[];
   added: string[];
   removed: string[];
+  /** 旧 provider 残留(署名属本 app、provider 名不在配置里、模型已下架):本次一并清理。 */
+  orphans: string[];
+  /** 残留条目的归属 provider 名(用于同步清理 config.toml 里的残留 provider 段)。 */
+  orphanProviders: string[];
   /** 本 provider 条目中可见 / 隐藏的数量。 */
   visible: number;
   hidden: number;
@@ -354,10 +459,11 @@ export function patchCodexCatalog(
   if (!unchanged) {
     if (plan.added.length > 0) changes.push(`新增 ${plan.added.length} 个模型`);
     if (plan.removed.length > 0) changes.push(`移除 ${plan.removed.length} 个下架条目(${plan.removed.slice(0, 6).join(", ")}${plan.removed.length > 6 ? " …" : ""})`);
+    if (plan.orphans.length > 0) changes.push(`清理 ${plan.orphans.length} 条旧 provider 残留(${plan.orphanProviders.join(", ")}: ${plan.orphans.slice(0, 5).join(", ")}${plan.orphans.length > 5 ? " …" : ""})`);
     if (plan.kept.length > 0) changes.push(`保留非本 provider 条目 ${plan.kept.length} 条`);
     changes.push(`可见 ${plan.visible} 个(上限 ${CODX_MAX_LISTED_MODELS})/ 隐藏 ${plan.hidden} 个`);
   }
-  return { text, changes, added: plan.added, removed: plan.removed, visible: plan.visible, hidden: plan.hidden, unchanged };
+  return { text, changes, added: plan.added, removed: plan.removed, orphans: plan.orphans, orphanProviders: plan.orphanProviders, visible: plan.visible, hidden: plan.hidden, unchanged };
 }
 
 export type CodexStatus = {
