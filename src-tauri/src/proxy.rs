@@ -31,13 +31,19 @@ pub const DEFAULT_PORT: u16 = 17321;
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
-/// 网关 chat 路由上「function tools 与 reasoning_effort 互斥」且「省略该参数按非 none
-/// 默认处理」的模型族(实测 2026-09-24 迈金网关 gpt-6-luna,owned_by 七牛:tools + 省略
-/// /low/medium/high 一律 400「Function tools with reasoning_effort are not supported for
-/// gpt-6-luna in /v1/chat/completions」;tools + 显式 none 才正常出 tool_calls)。
-/// Codex 每个请求都带 tools,所以该族在转换路径上必须显式发 "none" —— 沿用「none 一律
-/// 省略」的旧规则正好落进 400 那一侧。
-const TOOLS_EFFORT_EXCLUSIVE_PATTERN: &str = "gpt-6";
+/// gpt-6 族在网关 chat 路由上的请求形状限制。来源:①③ 为 2026-09-24 实测(迈金网关
+/// gpt-6-luna,owned_by 七牛);②④ 为上游网关给的 gpt-6 兼容说明(2026-09-29),同日实测被
+/// 网关额度拦截(400 api_key_monthly_quota_exceeded),待额度恢复后复验:
+///   ① `max_tokens` 已废弃 → 只收 `max_completion_tokens`(省略即非 none 默认处理的是 effort);
+///   ② 不支持 `temperature` / `top_p` → 带上即 400,旧采样参数整体失效;
+///   ③ function tools 与 `reasoning_effort` 互斥,且请求**省略**该参数时按非 none 默认处理
+///      → 实测省略 /low/medium/high 一律 400「Function tools with reasoning_effort are not
+///      supported for gpt-6-luna in /v1/chat/completions」,显式 "none" 才出 tool_calls。
+///      Codex 每个请求都带 tools,所以该族在转换路径上必须显式发 "none" —— 沿用「none 一律
+///      省略」的旧规则正好落进 400 那一侧;
+///   ④ `text.format` 的 json_schema 强制结构化输出不支持 → 转换路径不带 `response_format`。
+/// 「采样式对话 + 工具调用 + 推理」并存的旧工作流整体失效,四条得一起做,只修一条仍 400。
+const GPT6_LIMITS_PATTERN: &str = "gpt-6";
 
 /// 流式请求的「上游响应头 / 首字节」deadline。实测该网关会挂住流式请求 30~60s 零字节
 /// (HTTP 状态都不回),而 client 总超时是 600s —— 等于永远等不到。取 60s:成功样本首字节
@@ -68,9 +74,9 @@ pub fn should_convert(model: &str, pattern: &str) -> bool {
         .any(|p| m.contains(&p))
 }
 
-/// 模型在网关 chat 路由上是否「tools × reasoning_effort 互斥,且省略即非 none 默认」。
-fn tools_effort_exclusive(model: &str) -> bool {
-    should_convert(model, TOOLS_EFFORT_EXCLUSIVE_PATTERN)
+/// 模型是否属于受上面四条限制的 gpt-6 族。
+fn gpt6_family(model: &str) -> bool {
+    should_convert(model, GPT6_LIMITS_PATTERN)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,15 +485,22 @@ pub fn responses_to_chat(body: &Value) -> Value {
         out.insert("tool_choice".into(), tool_choice_to_chat(tc));
     }
 
-    // 结构化输出:text.format(Codex 结构化输出/guardian 走这条)或 response_format
+    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let ml = model.to_lowercase();
+    let gpt6 = gpt6_family(model);
+
+    // 结构化输出:text.format(Codex 结构化输出/guardian 走这条)或 response_format。
+    // gpt-6 族不支持 json_schema 约束(见 GPT6_LIMITS_PATTERN ④):宁可不带,也不发一个
+    // 注定 400 的参数;json_object / text 该族照常带。
     if let Some(rf) = response_format_to_chat(body) {
-        out.insert("response_format".into(), rf);
+        let is_json_schema = rf.get("type").and_then(|v| v.as_str()) == Some("json_schema");
+        if !(gpt6 && is_json_schema) {
+            out.insert("response_format".into(), rf);
+        }
     }
 
     // max_output_tokens → max_completion_tokens(gpt-5/gpt-6/o 系)或 max_tokens
     // (gpt-6 实测只收 max_completion_tokens,发 max_tokens 直接 400)
-    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let ml = model.to_lowercase();
     if let Some(m) = body.get("max_output_tokens") {
         let key = if ml.starts_with("o") || ml.contains("gpt-5") || ml.contains("gpt-6") { "max_completion_tokens" } else { "max_tokens" };
         out.insert(key.into(), m.clone());
@@ -498,9 +511,9 @@ pub fn responses_to_chat(body: &Value) -> Value {
     // 唯 "none"/"off"/"disabled" 不作为该参数发送:实测 claude-* / gemini-3.7-flash /
     // grok-4.6 拒收 "none"(报 Invalid reasoning_effort / THINKING_LEVEL_MINIMAL),
     // 发送则 400;改用 omit(让上游走默认),安全且不崩。
-    // 例外见下面 tools_effort_exclusive 分支:对 gpt-6 族「省略」恰恰是坏形状。
+    // 例外见下面 gpt6 分支:对 gpt-6 族「省略」恰恰是坏形状。
     let has_tools = out.contains_key("tools");
-    if has_tools && tools_effort_exclusive(model) {
+    if has_tools && gpt6 {
         // 该族在 chat 路由上 tools×reasoning 互斥,且「省略」按非 none 处理 → 显式发 none
         // 是唯一可用形状。代价:Codex 侧这些模型不再思考(网关不支持,不是代理的选择)。
         out.insert("reasoning_effort".into(), json!("none"));
@@ -515,8 +528,13 @@ pub fn responses_to_chat(body: &Value) -> Value {
         }
     }
 
-    // parallel_tool_calls / user 同名透传(Codex 必发 parallel_tool_calls)
+    // parallel_tool_calls / user 同名透传(Codex 必发 parallel_tool_calls)。
+    // temperature / top_p:gpt-6 族不支持采样参数(见 GPT6_LIMITS_PATTERN ②),带上即 400
+    // → 该族剥掉;其余模型照旧透传。
     for k in ["temperature", "top_p", "stream", "parallel_tool_calls", "user"] {
+        if gpt6 && matches!(k, "temperature" | "top_p") {
+            continue;
+        }
         if let Some(v) = body.get(k) {
             out.insert(k.into(), v.clone());
         }
@@ -1177,11 +1195,11 @@ fn strip_effort_param(body: &Value, convert: bool) -> Option<Value> {
     let mut out = body.clone();
     let obj = out.as_object_mut()?;
     if convert {
-        // tools×reasoning 互斥族:能带 tools 的请求只有 reasoning_effort="none" 一种形状
+        // gpt-6 族:能带 tools 的请求只有 reasoning_effort="none" 一种形状
         // (实测省略即 400)。剥掉它正好落回那个 400 形状,重试只是白跑一次上游,
         // 所以这里不回 retry 体,让首个 400 的原始 body 直接透传给 Codex。
         if obj.contains_key("tools")
-            && tools_effort_exclusive(body.get("model").and_then(|v| v.as_str()).unwrap_or(""))
+            && gpt6_family(body.get("model").and_then(|v| v.as_str()).unwrap_or(""))
         {
             return None;
         }
@@ -2182,6 +2200,52 @@ mod tests {
         let ok = json!({"model": "gpt-5.6-luna", "tools": [{"type": "function", "function": {"name": "d"}}], "reasoning_effort": "max", "messages": []});
         assert!(strip_effort_param(&ok, true).is_some());
         assert!(strip_effort_param(&ok, true).unwrap().get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gpt6_chat_route_drops_sampling_params_and_json_schema() {
+        // 上游 2026-09-29 说明:gpt-6 族在 chat 路由上不支持 temperature / top_p,
+        // 也不支持 json_schema 强制结构化输出 → 转换路径必须剥掉(否则 400)。
+        let body = json!({
+            "model": "gpt-6-luna",
+            "input": "hi",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_output_tokens": 1000,
+            "stream": true,
+            "parallel_tool_calls": true,
+            "text": {"format": {"type": "json_schema", "name": "out", "strict": true, "schema": {"type": "object"}}}
+        });
+        let chat = responses_to_chat(&body);
+        assert!(chat.get("temperature").is_none(), "temperature 应被剥离");
+        assert!(chat.get("top_p").is_none(), "top_p 应被剥离");
+        assert!(chat.get("response_format").is_none(), "json_schema 应被剥离");
+        // 无关参数照常透传;token 上限仍走该族唯一接受的字段
+        assert_eq!(chat["stream"], true);
+        assert_eq!(chat["parallel_tool_calls"], true);
+        assert_eq!(chat["max_completion_tokens"], 1000);
+        assert!(chat.get("max_tokens").is_none());
+
+        // json_object 不在该限制内:该族照常带
+        let json_object = json!({
+            "model": "gpt-6-luna",
+            "input": "hi",
+            "text": {"format": {"type": "json_object"}}
+        });
+        assert_eq!(responses_to_chat(&json_object)["response_format"]["type"], "json_object");
+
+        // 规则不外溢:其它模型(含同网关的 gpt-5.6 族)保持透传 + 映射
+        let other = json!({
+            "model": "gpt-5.6-luna",
+            "input": "hi",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "text": {"format": {"type": "json_schema", "name": "out", "schema": {"type": "object"}}}
+        });
+        let other_chat = responses_to_chat(&other);
+        assert_eq!(other_chat["temperature"], 0.7);
+        assert_eq!(other_chat["top_p"], 0.9);
+        assert_eq!(other_chat["response_format"]["type"], "json_schema");
     }
 
     /// 把 SSE 文本解析成事件 JSON 列表(serde_json::Value 键按字典序序列化,

@@ -53,7 +53,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ e0320eee · 136 models
+// canonical: gist b8931f4c @ c202f68c · 136 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -221,7 +221,13 @@ const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
       "报错建议的 /v1/responses 在同一网关也被卡:网关会把 Responses 请求转成 chat 并注入 thinking 参数 → " +
       "400「Unknown parameter: 'thinking'」(request_id 前缀 chatcmpl-,即又走了 chat 上游),无法改走 Responses 保思考。" +
       "因此 off 也必须显式发 none(省略即回到 400)。代价:该模型在本网关上拿不到思考输出。" +
-      "失效条件:网关在同模型的 chat 路由上允许 tools×非 none reasoning_effort(或 /responses 不再注入 thinking)后,删除本条即回到 canonical 形状。",
+      "上游网关 2026-09-29 另给 gpt-6 兼容说明,把这条从「网关转换缺陷」改判为**模型族自身的 API 变更**,共四条:" +
+      "① max_tokens 废弃(只收 max_completion_tokens);② temperature/top_p 不支持;③ function tools 与 reasoning_effort 互斥;" +
+      "④ Responses 的 text.format 不支持 json_schema。②④ 当日无法实测(网关 400 api_key_monthly_quota_exceeded)," +
+      "在 Codex 转换代理侧按 ①②③④ 一并剥离/改写(见 src-tauri/src/proxy.rs 的 GPT6_LIMITS_PATTERN)," +
+      "本条 overlay 仍是 ③ 在各 agent 配置上的落点(所有档位写 none)。" +
+      "失效条件:网关/上游修好 ③ 后(带 tools 允许非 none,或省略即按 none 处理)删除本条即回到 canonical 形状;" +
+      "同时把 proxy.rs 里 ①②④ 三条一并复核,别只删一半。",
     compat: { supportsReasoningEffort: true },
     thinkingLevelMap: { off: "none", minimal: "none", low: "none", medium: "none", high: "none", xhigh: "none", max: "none" },
     thinkingDisabled: true,
