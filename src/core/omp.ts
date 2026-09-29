@@ -4,7 +4,7 @@
 // (thinking 等级锁定 + 完整 compat 块:官方明示 compat 整体替换不合并,必须写全)。
 
 import type { ResolvedModel } from "./models";
-import { isDeepseekModel } from "./models";
+import { gatewayThinkingDisabled, isDeepseekModel } from "./models";
 import {
   applyTextOps,
   blockBodyEnd,
@@ -77,11 +77,31 @@ function renderThinkingLines(thinkingIndent: number, m: ResolvedModel): string[]
   ];
 }
 
+/** 网关强制关思考的模型(如 gpt-6-luna)的 compat 块:请求一律显式带 reasoning_effort=none。
+ *  omp 的 extraBody 是在它自己的思考策略之后 Object.assign 进请求体的(openai-shared.ts
+ *  applyOpenAIExtraBody),所以这条能压过按档位生成的值 —— 与 pi 侧「thinkingLevelMap 全档位
+ *  映射 none」是同一件事的两种表达。省略该参数会被网关按非 none 处理 → 带工具必 400。 */
+function renderForceNoneCompatLines(compatIndent: number, m: ResolvedModel): string[] {
+  const pad = " ".repeat(compatIndent);
+  return [
+    `${pad}compat:`,
+    `${pad}  supportsReasoningEffort: true`,
+    `${pad}  maxTokensField: ${m.compat?.maxTokensField ?? "max_completion_tokens"}`,
+    `${pad}  extraBody:`,
+    `${pad}    reasoning_effort: none`,
+  ];
+}
+
 /** 模型条目的管理子键(thinking/compat 不适用时移除,避免残留旧特配)。 */
 function modelItemManagedKeys(itemIndent: number, m: ResolvedModel): ManagedKey[] {
   const keyIndent = itemIndent + 2;
   const sp = " ".repeat(keyIndent);
   const dsReasoning = isDeepseekModel(m.id) && m.reasoning;
+  const fallback = dsReasoning
+    ? renderCompatLines(keyIndent, m)
+    : gatewayThinkingDisabled(m.id)
+      ? renderForceNoneCompatLines(keyIndent, m)
+      : null;
   return [
     { key: "name", lines: m.name && m.name !== m.id ? [`${sp}name: ${yamlQuote(m.name)}`] : null },
     { key: "reasoning", lines: [`${sp}reasoning: ${m.reasoning}`] },
@@ -89,7 +109,7 @@ function modelItemManagedKeys(itemIndent: number, m: ResolvedModel): ManagedKey[
     { key: "input", lines: [`${sp}input: [${m.input.includes("image") ? "text, image" : "text"}]`] },
     { key: "contextWindow", lines: [`${sp}contextWindow: ${m.contextWindow}`] },
     { key: "maxTokens", lines: [`${sp}maxTokens: ${m.maxTokens}`] },
-    { key: "compat", lines: dsReasoning ? renderCompatLines(keyIndent, m) : null, block: true },
+    { key: "compat", lines: fallback, block: true },
   ];
 }
 

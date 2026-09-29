@@ -113,6 +113,17 @@ canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道�
 | 同模型的 `/responses` 被网关转成 chat 并注入 `thinking` 参数 | 400 `Unknown parameter: 'thinking'`，即报错里「use /v1/responses」的建议在本网关不成立 | 该模型列入 `CODX_PROXY_CONVERT_PATTERN`，Codex 走 Responses→Chat 转换而非透传 |
 | 流式请求挂起（30~60s 连 HTTP 状态都不回） | 客户端只能干等到总超时 | 转换代理对**流式**请求的「上游响应头 / SSE 首字节」设 60s deadline，超时即回明确错误；上游以 200 + 带内 `{"error":…}` 返回时转成 `response.failed` 并保留原始 message，不退化成笼统报错 |
 
+**gpt-6-luna 在各客户端能不能用**（2026-09-29 逐客户端取证：pi-ai 抓包 / 本地假网关抓真实请求体）：
+
+| 客户端 | 结论 | 依据 |
+|---|---|---|
+| Codex（自建网关） | ✅ 能 | 转换代理按上表四条改写；官方账号模式下 Codex 不走本机代理，与它无关 |
+| pi / dsh / omp（pi-ai 系） | ✅ 能 | 配置里写全了「思考档一律 none」：pi 靠 `thinkingLevelMap`（含 `max` 档与 `off`）、dsh 靠 `off: none` + 非 Off 档、omp 靠 `compat.extraBody.reasoning_effort: none`（extraBody 在它的思考策略之后合并，压过一切），token 上限都落到 `max_completion_tokens` |
+| OpenCode 1.18.30 | ❌ 不能 | 抓包实测：发 `max_tokens`、**不带** `reasoning_effort` → 网关按非 none 处理必 400；字段由它的 AI SDK openai-compatible provider 固定，axon 侧改不了 |
+| Grok CLI | ❌ 不能 | 抓包实测：同样发 `max_tokens`、不带 `reasoning_effort`（连 `--reasoning-effort none` 都不发）；`--json-schema` 还会发结构化输出（④ 也不支持） |
+| Claude Code | ❓ 未验证 | 走 `/api/anthropic`，axon 不代理这条路径；网关如何翻译未知 —— 在实测通过前**别把 Claude 角色模型指到 gpt-6-luna** |
+| Reasonix | ❓ 未验证 | 本机未安装（无法抓包） |
+
 **代价与限制**：`gpt-6-luna` 在本网关上带工具时拿不到思考输出（模型侧 `reasoning_tokens=0`）——这是上游不支持 tools×reasoning 的必然结果，不是代理可绕开的；改走 `/responses` 保思考也被上面的 `thinking` 注入卡住。若网关/上游后续修复，删除 overlay 条目、并复核 `GPT6_LIMITS_PATTERN` 的四条即恢复。
 
 ### 备份还原

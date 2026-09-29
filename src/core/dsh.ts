@@ -25,7 +25,9 @@ export type DshModelEntry = {
   contextWindow: number;
   maxTokens: number;
   reasoning?: boolean;
-  /** pi-ai 思考等级 → 线上拼写;仅含非 off 等级(off 是 always-on 哨兵,不写入)。 */
+  /** pi-ai 思考等级 → 线上拼写。off 有两种形态:空值(null/缺省)= 选 Off 时**不发**
+   *  reasoning_effort(对齐 dsh 官方「off 即 always-on 哨兵」);字符串 = 选 Off 时也发该拼写
+   *  (网关兼容层要求显式 none 的模型,如 gpt-6-luna,省略该参数会被网关按非 none 处理 → 400)。 */
   reasoningEfforts?: Record<string, string | null>;
   input?: string[];
 };
@@ -47,15 +49,19 @@ export type DshProviderInput = {
 /** 模型条目的管理子键(reasoningEfforts/input 不适用时移除,避免残留旧元数据)。 */
 function modelItemManagedKeys(itemIndent: number, m: DshModelEntry): ManagedKey[] {
   const sp = " ".repeat(itemIndent + 2);
-  // reasoningEfforts:对齐 dsh 官方(off 空值 + 非 off 档位),off 用空值声明
-  // 「选 Off 时发送 nothing」;其余档位 key=可选级别, value=wire 拼写。
+  // reasoningEfforts:key=可选级别, value=wire 拼写。off 一般是空值(对齐 dsh 官方:
+  // 「选 Off 时发送 nothing」);只有模型表/兼容层把 off 也映射成具体拼写时才写出来
+  // ——gpt-6-luna 这类「省略 reasoning_effort 会被网关按非 none 处理」的模型,
+  // Off 档必须显式发 none,否则带工具的请求 400。
   let effortLines: string[] | null = null;
   if (m.reasoning && m.reasoningEfforts) {
     const nonOff = Object.entries(m.reasoningEfforts)
       .filter(([level, wire]) => level !== "off" && typeof wire === "string" && wire.length > 0)
       .sort(([a], [b]) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
     if (nonOff.length > 0) {
-      effortLines = [`${sp}reasoningEfforts:`, `${sp}  off:`];
+      const offWire = m.reasoningEfforts["off"];
+      const offLine = typeof offWire === "string" && offWire.length > 0 ? `${sp}  off: ${yamlQuote(offWire)}` : `${sp}  off:`;
+      effortLines = [`${sp}reasoningEfforts:`, offLine];
       for (const [level, wire] of nonOff) {
         effortLines.push(`${sp}  ${level}: ${yamlQuote(wire as string)}`);
       }

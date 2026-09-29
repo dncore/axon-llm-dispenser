@@ -383,6 +383,34 @@ describe("网关兼容层", () => {
     expect((entry.thinkingLevelMap as Record<string, string>).off).toBe("none");
   });
 
+  it("写进 dsh settings.yaml 的形状能让 Off 档也显式发 reasoning_effort=none", () => {
+    const [m] = buildResolvedModels(["gpt-6-luna"]);
+    const r = patchDshProvider("", {
+      providerName: "axon",
+      displayName: "Axon",
+      apiKeyEnv: "AXON_API_KEY",
+      baseUrl: "https://gw/v1",
+      models: toDshEntries([m]),
+    });
+    // dsh(pi-ai)只认「off 是字符串」才在 Off 档发参数:空值 = 选 Off 时什么都不发
+    // → gpt-6-luna 的 chat 路由把「省略」按非 none 处理 → 带工具 400。
+    expect(r.text).toMatch(/^\s+off: none$/m);
+    // 其余档位同样一律 none,且不漏档(max 是 pi 的第 7 档,漏了就等于省略)
+    for (const lv of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(r.text).toMatch(new RegExp(`^\\s+${lv}: none$`, "m"));
+    }
+    // 普通模型(off 无映射 / 映射为 null)仍是官方空值形态:选 Off 时发送 nothing
+    const [plain] = buildResolvedModels(["glm-5.3"]);
+    const r2 = patchDshProvider("", {
+      providerName: "axon",
+      displayName: "Axon",
+      apiKeyEnv: "AXON_API_KEY",
+      baseUrl: "https://gw/v1",
+      models: toDshEntries([plain]),
+    });
+    expect(r2.text).toMatch(/^\s+off:$/m);
+  });
+
   it("未命中的模型不被改写(gpt-5.6-luna / 未知模型保持 canonical 形状)", () => {
     const [five] = buildResolvedModels(["gpt-5.6-luna"]);
     expect(gatewayOverlayFor("gpt-5.6-luna")).toBeUndefined();
@@ -421,7 +449,7 @@ describe("网关兼容层", () => {
   });
 });
 
-import { isDoubaoModel, filterDoubao, dshDeepseekEfforts, pickDefaultModel } from "../flows";
+import { isDoubaoModel, filterDoubao, dshDeepseekEfforts, pickDefaultModel, toDshEntries } from "../flows";
 
 describe("dsh DeepSeek reasoningEfforts 映射", () => {
   it("对齐 pi-ai 内置目录:max 档(非 xhigh),flash 额外 low", () => {
@@ -583,6 +611,26 @@ describe("omp", () => {
     const qwenIdx = r.text.indexOf("qwen3.8-max");
     expect(qwenIdx).toBeGreaterThan(-1);
     expect(r.text.slice(qwenIdx)).not.toContain("compat:");
+  });
+
+  it("网关强制关思考的模型带 compat.extraBody(reasoning_effort=none)", () => {
+    const r = patchOmpModelsYml("", {
+      providerName: "axon",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-test",
+      models: buildResolvedModels(["gpt-6-luna", "glm-5.3"]),
+    });
+    // gpt-6-luna:omp 的 extraBody 在思考策略之后合并进请求体 → 压过按档位生成的参数,
+    // 保证带工具的请求也显式发 none(省略该参数会被网关按非 none 处理 → 400)
+    const luna = r.text.slice(r.text.indexOf("gpt-6-luna"));
+    expect(luna).toContain("compat:");
+    expect(luna).toContain("extraBody:");
+    expect(luna).toContain("reasoning_effort: none");
+    expect(luna).toContain("maxTokensField: max_completion_tokens");
+    expect(luna).not.toContain("thinking:"); // 不写档位块:该模型在本网关上没有可用档位
+    // 未命中兼容层的模型不受影响(条目按 id 排序,glm-5.3 在前)
+    const glm = r.text.slice(r.text.indexOf("glm-5.3"), r.text.indexOf("gpt-6-luna"));
+    expect(glm).not.toContain("compat:");
   });
 
   it("已有其它 provider 时只更新目标段", () => {

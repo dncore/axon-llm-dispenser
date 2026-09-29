@@ -147,7 +147,7 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
   return compareAgentConfig({ baseUrl: wantUrl, apiKey: cfg.apiKey }, found);
 }
 
-function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
+export function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
   return models.map((m) => {
     const entry: DshModelEntry = { id: m.id, contextWindow: m.contextWindow, maxTokens: m.maxTokens, reasoning: m.reasoning };
     if (m.name && m.name !== m.id) entry.name = m.name;
@@ -159,8 +159,10 @@ function toDshEntries(models: ResolvedModel[]): DshModelEntry[] {
         // dsh 默认请求 max 档时映射为 null,网关返回 400 INVALID_REQUEST。
         efforts = dshDeepseekEfforts(m.id);
       } else {
+        // off 也照抄:模型表/兼容层把 off 映射成具体拼写(如 gpt-6-luna 的 none)时,
+        // dsh 的 Off 档必须显式发那个拼写(省略会被网关按非 none 处理 → 带工具 400)。
         for (const [level, wire] of Object.entries(m.thinkingLevelMap)) {
-          if (level !== "off" && typeof wire === "string" && wire.length > 0) efforts[level] = wire;
+          if (typeof wire === "string" && wire.length > 0) efforts[level] = wire;
         }
       }
       if (Object.keys(efforts).length > 0) entry.reasoningEfforts = efforts;
