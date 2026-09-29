@@ -38,18 +38,6 @@ let modelRows: ModelRow[] = [];
 // 多 Provider:顶层字段始终是「当前激活 profile」的视图(见 core/appconfig.ts)
 let config: bridge.AppConfig = appcfg.cloneConfig(bridge.DEFAULT_CONFIG);
 
-/** 工具卡片显示名(一键切换/应用到已接入工具时的确认与日志用)。 */
-const TOOL_LABELS: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  dsh: "DeepSeek Harness (dsh)",
-  pi: "Pi agent",
-  omp: "Oh My Pi",
-  reasonix: "Reasonix",
-  opencode: "OpenCode",
-  grok: "Grok",
-};
-
 // ---------------------------------------------------------------------------
 // 输出面板
 // ---------------------------------------------------------------------------
@@ -94,7 +82,6 @@ function build(): void {
       h("span", { id: "conn-status", class: "conn-status-dot status-idle", title: "未测试连接" }, []),
     ]),
     h("div", { class: "card-body" }, [
-      gatewayBar(),
       h("div", { class: "grid2" }, [
         field("Provider 名", "input-provider", "各工具中的路由名(默认 axon)", "axon"),
         field("显示名", "input-display", "配置界面展示名", "Axon"),
@@ -103,9 +90,9 @@ function build(): void {
       field("API Key", "input-key", "网关凭据", "", "password", true),
       field("Anthropic 端点(Claude 用,可留空)", "input-anthropic", "留空自动推导:base_url 的 /api/v1 → /api/anthropic", ""),
       h("div", { class: "row" }, [
-        h("button", { id: "btn-test", class: "btn" }, ["测试连接"]),
-        h("button", { id: "btn-save", class: "btn btn-ghost" }, ["保存配置"]),
-        h("button", { id: "btn-del-config", class: "btn btn-danger", type: "button" }, ["删除配置"]),
+        h("button", { id: "btn-test", class: "btn", type: "button", title: "测试连接:拉取网关模型列表并保存配置" }, ["测试"]),
+        h("button", { id: "btn-save", class: "btn btn-ghost", type: "button", title: "保存配置(写入 config.json)" }, ["保存"]),
+        h("button", { id: "btn-del-config", class: "btn btn-danger", type: "button", title: "删除已保存的网关配置" }, ["删除"]),
       ]),
     ]),
   ]);
@@ -115,7 +102,7 @@ function build(): void {
       "模型列表",
       h("div", { class: "fetch-right" }, [
         h("span", { id: "model-count", class: "hint" }, []),
-        h("button", { id: "btn-fetch", class: "btn btn-small btn-icon-only", type: "button", title: "拉取模型(/models)" }, [icon("refresh")]),
+        h("button", { id: "btn-fetch", class: "btn btn-tool", type: "button", title: "拉取模型(/models)" }, ["刷新"]),
       ]),
     ]),
     h("label", { class: "row toggle" }, [
@@ -130,20 +117,20 @@ function build(): void {
     h("h2", { class: "tools-title" }, [
       "工具接入",
       h("div", { class: "tools-title-right" }, [
-        h("button", { id: "btn-refresh-all-models", class: "btn btn-small btn-icon-only", type: "button", title: "刷新全部模型列表(仅更新各 Agent 的模型条目,不改 base_url / 密钥 / 默认模型)" }, [icon("refresh")]),
-        h("button", { id: "btn-upgrade-all", class: "btn btn-upgrade-all", type: "button", title: "升级全部" }, [icon("arrow-up")]),
+        h("button", { id: "btn-refresh-all-models", class: "btn btn-tool", type: "button", title: "刷新全部模型列表(仅更新各 Agent 的模型条目,不改 base_url / 密钥 / 默认模型)" }, ["刷新"]),
+        h("button", { id: "btn-upgrade-all", class: "btn-upgrade-all", type: "button", title: "升级全部(有新版本的 Agent)" }, ["升级"]),
         helpTipIcon(),
       ]),
     ]),
     h("div", { class: "card-body" }, [
-      toolCard("claude", "Claude Code", ["配置", "状态", "还原"]),
-      toolCard("codex", "Codex", ["配置", "刷新模型", "选模型", "状态", "还原"], codexAccountToggle()),
-      toolCard("dsh", "DeepSeek Harness (dsh)", ["配置", "刷新模型", "状态", "还原"]),
-      toolCard("pi", "Pi agent", ["配置", "状态", "还原"]),
-      toolCard("omp", "Oh My Pi", ["配置", "刷新模型", "状态", "还原"]),
-      toolCard("reasonix", "Reasonix", ["配置", "刷新模型", "状态", "生成 Token", "关闭鉴权", "还原"]),
-      toolCard("opencode", "OpenCode", ["配置", "刷新模型", "状态", "还原"]),
-      toolCard("grok", "Grok", ["配置", "刷新模型", "状态", "还原"]),
+      toolCard("claude", "Claude Code", ["config", "status", "restore"]),
+      toolCard("codex", "Codex", ["config", "refresh", "models", "status", "restore"], codexAccountToggle()),
+      toolCard("dsh", "DeepSeek Harness (dsh)", ["config", "refresh", "status", "restore"]),
+      toolCard("pi", "Pi agent", ["config", "status", "restore"]),
+      toolCard("omp", "Oh My Pi", ["config", "refresh", "status", "restore"]),
+      toolCard("reasonix", "Reasonix", ["config", "refresh", "status", "token", "authoff", "restore"]),
+      toolCard("opencode", "OpenCode", ["config", "refresh", "status", "restore"]),
+      toolCard("grok", "Grok", ["config", "refresh", "status", "restore"]),
     ]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -171,7 +158,7 @@ function build(): void {
 
     h("main", { class: "main" }, [
       modelsCard,
-      h("div", { class: "col" }, [connCard]),
+      h("div", { class: "col col-conn" }, [connCard]),
       h("div", { class: "col" }, [toolsCard]),
     ]),
 
@@ -209,46 +196,10 @@ function field(label: string, id: string, placeholder: string, value: string, ty
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// 多 Provider 配置:保存多套网关(baseUrl/key/模型列表各自独立),一键切换并写入已接入工具
-// ---------------------------------------------------------------------------
-
-/** 网关主机(连接设置标题旁展示,替代原多 Provider 下拉里的主机提示)。 */
-function hostOf(url: string): string {
-  if (!url) return "";
-  try {
-    return new URL(url).host;
-  } catch {
-    return url.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  }
-}
-
-/** 连接设置卡片顶部:单套网关配置(多 Provider 配置已移除,见 core/appconfig.ts 注释)。 */
-function gatewayBar(): El {
-  const apply = h("button", { id: "btn-provider-apply", class: "btn btn-small", type: "button", title: "把当前网关配置应用到所有「已接入」的工具" }, ["应用到已接入工具"]);
-  return h("div", { class: "provider-bar" }, [
-    h("span", { class: "field-label", id: "gateway-host" }, ["网关配置"]),
-    h("span", { class: "provider-bar-gap" }, []),
-    apply,
-  ]);
-}
-
-/** 网关主机提示(保存/测试连接/载入表单后刷新)。 */
-function renderGatewayHost(): void {
-  const el = document.getElementById("gateway-host");
-  if (el) el.textContent = config.baseUrl ? `网关配置 · ${hostOf(config.baseUrl)}` : "网关配置";
-}
-
 /** 内联 SVG 图标(Lucide 风格 stroke 图标)。 */
 const ICONS: Record<string, string> = {
   config:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-  restore:
-    '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
-  key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/><path d="M7 16.5l2-2"/>',
-  lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
-  play: '<polygon points="6 3 20 12 6 21 6 3"/>',
   package:
     '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="m7.5 4.3 9 5.2"/>',
   sliders:
@@ -259,11 +210,6 @@ const ICONS: Record<string, string> = {
   eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
   "eye-off":
     '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
-  refresh:
-    '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
-  pen: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
-  trash:
-    '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
 };
 
 function icon(name: string): SVGSVGElement {
@@ -291,15 +237,22 @@ function stateIcon(name: string, id: string, cls: string): SVGSVGElement {
 function toolsHelpContent(): El {
   const row = (iconName: string, desc: string): El =>
     h("div", { class: "tip-row" }, [icon(iconName), h("span", {}, [desc])]);
+  const btn = (label: string, desc: string): El =>
+    h("div", { class: "tip-row" }, [h("span", { class: "tip-key" }, [label]), h("span", {}, [desc])]);
   return h("div", {}, [
     row("package", "安装检测:绿=已检测到 CLI,灰=未检测到(PATH 与常见安装目录)"),
     row("arrow-up", "升级:安装图标变橙色↑表示有新版本,点击按现有安装方式升级;未安装时点击可选官方方式安装"),
-    row("sliders", "配置一致性:绿=与当前 Provider 一致,紫=指向本 app 的另一个 Provider,橙=不一致,灰=未配置"),
-    h("div", { class: "tip-note" }, ["状态图标均可点击重新检测;标题行 ↑ 按钮为批量升级"]),
+    row("sliders", "配置一致性:绿=与当前网关一致,橙=不一致,灰=未配置"),
+    h("div", { class: "tip-note" }, ["状态图标均可点击重新检测;标题行的「升级」按钮为批量升级"]),
     h("div", { class: "tip-note" }, ["Pi 卡片上的橙色 ext 角标 = 更新 Pi 扩展(packages,即点即更;pi 本体无更新时也可单独更新;升级 pi 后也会自动顺带更新扩展)"]),
-    row("play", "配置 = 生成/更新接入配置(写入官方配置文件;文件被外部改动过时自动备份 .bak-*)"),
-    row("info", "状态 = 查看该工具的配置状态"),
-    row("restore", "还原 = 从备份恢复(可重命名/删除/编辑备份内容;「清理自动备份」按文件保留最近 10 个)"),
+    btn("配置", "生成/更新接入配置(写入官方配置文件;文件被外部改动过时自动备份 .bak-*)"),
+    btn("刷新", "仅更新该工具的模型列表,不改 base_url / 密钥 / 默认模型"),
+    btn("选模", "选择 Codex 可见模型(上限 8 个;未选中的只在 models.json 里标为隐藏)"),
+    btn("状态", "查看该工具的配置状态"),
+    btn("还原", "从备份恢复(可重命名/删除/编辑备份内容;「清理自动备份」按文件保留最近 10 个)"),
+    btn("生成", "Reasonix:生成鉴权 Token"),
+    btn("关闭", "Reasonix:关闭鉴权"),
+    h("div", { class: "tip-note" }, ["Codex 卡片上的「自建网关 / 官方账号」= 该工具指向本 app 写入的网关,还是用 ChatGPT 官方登录"]),
   ]);
 }
 
@@ -491,7 +444,7 @@ async function checkAppUpdate(force = false): Promise<void> {
     }
     chip.replaceChildren();
     const isMac = navigator.userAgent.includes("Mac");
-    const btn = h("button", { class: "btn btn-small", type: "button", title: isMac ? "执行 brew upgrade axon-llm-dispenser" : "前往 GitHub Release 下载" }, [isMac ? "一键升级" : "去下载"]);
+    const btn = h("button", { class: "btn btn-small", type: "button", title: isMac ? "一键升级:执行 brew upgrade axon-llm-dispenser" : "前往 GitHub Release 下载新版安装包" }, [isMac ? "升级" : "下载"]);
     btn.addEventListener("click", () => {
       if (isMac) {
         confirmDialog(`升级 Axon 到 v${info.latest}?将执行 brew upgrade axon-llm-dispenser,升级会自动重启应用。`, () => {
@@ -593,43 +546,39 @@ function customSelect(
   return { el: wrap, value: () => current, set };
 }
 
-const ACTION_ICONS: Record<string, string> = {
-  "配置": "play",
-  "刷新模型": "refresh",
-  "选模型": "sliders",
-  "状态": "info",
-  "还原": "restore",
-  "生成 Token": "key",
-  "关闭鉴权": "lock",
-};
-const ACTION_TITLES: Record<string, string> = {
-  "配置": "配置(覆盖现有配置;外部改动过才备份 .bak-*)",
-  "刷新模型": "仅更新模型列表:只写模型相关配置,不改 base_url / 密钥 / 默认模型(外部改动过才备份)",
-  "选模型": `选择 Codex 可见模型(${CODX_MAX_LISTED_MODELS} 个上限;未选中的写 visibility=hide,仅在 models.json 里生效)`,
-  "状态": "查看配置状态",
-  "还原": "从备份还原",
-  "生成 Token": "生成鉴权 Token",
-  "关闭鉴权": "关闭鉴权",
+/** 工具卡片动作:key 段进 DOM id(ASCII,供测试与脚本引用),label 是两字按钮文案。 */
+const ACTIONS: Record<string, { label: string; title: string }> = {
+  config: { label: "配置", title: "配置(覆盖现有配置;外部改动过才备份 .bak-*)" },
+  refresh: { label: "刷新", title: "仅更新模型列表:只写模型相关配置,不改 base_url / 密钥 / 默认模型(外部改动过才备份)" },
+  models: { label: "选模", title: `选择 Codex 可见模型(${CODX_MAX_LISTED_MODELS} 个上限;未选中的写 visibility=hide,仅在 models.json 里生效)` },
+  status: { label: "状态", title: "查看配置状态" },
+  restore: { label: "还原", title: "从备份还原" },
+  token: { label: "生成", title: "生成鉴权 Token" },
+  authoff: { label: "关闭", title: "关闭鉴权" },
 };
 
 function toolCard(id: string, name: string, actions: string[], extra?: El | null): El {
-  const buttons = actions.map((a) =>
-    h("button", { class: "btn btn-small btn-icon-only", id: `btn-${id}-${a}`, title: ACTION_TITLES[a] ?? a }, [icon(ACTION_ICONS[a] ?? "config")]),
-  );
+  const buttons = actions.map((a) => {
+    const act = ACTIONS[a];
+    return h("button", { class: "btn btn-tool", id: `btn-${id}-${a}`, title: act.title }, [act.label]);
+  });
   const extBadge =
     id === "pi"
       ? h("button", { id: "agent-ext-pi", class: "agent-ext", type: "button", style: "display:none", title: "更新 Pi 扩展(packages;pi update --extensions,即点即更,不更新 pi 本体)" }, ["ext"])
       : null;
   return h("div", { class: "tool" }, [
-    h("div", { class: "tool-left" }, [
-      stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
-      stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
-      h("span", { class: "tool-name" }, [name]),
-      // Pi 扩展角标放名字之后,避免把 agent 名与其他行横向错位
-      ...(extBadge ? [extBadge] : []),
-      ...(extra ? [extra] : []),
+    h("div", { class: "tool-main" }, [
+      h("div", { class: "tool-left" }, [
+        stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
+        stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
+        h("span", { class: "tool-name" }, [name]),
+        // Pi 扩展角标放名字之后,避免把 agent 名与其他行横向错位
+        ...(extBadge ? [extBadge] : []),
+      ]),
+      h("div", { class: "tool-actions" }, buttons),
     ]),
-    h("div", { class: "tool-actions" }, buttons),
+    // 额外控件(Codex 账号模式)单独一行:挤在同一行会把动作按钮顶到折行
+    ...(extra ? [h("div", { class: "tool-sub" }, [extra])] : []),
   ]);
 }
 
@@ -904,7 +853,7 @@ function syncOnboarding(): void {
       banner.style.display = "none";
     } else {
       const text = banner.querySelector(".guide-text") as El;
-      text.textContent = "开始使用:在「连接设置」填写 Base URL 与 API Key → 点「测试连接」拉取模型 → 点任意 Agent 的 ▶ 一键接入";
+      text.textContent = "开始使用:在「连接设置」填写 Base URL 与 API Key → 点「测试」拉取模型 → 点任意 Agent 的「配置」写入";
       banner.style.display = "flex";
     }
   }
@@ -975,7 +924,6 @@ function fillForm(cfg: bridge.AppConfig): void {
   ($("input-anthropic") as HTMLInputElement).value = cfg.anthropicBaseUrl;
   ($("chk-exclude-doubao") as HTMLInputElement).checked = cfg.excludeDoubao;
   syncCodexAccountToggle();
-  renderGatewayHost();
 }
 
 /** 表单恢复刚安装时的初始状态(含 API Key 眼睛与模型列表)。 */
@@ -995,7 +943,6 @@ function resetForm(): void {
   gatewayConnected = false;
   syncCardLock();
   syncCodexAccountToggle();
-  renderGatewayHost();
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +952,6 @@ function resetForm(): void {
 /** 保存配置;provider 名顺带记进 knownProviders(改名后仍能认出并清理自家残留)。 */
 async function persistConfig(): Promise<string> {
   config = appcfg.rememberProvider(config);
-  renderGatewayHost();
   return await bridge.saveAppConfig(config);
 }
 
@@ -1024,96 +970,6 @@ async function refreshModelsForActive(): Promise<string[] | null> {
     return null;
   }
   return ids;
-}
-
-/** 用给定配置检测哪些工具「已接入」(存在本 app 写入的 provider 段,含 baseUrl/Key 不一致的情况)。 */
-async function detectConfiguredTools(cfg: bridge.AppConfig): Promise<string[]> {
-  const out: string[] = [];
-  for (const tool of Object.keys(TOOL_LABELS)) {
-    try {
-      const r = await flows.detectAgentConfig(tool, cfg);
-      if (r.state !== "missing") out.push(tool);
-    } catch {
-      // 检测失败按未接入处理
-    }
-  }
-  return out;
-}
-
-/**
- * 把当前网关配置写入指定工具(调用方保证 ids 已就绪、codexListed 已定):
- * Claude 沿用 settings.json 现有角色映射;Codex 用给定可见集合(并记入 profile)。
- */
-async function applyConfigToTools(tools: string[], ids: string[], codexListed?: string[]): Promise<void> {
-  for (const tool of tools) {
-    const label = TOOL_LABELS[tool];
-    try {
-      if (tool === "claude") {
-        const roles = await flows.getClaudeCurrentRoles();
-        if (!roles) {
-          log([`—— Claude Code ——`, "跳过:settings.json 里没有角色模型配置,请用 Claude 卡片的「配置」选择角色"]);
-          continue;
-        }
-        const r = await flows.configureClaude(config, roles);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "codex") {
-        const r = await flows.configureCodex(config, ids, codexListed);
-        log([`—— ${label} ——`, ...r.lines]);
-        rememberCodexChoice(codexListed ?? [], ids);
-      } else if (tool === "reasonix") {
-        const r = await flows.configureReasonix(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "dsh") {
-        const r = await flows.configureDsh(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "pi") {
-        const r = await flows.configurePi(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "omp") {
-        const r = await flows.configureOmp(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "opencode") {
-        const r = await flows.configureOpenCode(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      } else if (tool === "grok") {
-        const r = await flows.configureGrok(config, ids);
-        log([`—— ${label} ——`, ...r.lines]);
-      }
-      void detectAgentConfigOne(tool);
-    } catch (e) {
-      notify(`${label} 写入失败: ${e}`, "error");
-    }
-  }
-  await persistConfig().catch(() => {});
-}
-
-/** 已接入工具清单的确认文案(切换/应用前统一展示)。 */
-function confirmApplyText(action: string, tools: string[]): string {
-  const names = tools.map((t) => TOOL_LABELS[t]).join("、");
-  return `${action}\n将写入已接入的工具:${names}(未接入的自动跳过)\nCodex 会重启转换代理并刷新模型目录;Claude 沿用现有角色映射;各文件仅在检测到外部改动时才备份(.bak-*)。\n确认?`;
-}
-
-/** 把当前网关配置应用到所有已接入工具(不下发其它副作用)。 */
-async function applyActiveToConfiguredTools(): Promise<void> {
-  readFields();
-  if (!validateProvider()) return;
-  const ids = await ensureModels();
-  if (!ids) return;
-  const tools = await detectConfiguredTools(config);
-  if (tools.length === 0) {
-    notify("未检测到已接入的工具(先在各工具卡片点「配置」写入一次)", "error");
-    return;
-  }
-  let codexListed: string[] | undefined;
-  if (tools.includes("codex")) {
-    const sel = await resolveCodexListed(ids);
-    if (!sel) return;
-    codexListed = sel;
-  }
-  const ok = await confirmDialogAsync(confirmApplyText("把当前网关配置应用到已接入工具?", tools));
-  if (!ok) return;
-  await applyConfigToTools(tools, ids, codexListed);
-  notify(`已写入 ${tools.length} 个已接入工具`, "info");
 }
 
 function readModelIds(): string[] {
@@ -1500,7 +1356,7 @@ function openClaudeConfigModal(): void {
   });
 }
 
-/** 还原弹窗:列出所选工具的全部备份,支持应用(▶)/重命名(✎)/删除(🗑)/查看编辑。 */
+/** 还原弹窗:列出所选工具的全部备份,支持应用/改名/删除/查看编辑。 */
 function openRestoreModal(tool: string): void {
   clearOverlays();
   const toolName = tool === "pi" ? "Pi" : tool; // pi 显示名首字母大写
@@ -1532,7 +1388,7 @@ function openRestoreModal(tool: string): void {
     const overlay = h("div", { class: "modal-overlay" }, []);
     const modal = h("div", { class: "modal" }, [
       h("h3", {}, [`还原 - ${toolName}`]),
-      h("div", { class: "modal-sub" }, [`共 ${rows.length} 个备份。点击条目查看/编辑配置;▶ 应用、✎ 重命名、🗑 删除`]),
+      h("div", { class: "modal-sub" }, [`共 ${rows.length} 个备份。点击条目查看/编辑配置;「应用」还原到当前配置、「改名」重命名、「删除」删除`]),
     ]);
     const list = h("div", { class: "modal-list" }, []);
 
@@ -1570,11 +1426,11 @@ function openRestoreModal(tool: string): void {
           h("span", { class: "modal-meta" }, [`${b.time} · ${b.size}`]),
         ]);
         main.addEventListener("click", () => openBackupEditor(b, () => void refresh()));
-        const play = h("button", { class: "backup-action-btn", type: "button", title: "应用此备份" }, [icon("play")]);
+        const play = h("button", { class: "backup-action-btn", type: "button", title: "应用此备份(还原到当前配置)" }, ["应用"]);
         play.addEventListener("click", () => applyRow(b));
-        const rename = h("button", { class: "backup-action-btn", type: "button", title: "重命名" }, [icon("pen")]);
+        const rename = h("button", { class: "backup-action-btn", type: "button", title: "重命名备份" }, ["改名"]);
         rename.addEventListener("click", () => openRenameModal(b, () => void refresh()));
-        const del = h("button", { class: "backup-action-btn danger", type: "button", title: "删除" }, [icon("trash")]);
+        const del = h("button", { class: "backup-action-btn danger", type: "button", title: "删除备份" }, ["删除"]);
         del.addEventListener("click", () =>
           confirmDialog(`确定删除备份「${b.name}」?删除后不可恢复。`, () => {
             void run("删除备份", async () => {
@@ -1810,9 +1666,6 @@ function bind(): void {
     window.addEventListener("pointercancel", stop);
   });
 
-  // 网关配置:应用到已接入工具(单套配置,多 Provider 已移除)
-  $("btn-provider-apply").addEventListener("click", () => void run("应用到已接入工具", applyActiveToConfiguredTools));
-
   $("btn-save").addEventListener("click", () =>
     run("保存配置", async () => {
       readFields();
@@ -1858,7 +1711,7 @@ function bind(): void {
   $("btn-fetch").addEventListener("click", () => $("btn-test").click());
 
 
-  $("btn-codex-配置").addEventListener("click", () =>
+  $("btn-codex-config").addEventListener("click", () =>
     void run("Codex 配置", async () => {
       readFields();
       if (!validateProvider()) return;
@@ -1878,7 +1731,7 @@ function bind(): void {
   );
 
   // 主动改选(不依赖超上限触发):只写 models.json 的可见性,不动 config.toml
-  $("btn-codex-选模型").addEventListener("click", () =>
+  $("btn-codex-models").addEventListener("click", () =>
     void run("Codex 选择可见模型", async () => {
       readFields();
       if (!validateProvider()) return;
@@ -1894,15 +1747,15 @@ function bind(): void {
     }),
   );
 
-  $("btn-codex-状态").addEventListener("click", () =>
+  $("btn-codex-status").addEventListener("click", () =>
     run("Codex 状态", async () => {
       log(await flows.codexStatus());
     }),
   );
 
-  $("btn-codex-还原").addEventListener("click", () => openRestoreModal("codex"));
+  $("btn-codex-restore").addEventListener("click", () => openRestoreModal("codex"));
 
-  $("btn-reasonix-配置").addEventListener("click", () =>
+  $("btn-reasonix-config").addEventListener("click", () =>
     confirmDialog("将更新 Reasonix 的接入配置:写入 config.toml / .env 中 provider/鉴权与模型相关字段,保留其它设置;文件被外部改动过时自动备份(.bak-*),确认?", () => {
       void run("Reasonix 配置", async () => {
         readFields();
@@ -1916,16 +1769,16 @@ function bind(): void {
     }),
   );
 
-  $("btn-reasonix-状态").addEventListener("click", () =>
+  $("btn-reasonix-status").addEventListener("click", () =>
     run("Reasonix 状态", async () => {
       readFields();
       log(await flows.reasonixStatus(config));
     }),
   );
 
-  $("btn-reasonix-还原").addEventListener("click", () => openRestoreModal("reasonix"));
+  $("btn-reasonix-restore").addEventListener("click", () => openRestoreModal("reasonix"));
 
-  $("btn-reasonix-生成 Token").addEventListener("click", () =>
+  $("btn-reasonix-token").addEventListener("click", () =>
     confirmDialog("将生成新的固定鉴权 Token 并写入 Reasonix [serve] 段(覆盖旧 Token;文件被外部改动过时自动备份),确认?", () => {
       void run("生成 Token", async () => {
         const r = await flows.generateReasonixAuth();
@@ -1934,7 +1787,7 @@ function bind(): void {
     }),
   );
 
-  $("btn-reasonix-关闭鉴权").addEventListener("click", () =>
+  $("btn-reasonix-authoff").addEventListener("click", () =>
     confirmDialog("将 Reasonix 鉴权改回 auth_mode=none 并移除 token,确认?", () => {
       void run("关闭鉴权", async () => {
         const r = await flows.disableReasonixAuth();
@@ -1943,7 +1796,7 @@ function bind(): void {
     }),
   );
 
-  $("btn-dsh-配置").addEventListener("click", () =>
+  $("btn-dsh-config").addEventListener("click", () =>
     confirmDialog("将更新 dsh 的接入配置:写入 settings.yaml / .credentials.yaml 中 provider/鉴权与模型相关字段,保留其它设置;文件被外部改动过时自动备份(.bak-*),确认?", () => {
       void run("dsh 配置", async () => {
         readFields();
@@ -1957,16 +1810,16 @@ function bind(): void {
     }),
   );
 
-  $("btn-dsh-状态").addEventListener("click", () =>
+  $("btn-dsh-status").addEventListener("click", () =>
     run("dsh 状态", async () => {
       readFields();
       log(await flows.dshStatus(config));
     }),
   );
 
-  $("btn-dsh-还原").addEventListener("click", () => openRestoreModal("dsh"));
+  $("btn-dsh-restore").addEventListener("click", () => openRestoreModal("dsh"));
 
-  $("btn-grok-配置").addEventListener("click", () =>
+  $("btn-grok-config").addEventListener("click", () =>
     confirmDialog("将更新 grok 的接入配置:写入 config.toml 的 [model_providers.<name>] 与每模型 [model.<id>] 块,保留其它设置;API Key 以明文写入 provider 块(grok 不加载 home .env,env_key 需 shell 导出故不用);原文件自动备份(.bak-*),确认?", () => {
       void run("grok 配置", async () => {
         readFields();
@@ -1980,26 +1833,26 @@ function bind(): void {
     }),
   );
 
-  $("btn-grok-状态").addEventListener("click", () =>
+  $("btn-grok-status").addEventListener("click", () =>
     run("grok 状态", async () => {
       readFields();
       log(await flows.grokStatus(config));
     }),
   );
 
-  $("btn-grok-还原").addEventListener("click", () => openRestoreModal("grok"));
+  $("btn-grok-restore").addEventListener("click", () => openRestoreModal("grok"));
 
-  $("btn-claude-配置").addEventListener("click", () => openClaudeConfigModal());
+  $("btn-claude-config").addEventListener("click", () => openClaudeConfigModal());
 
-  $("btn-claude-状态").addEventListener("click", () =>
+  $("btn-claude-status").addEventListener("click", () =>
     run("Claude 状态", async () => {
       log(await flows.claudeStatus());
     }),
   );
 
-  $("btn-claude-还原").addEventListener("click", () => openRestoreModal("claude"));
+  $("btn-claude-restore").addEventListener("click", () => openRestoreModal("claude"));
 
-  $("btn-pi-配置").addEventListener("click", () =>
+  $("btn-pi-config").addEventListener("click", () =>
     confirmDialog("将更新 Pi 的接入配置:写入 models.json / settings.json 中 provider/鉴权与模型相关字段,保留其它设置;文件被外部改动过时自动备份(.bak-*),确认?", () => {
       void run("Pi 配置", async () => {
         readFields();
@@ -2013,16 +1866,16 @@ function bind(): void {
     }),
   );
 
-  $("btn-pi-状态").addEventListener("click", () =>
+  $("btn-pi-status").addEventListener("click", () =>
     run("Pi 状态", async () => {
       readFields();
       log(await flows.piStatus(config));
     }),
   );
 
-  $("btn-pi-还原").addEventListener("click", () => openRestoreModal("pi"));
+  $("btn-pi-restore").addEventListener("click", () => openRestoreModal("pi"));
 
-  $("btn-omp-配置").addEventListener("click", () =>
+  $("btn-omp-config").addEventListener("click", () =>
     confirmDialog("将更新 omp 的接入配置:写入 models.yml / config.yml 中 provider/鉴权与模型相关字段,DeepSeek 模型应用官方特配(thinking 等级 + 完整 compat),保留其它设置;文件被外部改动过时自动备份(.bak-*),确认?", () => {
       void run("omp 配置", async () => {
         readFields();
@@ -2036,16 +1889,16 @@ function bind(): void {
     }),
   );
 
-  $("btn-omp-状态").addEventListener("click", () =>
+  $("btn-omp-status").addEventListener("click", () =>
     run("omp 状态", async () => {
       readFields();
       log(await flows.ompStatus(config));
     }),
   );
 
-  $("btn-omp-还原").addEventListener("click", () => openRestoreModal("omp"));
+  $("btn-omp-restore").addEventListener("click", () => openRestoreModal("omp"));
 
-  $("btn-opencode-配置").addEventListener("click", () =>
+  $("btn-opencode-config").addEventListener("click", () =>
     confirmDialog(
       "将更新 OpenCode 的接入配置:写入 ~/.config/opencode/opencode.json(provider 块 + 默认 model)与 ~/.local/share/opencode/auth.json(密钥,0600,不备份),保留其它设置;opencode.json 外部改动过时自动备份(.bak-*),确认?",
       () => {
@@ -2062,14 +1915,14 @@ function bind(): void {
     ),
   );
 
-  $("btn-opencode-状态").addEventListener("click", () =>
+  $("btn-opencode-status").addEventListener("click", () =>
     run("OpenCode 状态", async () => {
       readFields();
       log(await flows.opencodeStatus(config));
     }),
   );
 
-  $("btn-opencode-还原").addEventListener("click", () => openRestoreModal("opencode"));
+  $("btn-opencode-restore").addEventListener("click", () => openRestoreModal("opencode"));
 
   // ---- 刷新模型(仅更新模型列表):先算变更 → 展示确认 → 写入;不改 base_url/密钥/默认模型 ----
 
@@ -2105,7 +1958,7 @@ function bind(): void {
       });
 
   // Codex 刷新模型:可见模型超上限时先让用户挑选(未接入则直接跳过,不弹选择框)
-  $("btn-codex-刷新模型").addEventListener("click", () =>
+  $("btn-codex-refresh").addEventListener("click", () =>
     void run("Codex 刷新模型", async () => {
       readFields();
       if (!validateProvider()) return;
@@ -2125,11 +1978,11 @@ function bind(): void {
       }
     }),
   );
-  $("btn-dsh-刷新模型").addEventListener("click", refreshOne("dsh", "dsh", flows.planRefreshDsh));
-  $("btn-omp-刷新模型").addEventListener("click", refreshOne("omp", "omp", flows.planRefreshOmp));
-  $("btn-reasonix-刷新模型").addEventListener("click", refreshOne("reasonix", "Reasonix", flows.planRefreshReasonix));
-  $("btn-opencode-刷新模型").addEventListener("click", refreshOne("opencode", "OpenCode", flows.planRefreshOpenCode));
-  $("btn-grok-刷新模型").addEventListener("click", refreshOne("grok", "Grok", flows.planRefreshGrok));
+  $("btn-dsh-refresh").addEventListener("click", refreshOne("dsh", "dsh", flows.planRefreshDsh));
+  $("btn-omp-refresh").addEventListener("click", refreshOne("omp", "omp", flows.planRefreshOmp));
+  $("btn-reasonix-refresh").addEventListener("click", refreshOne("reasonix", "Reasonix", flows.planRefreshReasonix));
+  $("btn-opencode-refresh").addEventListener("click", refreshOne("opencode", "OpenCode", flows.planRefreshOpenCode));
+  $("btn-grok-refresh").addEventListener("click", refreshOne("grok", "Grok", flows.planRefreshGrok));
 
   // 全局:刷新全部已接入 agent 的模型列表(单点失败不中断)
   $("btn-refresh-all-models").addEventListener("click", () =>

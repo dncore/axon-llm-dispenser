@@ -197,8 +197,21 @@ async function runScenarios(cdp) {
   // 启动:自动拉取模型 + Doubao 过滤
   check("启动:自动拉取网关模型并过滤 doubao", await waitFor(`document.getElementById('model-count')?.textContent === '15 个模型'`), await evaluate(`document.getElementById('model-count')?.textContent`));
 
+  // 布局(窗口 1280x800,同 tauri.conf.json):文字按钮不与工具名折行、不溢出卡片
+  const layout = await evaluate(`(() => [...document.querySelectorAll('.tool')].map((t) => {
+    const act = t.querySelector('.tool-actions').getBoundingClientRect();
+    const left = t.querySelector('.tool-left').getBoundingClientRect();
+    const body = t.closest('.card-body').getBoundingClientRect();
+    return { name: t.querySelector('.tool-name').textContent, sameLine: act.top < left.bottom, overflow: Math.round(act.right - body.right), actW: Math.round(act.width), slack: Math.round(body.right - act.right - (body.right - body.right)) + Math.round(act.left - left.right), vw: innerWidth };
+  }))()`);
+  check(
+    "布局:工具行动作按钮不折行、不溢出卡片",
+    layout.length === 8 && layout.every((r) => r.sameLine && r.overflow <= 0),
+    layout.map((r) => `${r.name} actW=${r.actW} gap=${r.slack} vw=${r.vw}`).join(" | "),
+  );
+
   // 「配置」超上限 → 自动弹选择框
-  await evaluate(`document.getElementById('btn-codex-配置').click()`);
+  await evaluate(`document.getElementById('btn-codex-config').click()`);
   check("配置超上限:弹出可见模型选择框", await waitFor(`!!document.querySelector('.picker-row')`));
   const st = await evaluate(PICKER_STATE);
   check("标题与计数:x/8", st.title.includes("最多 8 个") && st.counter === "已选 8/8", `${st.title} / ${st.counter}`);
@@ -246,7 +259,7 @@ async function runScenarios(cdp) {
   check("日志显示可见/隐藏与上限", modelsLine.includes("可见 8 / 隐藏 7") && modelsLine.includes("上限 8"), modelsLine);
 
   // 「选模型」主动改选 + ESC 取消
-  await evaluate(`document.getElementById('btn-codex-选模型').click()`);
+  await evaluate(`document.getElementById('btn-codex-models').click()`);
   check("「选模型」打开选择框", await waitFor(`!!document.querySelector('.picker-row')`));
   const rows5 = await evaluate(PICKER_ROWS);
   check("预选=当前 models.json 的可见集合", rows5.length === 15 && eqSet(rows5.filter((r) => r.checked).map((r) => r.id), EXPECTED_SEED));
@@ -254,12 +267,12 @@ async function runScenarios(cdp) {
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await sleep(300);
   check("ESC 关闭且不写盘", (await evaluate(`!document.querySelector('.picker-row')`)) && (await evaluate(`window.__MOCK__.writes.length`)) === writesBeforeEsc);
-  await evaluate(`document.getElementById('btn-codex-状态').click()`);
+  await evaluate(`document.getElementById('btn-codex-status').click()`);
   check("ESC 后流程正常结算", await waitFor(`[...document.querySelectorAll('#output .log-block div')].some(d => d.textContent.includes('models.json: 15 条'))`));
 
   // 不超上限:刷新不打扰
   const writesBeforeRefresh = await evaluate(`window.__MOCK__.writes.length`);
-  await evaluate(`document.getElementById('btn-codex-刷新模型').click()`);
+  await evaluate(`document.getElementById('btn-codex-refresh').click()`);
   await waitFor(`[...document.querySelectorAll('#output .log-block div')].some(d => d.textContent.includes('模型列表已是最新'))`);
   check("不超上限:刷新不弹框、不写盘", !(await evaluate(`!!document.querySelector('.picker-row')`)) && (await evaluate(`window.__MOCK__.writes.length`)) === writesBeforeRefresh);
 
@@ -272,7 +285,7 @@ async function runScenarios(cdp) {
   // 网关新增模型 → 再次触发
   await evaluate(`(() => { window.__MOCK__.gatewayModels.push('grok-5'); document.getElementById('btn-fetch').click(); return true; })()`);
   await waitFor(`document.getElementById('model-count')?.textContent === '16 个模型'`);
-  await evaluate(`document.getElementById('btn-codex-刷新模型').click()`);
+  await evaluate(`document.getElementById('btn-codex-refresh').click()`);
   check("新增模型导致超限:再次弹出", await waitFor(`!!document.querySelector('.picker-row')`));
   const rows8 = await evaluate(PICKER_ROWS);
   check("新模型未勾选且被上限禁用,既有 8 个保持预选",
@@ -288,32 +301,16 @@ async function runScenarios(cdp) {
   check("残留清理:在售模型的旧前缀条目被接管而非删除", await evaluate(`(() => { const c = JSON.parse(${F("/mock/home/.codex/models.json")}); return c.models.some(m => m.slug === 'qwen3.7-plus' && (m.description || '').startsWith('axon: ')); })()`));
   check("残留清理:日志写明清理了哪些条目", (await evaluate(LOGS)).some((l) => l.includes("旧 provider 残留") && l.includes("powerding")));
 
-  // ---- 应用到已接入工具 + 备份去重(外部改过的文件才备份) ----
+  // ---- Claude 卡片「配置」+ 备份去重(外部改过的文件才备份) ----
   const bakDelta = async () => ({
     codex: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('config.toml.bak-')).length`),
     claude: await evaluate(`window.__MOCK__.writes.filter(w => w.path.includes('settings.json.bak-')).length`),
   });
   const bakBefore = await bakDelta();
-  await evaluate(`document.getElementById('btn-provider-apply').click()`);
-  await sleep(700);
-  // 场景前面往网关加了 grok-5 → 可见集合超上限,先弹「Codex 可见模型」选择框,确认后才是应用确认框
-  if (await evaluate(`!!document.querySelector('.picker-row')`)) {
-    await evaluate(CLICK_MODAL_BTN("确认("));
-    await sleep(300);
-  }
-  check(
-    "应用确认框列出已接入的工具",
-    await waitFor(`(() => { const o = [...document.querySelectorAll('.modal-overlay')].pop(); return !!o && o.textContent.includes('将写入已接入的工具') && o.textContent.includes('Claude Code') && o.textContent.includes('Codex'); })()`),
-    await evaluate(`(() => {
-      const o = [...document.querySelectorAll('.modal-overlay')].pop();
-      if (o) return '弹窗文本: ' + o.textContent.replace(/\\s+/g, ' ').slice(0, 160);
-      const logs = [...document.querySelectorAll('#output .log-block div')].slice(-4).map((d) => d.textContent);
-      const dots = [...document.querySelectorAll('[id^=agent-cfg-dot-]')].map((d) => d.id.replace('agent-cfg-dot-', '') + ':' + [...d.classList].join(','));
-      return '无弹窗 | 末尾日志: ' + logs.join(' / ') + ' | 徽标: ' + dots.join(' ');
-    })()`),
-  );
-  await evaluate(CLICK_MODAL_BTN("确认"));
-  await waitFor(`${F("/mock/home/.claude/settings.json")}.includes("gw.example")`);
+  await evaluate(`document.getElementById('btn-claude-config').click()`);
+  check("Claude「配置」打开模型映射弹窗", await waitFor(`!!document.querySelector('.claude-role-row')`));
+  await evaluate(CLICK_MODAL_BTN("生成配置"));
+  await waitFor(`window.__MOCK__.writes.some(w => w.path.endsWith('/.claude/settings.json'))`);
   const bakAfter = await bakDelta();
   check(
     "备份去重:外部改过的文件才备份(Claude +1,Codex 不变)",
@@ -370,7 +367,7 @@ async function runScenarios(cdp) {
     return true;
   })()`);
   const autosBefore = await evaluate(`Object.keys(window.__MOCK__.fs).filter(p => p.startsWith('/mock/home/.codex/config.toml.bak-') && !p.endsWith('manual-keep')).length`);
-  await evaluate(`document.getElementById('btn-codex-还原').click()`);
+  await evaluate(`document.getElementById('btn-codex-restore').click()`);
   check("还原弹窗列出备份", await waitFor(`[...document.querySelectorAll('.modal-row .modal-name')].some(x => x.textContent.includes('.bak-'))`));
   await evaluate(`[...document.querySelectorAll('.modal-footer button')].find(b => b.textContent === '清理自动备份').click()`);
   check(
@@ -400,7 +397,7 @@ try {
   server = await serve(webRoot, webPort);
   const pageUrl = `http://127.0.0.1:${webPort}/index.html`;
   chrome = spawn(chromeBin, [
-    "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+    "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--window-size=1280,800",
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${join(tmp, "chrome-profile")}`, pageUrl,
   ], { stdio: "ignore" });
 

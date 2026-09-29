@@ -150,6 +150,8 @@ body {
   gap: 16px;
   min-width: 0;
 }
+/* 连接设置列窄一些:工具接入列要放下每行 4~6 个两字文字按钮(1280 窗口下不折行) */
+.col-conn { flex: 0 1 380px; }
 
 /* 列内卡片撑满列高,内容超出在 card-body 内滚动 */
 .col > .card {
@@ -203,19 +205,6 @@ body {
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .field-label { font-size: 12px; color: var(--muted); }
-
-/* Provider 配置切换条:下拉 + 新建/删除 + 应用到已接入工具 */
-.provider-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px dashed var(--border);
-}
-.provider-bar > .field-label { white-space: nowrap; }
-.provider-bar .cselect { max-width: 320px; }
-.provider-bar-gap { flex: 1; }
 
 .input, .models {
   padding: 8px 10px;
@@ -361,7 +350,8 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .btn:hover { background: var(--accent-hover); }
 .btn-small { padding: 4px 10px; font-size: 12px; }
-.btn-icon-only { padding: 5px; line-height: 0; }
+/* 工具卡片/模型列表/标题行的小按钮:两字文字按钮(比图标直观),压缩内边距保证一行放得下 */
+.btn-tool { padding: 4px 6px; font-size: 12px; border-radius: 6px; white-space: nowrap; }
 .btn-icon { width: 15px; height: 15px; display: block; }
 .btn-ghost { background: transparent; color: var(--accent); }
 .btn-ghost:hover { background: #eff6ff; }
@@ -372,14 +362,17 @@ button:focus:not(:focus-visible) { outline: none; }
 
 .tool {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px 0;
   border-bottom: 1px solid var(--border);
 }
 .tool:last-child { border-bottom: none; }
+.tool-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tool-name { font-weight: 500; }
-.tool-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* 第二行(Codex 账号模式):缩进到工具名下方(两个 14px 图标 + 8px 间距) */
+.tool-sub { padding-left: 44px; }
+.tool-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* 工具接入:agent 状态徽标(图标点亮/置灰;蓝脉冲=检测中;点击重检)
    安装=包裹盒,配置=滑杆 */
@@ -421,25 +414,25 @@ button:focus:not(:focus-visible) { outline: none; }
 .agent-ext:hover { background: #fef3c7; }
 .agent-ext.updating { animation: agent-pulse 1s ease-in-out infinite; opacity: 0.7; pointer-events: none; }
 
-/* 工具接入标题行右侧:批量升级按钮 + 帮助图标 */
+/* 工具接入标题行右侧:批量升级按钮(有可升级项才出现)+ 帮助图标 */
 .tools-title-right { display: flex; align-items: center; gap: 8px; }
 .btn-upgrade-all {
   display: none;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: none;
+  padding: 4px 6px;
+  border: 1px solid #d97706;
+  background: transparent;
   color: #d97706;
   border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   flex-shrink: 0;
+  white-space: nowrap;
 }
-.btn-upgrade-all.show { display: flex; }
+.btn-upgrade-all.show { display: block; }
 .btn-upgrade-all.updating { animation: agent-pulse 1s ease-in-out infinite; }
-.btn-upgrade-all:hover { background: #fef3c7; }
-.btn-upgrade-all .btn-icon { width: 14px; height: 14px; }
+.btn-upgrade-all:hover { background: #fff7ed; }
 
 .output {
   flex: 1;
@@ -553,22 +546,20 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
   text-align: left;
   font: inherit;
 }
-.backup-actions { display: flex; gap: 2px; padding-right: 6px; flex-shrink: 0; }
+.backup-actions { display: flex; gap: 4px; padding-right: 6px; flex-shrink: 0; }
 .backup-action-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border: none;
-  background: none;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  background: #fff;
   color: var(--muted);
   border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .backup-action-btn:hover { background: #e2e8f0; color: var(--text); }
-.backup-action-btn.danger:hover { color: var(--danger); background: #fee2e2; }
-.backup-action-btn .btn-icon { width: 13px; height: 13px; }
+.backup-action-btn.danger:hover { color: var(--danger); background: #fee2e2; border-color: var(--danger); }
 .editor-wrap {
   flex: 1;
   min-height: 260px;
@@ -658,9 +649,10 @@ body.footer-dragging { user-select: none; cursor: ns-resize; }
   pointer-events: none;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-/* tooltip 内说明行:真实图标 + 文字 */
+/* tooltip 内说明行:真实图标 + 文字;按钮说明行用按钮文案当标签 */
 .tip-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .tip-row .btn-icon { width: 12px; height: 12px; flex-shrink: 0; color: #93c5fd; }
+.tip-key { color: #93c5fd; font-weight: 600; min-width: 26px; }
 .tip-note { color: #94a3b8; padding: 2px 0; }
 
 .claude-preview { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ok); font-weight: 600; white-space: nowrap; width: 52px; text-align: right; }
