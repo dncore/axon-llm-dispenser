@@ -31,18 +31,27 @@ pub const DEFAULT_PORT: u16 = 17321;
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
 
-/// gpt-6 族在网关 chat 路由上的请求形状限制。来源:①③ 为 2026-09-24 实测(迈金网关
-/// gpt-6-luna,owned_by 七牛);②④ 为上游网关给的 gpt-6 兼容说明(2026-09-29),同日实测被
-/// 网关额度拦截(400 api_key_monthly_quota_exceeded),待额度恢复后复验:
-///   ① `max_tokens` 已废弃 → 只收 `max_completion_tokens`(省略即非 none 默认处理的是 effort);
-///   ② 不支持 `temperature` / `top_p` → 带上即 400,旧采样参数整体失效;
+/// gpt-6 族在网关 chat 路由上的请求形状限制。①②③ 为 2026-09-29 活网关实测(迈金网关
+/// gpt-6-luna,owned_by 七牛;当时本机 key 额度用尽,改用开发机 inwin 上的凭据复验):
+///   ① `max_tokens` → 400「Unsupported parameter: 'max_tokens' is not supported with this
+///      model. Use 'max_completion_tokens' instead.」;`max_completion_tokens` 正常 200;
+///   ② `temperature: 0.7` → 400「Unsupported value: 'temperature' does not support 0.7 with
+///      this model. Only the default (1) value is supported.」;`top_p` → 400「Unsupported
+///      parameter: 'top_p' is not supported with this model.」(同网关的 glm-5.3 两者都收,规则不外溢);
 ///   ③ function tools 与 `reasoning_effort` 互斥,且请求**省略**该参数时按非 none 默认处理
-///      → 实测省略 /low/medium/high 一律 400「Function tools with reasoning_effort are not
-///      supported for gpt-6-luna in /v1/chat/completions」,显式 "none" 才出 tool_calls。
-///      Codex 每个请求都带 tools,所以该族在转换路径上必须显式发 "none" —— 沿用「none 一律
-///      省略」的旧规则正好落进 400 那一侧;
-///   ④ `text.format` 的 json_schema 强制结构化输出不支持 → 转换路径不带 `response_format`。
-/// 「采样式对话 + 工具调用 + 推理」并存的旧工作流整体失效,四条得一起做,只修一条仍 400。
+///      → 省略 / "high" 均 400「Function tools with reasoning_effort are not supported for
+///      gpt-6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set
+///      reasoning_effort to 'none'.」,显式 "none" 才 200 出 tool_calls。Codex 每个请求都带
+///      tools,所以该族在转换路径上必须显式发 "none" —— 沿用「none 一律省略」的旧规则正好落进
+///      400 那一侧。
+/// ④ **(2026-09-29 修订,别照抄上游说明)** 上游兼容说明里的「json_schema 不支持」只对
+///      Responses 路由成立,而该路由对本模型**整体不可用**(不带任何特殊参数也 400
+///      「Unknown parameter: 'thinking'」,即网关自己的 responses→chat 翻译坏了);
+///      **chat 路由实测接受 `response_format` 的 json_schema 并真的约束住输出**(strict schema
+///      需带 additionalProperties: false,是 OpenAI 的常规要求,不是本模型限制)。
+///      转换路径打到的是 chat,所以 `response_format` 必须照常映射 —— 剥掉它是错的。
+/// 另一条形状约束(非本族专属,但转换路径踩得到):chat 路由的工具项必须是嵌套
+/// `{"type":"function","function":{...}}` 形,扁平 Responses 形直接 422 Field required。
 const GPT6_LIMITS_PATTERN: &str = "gpt-6";
 
 /// 流式请求的「上游响应头 / 首字节」deadline。实测该网关会挂住流式请求 30~60s 零字节
@@ -490,13 +499,11 @@ pub fn responses_to_chat(body: &Value) -> Value {
     let gpt6 = gpt6_family(model);
 
     // 结构化输出:text.format(Codex 结构化输出/guardian 走这条)或 response_format。
-    // gpt-6 族不支持 json_schema 约束(见 GPT6_LIMITS_PATTERN ④):宁可不带,也不发一个
-    // 注定 400 的参数;json_object / text 该族照常带。
+    // gpt-6 族照常映射:上游说明里的「json_schema 不支持」只对 Responses 路由成立,而我们
+    // 转换后打到的是 chat —— 实测该族在 chat 上接受 json_schema 并真的约束输出
+    // (见 GPT6_LIMITS_PATTERN ④),剥掉反而白丢结构化输出。
     if let Some(rf) = response_format_to_chat(body) {
-        let is_json_schema = rf.get("type").and_then(|v| v.as_str()) == Some("json_schema");
-        if !(gpt6 && is_json_schema) {
-            out.insert("response_format".into(), rf);
-        }
+        out.insert("response_format".into(), rf);
     }
 
     // max_output_tokens → max_completion_tokens(gpt-5/gpt-6/o 系)或 max_tokens
@@ -2219,7 +2226,10 @@ mod tests {
         let chat = responses_to_chat(&body);
         assert!(chat.get("temperature").is_none(), "temperature 应被剥离");
         assert!(chat.get("top_p").is_none(), "top_p 应被剥离");
-        assert!(chat.get("response_format").is_none(), "json_schema 应被剥离");
+        // json_schema 不能剥:该族在 chat 路由上接受并约束输出(2026-09-29 活网关实测),
+        // 「不支持」只对 Responses 路由成立,而转换路径打到的是 chat
+        assert_eq!(chat["response_format"]["type"], "json_schema");
+        assert_eq!(chat["response_format"]["json_schema"]["name"], "out");
         // 无关参数照常透传;token 上限仍走该族唯一接受的字段
         assert_eq!(chat["stream"], true);
         assert_eq!(chat["parallel_tool_calls"], true);

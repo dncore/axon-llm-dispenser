@@ -221,13 +221,18 @@ const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
       "报错建议的 /v1/responses 在同一网关也被卡:网关会把 Responses 请求转成 chat 并注入 thinking 参数 → " +
       "400「Unknown parameter: 'thinking'」(request_id 前缀 chatcmpl-,即又走了 chat 上游),无法改走 Responses 保思考。" +
       "因此 off 也必须显式发 none(省略即回到 400)。代价:该模型在本网关上拿不到思考输出。" +
-      "上游网关 2026-09-29 另给 gpt-6 兼容说明,把这条从「网关转换缺陷」改判为**模型族自身的 API 变更**,共四条:" +
-      "① max_tokens 废弃(只收 max_completion_tokens);② temperature/top_p 不支持;③ function tools 与 reasoning_effort 互斥;" +
-      "④ Responses 的 text.format 不支持 json_schema。②④ 当日无法实测(网关 400 api_key_monthly_quota_exceeded)," +
-      "在 Codex 转换代理侧按 ①②③④ 一并剥离/改写(见 src-tauri/src/proxy.rs 的 GPT6_LIMITS_PATTERN)," +
+      "上游网关 2026-09-29 另给 gpt-6 兼容说明,把这条从「网关转换缺陷」改判为**模型族自身的 API 变更**,共四条;" +
+      "同日用开发机 inwin 的凭据做了活网关复验(本机 key 额度用尽):① max_tokens → 400「Unsupported parameter: 'max_tokens' " +
+      "is not supported with this model. Use 'max_completion_tokens' instead.」;② temperature 只接受默认 1、top_p 直接不收(同样 400);" +
+      "③ tools×effort 互斥:省略与 high 均 400「Function tools with reasoning_effort are not supported for gpt-6-luna in " +
+      "/v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.」,显式 none 才 200;" +
+      "④ **修订**:json_schema 只在 Responses 路由不可用,而该路由对本模型整体 400「Unknown parameter: 'thinking'」(不带任何特殊参数也一样);" +
+      "chat 路由实测接受 json_schema 并真的约束住输出(strict schema 需 additionalProperties:false,属 OpenAI 常规要求)。" +
+      "同网关 glm-5.3 照收 max_tokens 与 temperature,规则不外溢到别的模型。" +
+      "Codex 转换代理按 ①②③ 改写(见 src-tauri/src/proxy.rs 的 GPT6_LIMITS_PATTERN,④ 不剥 response_format)," +
       "本条 overlay 仍是 ③ 在各 agent 配置上的落点(所有档位写 none)。" +
       "失效条件:网关/上游修好 ③ 后(带 tools 允许非 none,或省略即按 none 处理)删除本条即回到 canonical 形状;" +
-      "同时把 proxy.rs 里 ①②④ 三条一并复核,别只删一半。",
+      "同时把 proxy.rs 里 ①② 两条一并复核,别只删一半。",
     compat: { supportsReasoningEffort: true },
     thinkingLevelMap: { off: "none", minimal: "none", low: "none", medium: "none", high: "none", xhigh: "none", max: "none" },
     thinkingDisabled: true,

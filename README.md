@@ -109,18 +109,18 @@ canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道�
 | 网关缺陷 | 表现 | 本项目的兼容处理 |
 |---|---|---|
 | `gpt-6-luna`（七牛渠道）在 `/chat/completions` 上 **function tools 与 `reasoning_effort` 互斥**，且**省略该参数时按非 `none` 默认处理** | 带工具的 agent 请求 100% 失败：省略 / `low` / `medium` / `high` 均 400；流式还会被网关降级成 200 + 无信息量的 `Provider returned 400` | pi 侧：`src/core/models.ts` 的 `GATEWAY_OVERLAYS` 把该模型所有思考档（含 `off`、`max`）一律映射为 `reasoning_effort=none`，并置 `supportsReasoningEffort: true`，写入 `~/.pi/agent/models.json`（实测该形状可正常返回 `finish_reason=tool_calls`）<br>Codex 侧：转换代理在带 `tools` 且命中 `gpt-6` 族时显式发 `none`（不再沿用「`none` 一律省略」的旧规则——省略正是该路由的 400 形状），并且不做无意义的剥参数重试 |
-| `gpt-6` 族的模型自身 API 变更（上游网关 2026-09-29 说明）：`max_tokens` 废弃 / 不支持 `temperature`·`top_p` / `json_schema` 结构化输出不可用 | 旧形状请求直接 400；「采样式对话 + 工具调用 + 推理」并存的旧工作流整体失效 | Codex 侧：转换代理对 `gpt-6` 族**一律**发 `max_completion_tokens`（不发 `max_tokens`）、剥掉 `temperature`/`top_p`、剥掉 `json_schema` 的 `response_format`（`json_object` 照常），与上面的 tools×effort 规则合并在 `src-tauri/src/proxy.rs` 的 `GPT6_LIMITS_PATTERN` 一处；其余模型不受影响 |
+| `gpt-6` 族的模型自身 API 变更（上游网关 2026-09-29 说明 + 同日活网关复验）：`max_tokens` 只认 `max_completion_tokens` / `temperature` 只接受默认 1、`top_p` 直接不收 | 旧形状请求直接 400（同网关 `glm-5.3` 照收，规则不外溢）；「采样式对话 + 工具调用 + 推理」并存的旧工作流整体失效 | Codex 侧：转换代理对 `gpt-6` 族**一律**发 `max_completion_tokens`、剥掉 `temperature`/`top_p`，与上面的 tools×effort 规则合并在 `src-tauri/src/proxy.rs` 的 `GPT6_LIMITS_PATTERN` 一处；**`response_format` 照常映射**——上游说明里的「json_schema 不支持」只对 Responses 路由成立（该路由对本模型整体 400），chat 路由实测接受并真的约束输出 |
 | 同模型的 `/responses` 被网关转成 chat 并注入 `thinking` 参数 | 400 `Unknown parameter: 'thinking'`，即报错里「use /v1/responses」的建议在本网关不成立 | 该模型列入 `CODX_PROXY_CONVERT_PATTERN`，Codex 走 Responses→Chat 转换而非透传 |
 | 流式请求挂起（30~60s 连 HTTP 状态都不回） | 客户端只能干等到总超时 | 转换代理对**流式**请求的「上游响应头 / SSE 首字节」设 60s deadline，超时即回明确错误；上游以 200 + 带内 `{"error":…}` 返回时转成 `response.failed` 并保留原始 message，不退化成笼统报错 |
 
-**gpt-6-luna 在各客户端能不能用**（2026-09-29 逐客户端取证：pi-ai 抓包 / 本地假网关抓真实请求体）：
+**gpt-6-luna 在各客户端能不能用**（2026-09-29 逐客户端取证：pi-ai 抓包 / 本地假网关抓真实请求体；网关侧行为另用开发机 `inwin` 的凭据做了活网关复验——本机那把 key 月度额度已用尽）：
 
 | 客户端 | 结论 | 依据 |
 |---|---|---|
 | Codex（自建网关） | ✅ 能 | 转换代理按上表四条改写；官方账号模式下 Codex 不走本机代理，与它无关 |
 | pi / dsh / omp（pi-ai 系） | ✅ 能 | 配置里写全了「思考档一律 none」：pi 靠 `thinkingLevelMap`（含 `max` 档与 `off`）、dsh 靠 `off: none` + 非 Off 档、omp 靠 `compat.extraBody.reasoning_effort: none`（extraBody 在它的思考策略之后合并，压过一切），token 上限都落到 `max_completion_tokens` |
-| OpenCode 1.18.30 | ❌ 不能 | 抓包实测：发 `max_tokens`、**不带** `reasoning_effort` → 网关按非 none 处理必 400；字段由它的 AI SDK openai-compatible provider 固定，axon 侧改不了 |
-| Grok CLI | ❌ 不能 | 抓包实测：同样发 `max_tokens`、不带 `reasoning_effort`（连 `--reasoning-effort none` 都不发）；`--json-schema` 还会发结构化输出（④ 也不支持） |
+| OpenCode 1.18.30 | ❌ 不能 | 抓包实测：发 `max_tokens`、**不带** `reasoning_effort` → 网关回 400（与 ①②③ 的实测原文一致）；字段名由它的 AI SDK openai-compatible provider 固定，axon 侧改不了 |
+| Grok CLI | ❌ 不能 | 抓包实测：同样发 `max_tokens`、不带 `reasoning_effort`（连 `--reasoning-effort none` 都不发）；`--json-schema` 走 Responses 形态，而该网关的 Responses 路由对本模型本就不可用 |
 | Claude Code | ❓ 未验证 | 走 `/api/anthropic`，axon 不代理这条路径；网关如何翻译未知 —— 在实测通过前**别把 Claude 角色模型指到 gpt-6-luna** |
 | Reasonix | ❓ 未验证 | 本机未安装（无法抓包） |
 
