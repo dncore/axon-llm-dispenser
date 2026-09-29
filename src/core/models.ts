@@ -229,6 +229,8 @@ const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
       "④ **修订**:json_schema 只在 Responses 路由不可用,而该路由对本模型整体 400「Unknown parameter: 'thinking'」(不带任何特殊参数也一样);" +
       "chat 路由实测接受 json_schema 并真的约束住输出(strict schema 需 additionalProperties:false,属 OpenAI 常规要求)。" +
       "同网关 glm-5.3 照收 max_tokens 与 temperature,规则不外溢到别的模型。" +
+      "另:网关的 /api/anthropic 会把 Anthropic 的必填 max_tokens 原样转发 → 该模型在 Claude Code 路径上同样 400" +
+      "(带 thinking 还多一条 Unknown parameter: 'thinking'),这条在客户端侧无解。" +
       "Codex 转换代理按 ①②③ 改写(见 src-tauri/src/proxy.rs 的 GPT6_LIMITS_PATTERN,④ 不剥 response_format)," +
       "本条 overlay 仍是 ③ 在各 agent 配置上的落点(所有档位写 none)。" +
       "失效条件:网关/上游修好 ③ 后(带 tools 允许非 none,或省略即按 none 处理)删除本条即回到 canonical 形状;" +

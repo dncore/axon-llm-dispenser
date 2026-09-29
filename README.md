@@ -121,8 +121,8 @@ canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道�
 | pi / dsh / omp（pi-ai 系） | ✅ 能 | 配置里写全了「思考档一律 none」：pi 靠 `thinkingLevelMap`（含 `max` 档与 `off`）、dsh 靠 `off: none` + 非 Off 档、omp 靠 `compat.extraBody.reasoning_effort: none`（extraBody 在它的思考策略之后合并，压过一切），token 上限都落到 `max_completion_tokens` |
 | OpenCode 1.18.30 | ❌ 不能 | 抓包实测：发 `max_tokens`、**不带** `reasoning_effort` → 网关回 400（与 ①②③ 的实测原文一致）；字段名由它的 AI SDK openai-compatible provider 固定，axon 侧改不了 |
 | Grok CLI | ❌ 不能 | 抓包实测：同样发 `max_tokens`、不带 `reasoning_effort`（连 `--reasoning-effort none` 都不发）；`--json-schema` 走 Responses 形态，而该网关的 Responses 路由对本模型本就不可用 |
-| Claude Code | ❓ 未验证 | 走 `/api/anthropic`，axon 不代理这条路径；网关如何翻译未知 —— 在实测通过前**别把 Claude 角色模型指到 gpt-6-luna** |
-| Reasonix | ❓ 未验证 | 本机未安装（无法抓包） |
+| Claude Code | ❌ 不能 | 走 `/api/anthropic`，axon 不代理这条路径。实测：网关把 Anthropic 的 `max_tokens` 原样转发 → 该模型 400「Unsupported parameter: 'max_tokens'…」；带 `thinking` 时再多一条 `Unknown parameter: 'thinking'`（同端点 glm-5.3 正常，对照组通过）。Anthropic 协议里 `max_tokens` 必填，所以这条在 axon 侧无解 |
+| Reasonix | ❓ 未验证 | 本机与 inwin 都未安装（无法抓包）；它的请求形状未知 |
 
 **代价与限制**：`gpt-6-luna` 在本网关上带工具时拿不到思考输出（模型侧 `reasoning_tokens=0`）——这是上游不支持 tools×reasoning 的必然结果，不是代理可绕开的；改走 `/responses` 保思考也被上面的 `thinking` 注入卡住。若网关/上游后续修复，删除 overlay 条目、并复核 `GPT6_LIMITS_PATTERN` 的四条即恢复。
 
