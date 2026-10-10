@@ -53,7 +53,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ c202f68c · 136 models
+// canonical: gist b8931f4c @ 31842f55 · 143 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -152,6 +152,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "MiniMax-M2.7": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M2.7-highspeed": { contextWindow: 204800, maxTokens: 32768, reasoning: true },
   "MiniMax-M3": { name: "MiniMax M3", contextWindow: 1000000, maxTokens: 32768, reasoning: true, input: ["text", "image"] },
+  "MiniMax-M3.1-Flash": { name: "MiniMax M3.1 Flash", contextWindow: 1000000, maxTokens: 524288, reasoning: true, input: ["text", "image"], compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max" } },
   "MiniMax-lastest": { name: "MiniMax M3", contextWindow: 1000000, maxTokens: 32768, reasoning: true, input: ["text", "image"] },
   "claude-3-opus-20240229": { contextWindow: 200000, maxTokens: 4096, reasoning: false, input: ["text", "image"], deprecated: true },
   "claude-3.5-sonnet-20241022": { contextWindow: 200000, maxTokens: 8192, reasoning: false, input: ["text", "image"], deprecated: true },
@@ -164,6 +165,9 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "claude-4.8-opus": { contextWindow: 1000000, maxTokens: 64000, reasoning: true, input: ["text", "image"] },
   "claude-sonnet-5": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"], name: "Claude Sonnet 5" },
   "claude-opus-5": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
+  "claude-haiku-5.5": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
+  "claude-sonnet-5.5": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
+  "claude-opus-5.5": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
   "gpt-4o": { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text", "image"] },
   "gpt-4o-mini": { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text", "image"] },
   "gpt-4.1": { contextWindow: 1000000, maxTokens: 32768, reasoning: false, input: ["text", "image"] },
@@ -174,6 +178,8 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "gpt-5.6-terra": { contextWindow: 400000, maxTokens: 100000, reasoning: true, input: ["text", "image"] },
   "gpt-5.6-sol": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"] },
   "gpt-6-luna": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }, compat: { maxTokensField: "max_completion_tokens" } },
+  "gpt-6-sol": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, compat: { maxTokensField: "max_completion_tokens" } },
+  "gpt-6.1-sol": { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, compat: { maxTokensField: "max_completion_tokens" } },
   "gemini-2.5-pro-preview": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
   "gemini-2.5-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
   "gemini-3.1-pro-preview": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"] },
@@ -182,6 +188,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "gemini-3.7-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "gemini-3.8-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "grok-4.6": { name: "Grok 4.6 (xAI)", contextWindow: 500000, maxTokens: 500000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
+  "grok-4.7": { name: "Grok 4.7 (xAI)", contextWindow: 500000, maxTokens: 500000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   "hy3-preview": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
   "hy3": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
   "hy4": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
