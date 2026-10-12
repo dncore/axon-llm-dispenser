@@ -37,7 +37,7 @@
 ### 模型列表（左侧全高卡片）
 
 - 拉取 `/models`，每行展示 **模型 ID + 上游厂商**（`owned_by`，如 DeepSeek / 阿里百炼 / Kimi）
-- **「无思考」标记**：命中下方「网关兼容层」的模型（如 `gpt-6-luna`）会标红提示——该模型在本网关上**带工具时思考被强制关闭**（上游限制：`function tools` 与 `reasoning_effort` 互斥，省略该参数也会按非 `none` 默认处理 → 必 400）。**自动挑选默认模型时会跳过这类模型**；你在表单里显式配置的默认模型不受影响。需要「思考 + 工具」请选同网关的其他模型（如 `gpt-5.6-luna`、`deepseek-v4-pro`、`qwen3.8-flash`）
+- **「无思考」标记**：命中「网关兼容层」且该网关下**确实拿不到思考输出**的模型会标红提示，自动挑选默认模型时跳过（显式配置的默认模型不受影响）。2026-10-10 复测后**当前没有模型被标**：`gpt-6-luna` 的 tools×reasoning 互斥已不成立（带工具也能思考），两个 Sol 模型是「关不掉思考」而不是「拿不到思考」
 - **过滤 Doubao 系模型**开关（默认开启），拉取与生成配置均不含
 - 单行移除、实时数量统计
 
@@ -108,23 +108,38 @@ canonical 模型表（gist）只记**模型官方规格**；某些网关/渠道�
 
 | 网关缺陷 | 表现 | 本项目的兼容处理 |
 |---|---|---|
-| `gpt-6-luna`（七牛渠道）在 `/chat/completions` 上 **function tools 与 `reasoning_effort` 互斥**，且**省略该参数时按非 `none` 默认处理** | 带工具的 agent 请求 100% 失败：省略 / `low` / `medium` / `high` 均 400；流式还会被网关降级成 200 + 无信息量的 `Provider returned 400` | pi 侧：`src/core/models.ts` 的 `GATEWAY_OVERLAYS` 把该模型所有思考档（含 `off`、`max`）一律映射为 `reasoning_effort=none`，并置 `supportsReasoningEffort: true`，写入 `~/.pi/agent/models.json`（实测该形状可正常返回 `finish_reason=tool_calls`）<br>Codex 侧：转换代理在带 `tools` 且命中 `gpt-6` 族时显式发 `none`（不再沿用「`none` 一律省略」的旧规则——省略正是该路由的 400 形状），并且不做无意义的剥参数重试 |
-| `gpt-6` 族的模型自身 API 变更（上游网关 2026-09-29 说明 + 同日活网关复验）：`max_tokens` 只认 `max_completion_tokens` / `temperature` 只接受默认 1、`top_p` 直接不收 | 旧形状请求直接 400（同网关 `glm-5.3` 照收，规则不外溢）；「采样式对话 + 工具调用 + 推理」并存的旧工作流整体失效 | Codex 侧：转换代理对 `gpt-6` 族**一律**发 `max_completion_tokens`、剥掉 `temperature`/`top_p`，与上面的 tools×effort 规则合并在 `src-tauri/src/proxy.rs` 的 `GPT6_LIMITS_PATTERN` 一处；**`response_format` 照常映射**——上游说明里的「json_schema 不支持」只对 Responses 路由成立（该路由对本模型整体 400），chat 路由实测接受并真的约束输出 |
-| 同模型的 `/responses` 被网关转成 chat 并注入 `thinking` 参数 | 400 `Unknown parameter: 'thinking'`，即报错里「use /v1/responses」的建议在本网关不成立 | 该模型列入 `CODX_PROXY_CONVERT_PATTERN`，Codex 走 Responses→Chat 转换而非透传 |
+| **网关的 `/responses` 端点对任何模型都不执行工具调用**（2026-10-10 逐模型复测：claude-opus-5.5 / kimi-k3 / glm-5.3 / deepseek-v4.1-flash / gpt-6 系一个不落——nested（chat 形）工具只回纯文本、扁平 Responses 形直接 400/422） | Codex 每个回合都带工具 → 透传到该端点等于不可用；而 Codex 已移除 `wire_api = "chat"`，只能发 Responses | `CODX_PROXY_CONVERT_PATTERN` 默认 `*`：**全部模型**由转换代理 Responses→Chat，推理走网关卡 `/chat/completions`（实测各模型工具调用正常），`/responses` 只是对 Codex 的对外接口 |
+| `gpt-6-sol` / `gpt-6.1-sol` 在 `/chat/completions` 上**拒收 `reasoning_effort="none"`**（只收 low..max），**省略该参数也不稳**（4 次里 3 次 400），且**带工具时拒收 `temperature`/`top_p`**（4/4 400） | 带工具的 agent 请求失败；错误文案会误导（网关有时回「requires /v1/responses」、有时回「does not support 'none'」，实际收到的都不是 none） | `src-tauri/src/proxy.rs` 的 `gpt6_caps()` 按 **id** 决定形状：带工具时把 none/minimal/省略一律落到下限 `low`，并剥掉采样参数；pi/dsh/omp 侧由 `GATEWAY_OVERLAYS` 的档位表写成 `off/minimal→low … xhigh→max` + `supportsReasoningEffort: true` |
+| `gpt-6-luna`（七牛渠道）历史缺陷：**function tools 与 `reasoning_effort` 互斥**，省略按非 `none` 处理（2026-09-24/29 实测） | 当时带工具的请求省略/`low`/`high` 均 400，只有显式 `none` 可用 | **2026-10-10 复测：互斥已不成立**（带工具时 none/low/high/省略均 200 且出 `finish_reason=tool_calls`）→ 已去掉「全档位 none」与「无思考」标记，luna 现在带工具也能思考；只保留「档位必须落在该 id 接受的集合内（minimal→low）」，以及代理侧对它的采样参数剥离（`temperature` 只认默认 1） |
+| `gpt-6` 族：`max_tokens` 只认 `max_completion_tokens` | 旧形状请求直接 400（同网关 `glm-5.3` 照收，规则不外溢） | Codex 侧转换代理对该族一律发 `max_completion_tokens`；**`response_format` 照常映射**——json_schema 在 chat 路由实测可用 |
 | 流式请求挂起（30~60s 连 HTTP 状态都不回） | 客户端只能干等到总超时 | 转换代理对**流式**请求的「上游响应头 / SSE 首字节」设 60s deadline，超时即回明确错误；上游以 200 + 带内 `{"error":…}` 返回时转成 `response.failed` 并保留原始 message，不退化成笼统报错 |
+| 网关把同一模型轮换到多条渠道，只有部分渠道配好了工具路由 | **同一请求体**在同一窗口内怎么发都失败，窗口过去后又怎么发都成功（2026-10-10 实测：一次窗口持续 **35 分钟以上**，期间 `gpt-6.1-sol`/`gpt-6-sol` 带工具的请求 100% 失败，而同一分钟的 `gpt-6-luna`、glm-5.3、claude-opus-5.5、kimi-k3 全部正常）——客户端看到的就是随机 400 | 转换代理先按上游文案识别（`requires /v1/responses…`、`reasoning effort must be low, medium, high, xhigh, or max`、`Model resources are currently busy`、`Insufficient quota…`）后**原样重发同一个 body**（最多 2 次、退避 1s/2.5s）；只检查 400/503 的前 4 KiB —— 2xx 的响应体可能是未结束的 SSE 流，一律不碰。**窗口比重试预算长时，客户端侧无解**：要么等网关修（同族的 luna 正常，说明是 Sol 那两个 id 的渠道没配好），要么在支持替代模型的入口（如 synapse 的 `model_health.fallbacks`）把 Sol 临时换成可用模型 |
 
-**gpt-6-luna 在各客户端能不能用**（2026-09-29 逐客户端取证：pi-ai 抓包 / 本地假网关抓真实请求体；网关侧行为另用开发机 `inwin` 的凭据做了活网关复验——本机那把 key 月度额度已用尽）：
+**上游确定不改时：代理自己补上那层路由（工具调用模拟）**。窗口期内这两个 id 的原生工具调用
+彻底不可用，而缺失的「chat→responses 路由」本质只是"把工具告诉模型、再把结构化输出还原回来"——
+转换代理现在自己做这件事：模型被连续 2 次渠道轮换失败标记为不可用后，**工具定义搬进 system 提示词**
+（附 JSON Schema 与严格回复协议）、工具历史重塑成纯文本、模型按协议回的载荷解析回真正的 `tool_calls`，
+再交给既有的 chat→responses 转换器（流式走合成 chat 分片，复用同一套事件序列）。
+
+- **只在两个 Sol id 上生效**（`EMULATION_MODELS`），且**只在该模型被标记不可用期间**——原生健康时完全不介入；
+- 标记有 5 分钟冷却，冷却到期只做**一次不重试**的原生探测：失败立即重新标记，成功则清除；
+- 模型回复没按协议来（用文本作答）时**原样透传**，不伪造调用；
+- 错误判定**锚定在网关自己的整句模板**上（模型名槽位单独校验字符集与长度）——错误体是客户端可影响的
+  （网关会回显模型名/参数值），而命中会写进跨请求的全局状态，所以不能被回显内容骗到；
+- 活网关实测（2026-10-12 窗口内，原生 100% 失败时）：首轮出 `function_call`、第二轮带工具结果正常续答、
+  流式事件含 `response.function_call_arguments.delta/done`；模型偶尔改用文本作答时按文本透传。
+
+**gpt-6 族在各客户端能不能用**（2026-09-29 首次逐客户端取证；**2026-10-10 复测后多条结论已变**，下表按复测更新，未复测项标 ❓）：
 
 | 客户端 | 结论 | 依据 |
 |---|---|---|
-| Codex（自建网关） | ✅ 能 | 转换代理按上表四条改写；官方账号模式下 Codex 不走本机代理，与它无关 |
-| pi / dsh / omp（pi-ai 系） | ✅ 能 | 配置里写全了「思考档一律 none」：pi 靠 `thinkingLevelMap`（含 `max` 档与 `off`）、dsh 靠 `off: none` + 非 Off 档、omp 靠 `compat.extraBody.reasoning_effort: none`（extraBody 在它的思考策略之后合并，压过一切），token 上限都落到 `max_completion_tokens` |
-| OpenCode 1.18.30 | ❌ 不能 | 抓包实测：发 `max_tokens`、**不带** `reasoning_effort` → 网关回 400（与 ①②③ 的实测原文一致）；字段名由它的 AI SDK openai-compatible provider 固定，axon 侧改不了 |
-| Grok CLI | ❌ 不能 | 抓包实测：同样发 `max_tokens`、不带 `reasoning_effort`（连 `--reasoning-effort none` 都不发）；`--json-schema` 走 Responses 形态，而该网关的 Responses 路由对本模型本就不可用 |
-| Claude Code | ❌ 不能 | 走 `/api/anthropic`，axon 不代理这条路径。实测：网关把 Anthropic 的 `max_tokens` 原样转发 → 该模型 400「Unsupported parameter: 'max_tokens'…」；带 `thinking` 时再多一条 `Unknown parameter: 'thinking'`（同端点 glm-5.3 正常，对照组通过）。Anthropic 协议里 `max_tokens` 必填，所以这条在 axon 侧无解 |
+| Codex（自建网关） | ✅ 能 | 转换代理全模型转 Chat；gpt-6 族按 id 发合规档位与 token 字段。官方账号模式下 Codex 不走本机代理，与它无关 |
+| pi / dsh / omp（pi-ai 系） | ✅ 能 | 配置按 id 写全档位表（luna：`off=none`、`minimal=low`、其余同名；Sol：`off/minimal=low`、`xhigh=max`），token 上限落到 `max_completion_tokens` |
+| Claude Code（`/api/anthropic`） | ✅ 能（2026-10-10 复测） | 直连网关 Anthropic 挂载实测：luna / gpt-6-sol / gpt-6.1-sol 带 `tools`（含 `thinking` 与 system 提示）均返回 `stop_reason=tool_use`。axon 不代理这条路径，结论只说明网关侧可用 |
+| OpenCode / Grok CLI | ❓ 待复测 | 2026-09-29 的「发 `max_tokens`、不带 `reasoning_effort` → 400」是在旧约束下测的；10-10 复测显示该约束已大幅放宽（`max_tokens` 照收、省略 effort 多数可用），旧结论未复现，待重新抓包 |
 | Reasonix | ❓ 未验证 | 本机与 inwin 都未安装（无法抓包）；它的请求形状未知 |
 
-**代价与限制**：`gpt-6-luna` 在本网关上带工具时拿不到思考输出（模型侧 `reasoning_tokens=0`）——这是上游不支持 tools×reasoning 的必然结果，不是代理可绕开的；改走 `/responses` 保思考也被上面的 `thinking` 注入卡住。若网关/上游后续修复，删除 overlay 条目、并复核 `GPT6_LIMITS_PATTERN` 的四条即恢复。
+**残余限制（网关侧，客户端改不掉）**：`gpt-6-sol` / `gpt-6.1-sol` 的工具回合在网关 `/chat/completions` 上**仍会间歇 400**——用记录型转发器验证过：本项目发出的形状已是 `reasoning_effort=low` + `tools` + 无采样参数（实测该形状可 4/4 成功），但网关会在几分钟内换成另一个渠道并回「tool calling requires /v1/responses or configured Chat-to-Responses routing」。需要网关侧打开那条 chat→responses 路由，或接受重试。luna / glm / claude 等同网关其他模型不受影响。
 
 ### 备份还原
 

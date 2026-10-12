@@ -221,30 +221,45 @@ export type GatewayOverlay = {
 const GATEWAY_OVERLAYS: Record<string, GatewayOverlay> = {
   "gpt-6-luna": {
     reason:
-      "迈金网关 gpt-6-luna(owned_by 七牛)的 /chat/completions 路由上 function tools 与 reasoning_effort 互斥," +
-      "且请求**省略**该参数时按非 none 默认处理 → 任何带工具的 agent 客户端必 400。" +
-      "实测 2026-09-24:省略/low/medium/high 均 400「Function tools with reasoning_effort are not supported for " +
-      "gpt-6-luna in /v1/chat/completions … or set reasoning_effort to 'none'」;显式 none 正常出 finish_reason=tool_calls。" +
-      "报错建议的 /v1/responses 在同一网关也被卡:网关会把 Responses 请求转成 chat 并注入 thinking 参数 → " +
-      "400「Unknown parameter: 'thinking'」(request_id 前缀 chatcmpl-,即又走了 chat 上游),无法改走 Responses 保思考。" +
-      "因此 off 也必须显式发 none(省略即回到 400)。代价:该模型在本网关上拿不到思考输出。" +
-      "上游网关 2026-09-29 另给 gpt-6 兼容说明,把这条从「网关转换缺陷」改判为**模型族自身的 API 变更**,共四条;" +
-      "同日用开发机 inwin 的凭据做了活网关复验(本机 key 额度用尽):① max_tokens → 400「Unsupported parameter: 'max_tokens' " +
-      "is not supported with this model. Use 'max_completion_tokens' instead.」;② temperature 只接受默认 1、top_p 直接不收(同样 400);" +
-      "③ tools×effort 互斥:省略与 high 均 400「Function tools with reasoning_effort are not supported for gpt-6-luna in " +
-      "/v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.」,显式 none 才 200;" +
-      "④ **修订**:json_schema 只在 Responses 路由不可用,而该路由对本模型整体 400「Unknown parameter: 'thinking'」(不带任何特殊参数也一样);" +
-      "chat 路由实测接受 json_schema 并真的约束住输出(strict schema 需 additionalProperties:false,属 OpenAI 常规要求)。" +
-      "同网关 glm-5.3 照收 max_tokens 与 temperature,规则不外溢到别的模型。" +
-      "另:网关的 /api/anthropic 会把 Anthropic 的必填 max_tokens 原样转发 → 该模型在 Claude Code 路径上同样 400" +
-      "(带 thinking 还多一条 Unknown parameter: 'thinking'),这条在客户端侧无解。" +
-      "Codex 转换代理按 ①②③ 改写(见 src-tauri/src/proxy.rs 的 GPT6_LIMITS_PATTERN,④ 不剥 response_format)," +
-      "本条 overlay 仍是 ③ 在各 agent 配置上的落点(所有档位写 none)。" +
-      "失效条件:网关/上游修好 ③ 后(带 tools 允许非 none,或省略即按 none 处理)删除本条即回到 canonical 形状;" +
-      "同时把 proxy.rs 里 ①② 两条一并复核,别只删一半。",
+      "迈金网关 gpt-6-luna 的 shim 保留:该 id 只接受 none/low/medium/high/xhigh 五个档位" +
+      "(发 minimal 或 max → 400「Unsupported value: 'reasoning_effort' does not support 'minimal' with this model」)," +
+      "所以档位表把 minimal 落成 low、xhigh 原样保留,不给客户端发被拒的值。" +
+      "历史:2026-09-24/29 实测 tools×effort 互斥、省略即 400,tools 回合必须显式发 none,本条曾把**所有**档位映射成 none;" +
+      "2026-10-10 复测该互斥已不成立(带 tools 时 none/low/high/省略均为 200 且出 finish_reason=tool_calls)," +
+      "因此去掉「全档位 none」与 thinkingDisabled —— 该模型在带工具的回合现在**能正常思考**," +
+      "不再需要(也不应该)在配置层把用户选的档位改写成关思考。" +
+      "采样参数仍由代理/客户端侧按 id 规则处理(temperature 只接受默认 1、top_p 时好时坏,见 src-tauri 的 gpt6_caps)," +
+      "不进本表。失效条件:上游把 minimal/max 也接受后可删除本条。",
     compat: { supportsReasoningEffort: true },
-    thinkingLevelMap: { off: "none", minimal: "none", low: "none", medium: "none", high: "none", xhigh: "none", max: "none" },
-    thinkingDisabled: true,
+    // 7 档全写:漏掉某一档 = 该档请求不带 reasoning_effort,而带工具的回合需要显式档位。
+    thinkingLevelMap: { off: "none", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "xhigh" },
+  },
+  // Sol 与 luna 相反:这一族**拒收** none。实测 2026-10-10(每个形状 4 次,带 function tool):
+  //   - reasoning_effort="none" → 4/4 400「GPT-6: gpt-6.1-sol reasoning effort must be low,
+  //     medium, high, xhigh, or max」;
+  //   - 省略该参数 → gpt-6-sol 3/4 400(同一请求第二个渠道又 200,即渠道间不一致);
+  //   - 显式 "low" → 4/4 200 出 tool_calls;
+  //   - 带 tools 时 temperature/top_p → 4/4 400(不带工具时两者都收)。
+  // 所以配置里必须让客户端**恒发**一个 low..max 的档位:off/minimal 落到底限 low(该 id
+  // 没有真正的「关思考」档,发 none 只会 400),并且不能带采样参数(采样参数由代理/客户端
+  // 侧剥,见 src-tauri 的 gpt6_caps)。
+  // 失效条件:上游给该族补上 none 档、或渠道统一后,删除本条即回到 canonical 形状。
+  "gpt-6-sol": {
+    reason:
+      "迈金网关 gpt-6-sol(owned_by 七牛,错误信息显示实际由 gpt-6.1-sol 后端服务)带 function tools 时拒收 " +
+      "reasoning_effort=\"none\"(400「must be low, medium, high, xhigh, or max」),省略该参数也不稳(4 次里 3 次 400);" +
+      "带 tools 时 temperature/top_p 一律 400。可用形状 = 显式 low..max 档位 + 不带采样参数。" +
+      "实测 2026-10-10;失效条件:上游补上 none 档或渠道统一后删除本条。",
+    compat: { supportsReasoningEffort: true },
+    thinkingLevelMap: { off: "low", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+  },
+  "gpt-6.1-sol": {
+    reason:
+      "同 gpt-6-sol(同一后端,行为一致):带 function tools 拒收 reasoning_effort=\"none\"、拒收 " +
+      "temperature/top_p,省略 effort 在部分渠道 400;可用形状 = 显式 low..max 档位 + 不带采样参数。" +
+      "实测 2026-10-10;失效条件:上游补上 none 档或渠道统一后删除本条。",
+    compat: { supportsReasoningEffort: true },
+    thinkingLevelMap: { off: "low", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
   },
 };
 

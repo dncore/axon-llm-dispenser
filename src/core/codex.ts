@@ -14,14 +14,16 @@ export const CODX_REASONING_LEVELS = [
 
 /** Codex Responses 转换代理:默认监听端口。 */
 export const CODX_PROXY_DEFAULT_PORT = 17321;
-/** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧按大小写不敏感子串匹配)。
- * 静态规则由当前网关卡预探测生成(2026-08-27):网关对这些模型的原生 /responses
- * 不可用(502/参数错误),chat/completions 可用;其余模型(qwen 系/hy3/MiniMax/
- * deepseek-v4-pro/kimi-k2.7-code 等)原生 responses 可用,走透传。
- * gpt-6(2026-09-24 补测):/responses 直接 400「Unknown parameter: 'thinking'」,
- * 同 gpt-5.6 家族的表征,归入转换;kimi-k2.8 / step-5-preview 实测原生可用,不列。 */
-export const CODX_PROXY_CONVERT_PATTERN =
-  "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
+/** 需要走 Responses→Chat 转换的模型匹配串(Rust 侧大小写不敏感子串匹配,`*` = 全部)。
+ *
+ * **默认全部转换**:迈金网关的 `/api/v1/responses` 对**任何**模型都不执行工具调用
+ * ——2026-10-10 逐个复测(claude-opus-5.5 / kimi-k3 / glm-5.3 / deepseek-v4.1-flash /
+ * gpt-6 系):nested(chat 形)工具只得到纯文本回应、扁平 Responses 形直接 400/422,
+ * 即该端点的工具能力整体缺失;而 Codex 每个回合都带工具,透传 = 不可用。
+ * 于是本项目自带 Responses→Chat 转换改为**默认接管所有模型**,由网关卡
+ * `/chat/completions`(实测各模型工具调用正常)承担推理,`/responses` 只是对外接口。
+ * 收窄为旧的「只转换指定族」行为:把本串写成 `gpt-5.6|gpt-6|…` 这样的子串列表。 */
+export const CODX_PROXY_CONVERT_PATTERN = "*";
 
 /** Codex 客户端模型选择器可见条目上限(visibility="list")。超过该数量,客户端渲染的模型
  * 列表布局会挤压错乱;Codex 官方内置目录也只保留 5 条可见(list)+ 4 条 hide。
@@ -35,7 +37,8 @@ export function codexProxyBaseUrl(port: number, host = "localhost"): string {
   return `http://${host}:${port}/api/v1`;
 }
 
-/** 模型列表里是否存在需要走转换代理的模型(按 | 分隔的规则子串匹配,与 Rust 端一致)。 */
+/** 模型列表里是否存在需要走转换代理的模型(按 | 分隔的规则子串匹配,与 Rust 端一致;
+ * `*` 表示全部转换 → 只要列表非空就需要代理)。 */
 export function codexProxyNeeded(modelIds: string[]): boolean {
   const patterns = CODX_PROXY_CONVERT_PATTERN.toLowerCase()
     .split("|")
@@ -43,7 +46,7 @@ export function codexProxyNeeded(modelIds: string[]): boolean {
     .filter((p) => p.length > 0);
   return modelIds.some((id) => {
     const ml = id.toLowerCase();
-    return patterns.some((p) => ml.includes(p));
+    return patterns.some((p) => p === "*" || ml.includes(p));
   });
 }
 

@@ -248,9 +248,13 @@ export async function configureCodex(cfg: bridge.AppConfig, modelIds: string[], 
     proxyLines.push(`转换代理: ${baseUrl} → ${cfg.baseUrl}`);
     if (st.hijackWarning) proxyLines.push(`⚠️ ${st.hijackWarning}`);
     if (codexProxyNeeded(modelIds)) {
-      proxyLines.push(`  ${CODX_PROXY_CONVERT_PATTERN} 家族经代理转 Chat Completions(网关 /responses 不可用)`);
+      proxyLines.push(
+        CODX_PROXY_CONVERT_PATTERN === "*"
+          ? "  全部模型经代理转 Chat Completions(网关 /responses 不执行工具调用)"
+          : `  ${CODX_PROXY_CONVERT_PATTERN} 家族经代理转 Chat Completions(网关 /responses 不可用)`,
+      );
     } else {
-      proxyLines.push(`  当前模型列表无 ${CODX_PROXY_CONVERT_PATTERN} 家族,代理纯透传`);
+      proxyLines.push("  当前模型列表为空,代理无请求可转");
     }
   }
 

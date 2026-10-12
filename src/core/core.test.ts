@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deriveKeyRef, buildResolvedModels, isKnownModel, gatewayOverlayFor, gatewayThinkingDisabled } from "./models";
-import { patchCodexConfigToml, patchCodexCatalog, removeModelProviderSections, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT } from "./codex";
+import { patchCodexConfigToml, patchCodexCatalog, removeModelProviderSections, renderCodexModelsJson, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_MAX_LISTED_MODELS, CODX_PROXY_DEFAULT_PORT, CODX_PROXY_CONVERT_PATTERN } from "./codex";
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
@@ -77,17 +77,17 @@ describe("patchCodexConfigToml", () => {
     expect(codexProxyNeeded([])).toBe(false);
   });
 
-  it("codex 转换代理静态规则:网关卡 /responses 不可用的模型走转换,原生可用的透传", () => {
-    // 转换(chat-only / 网关 responses 损坏):gpt-5.6 / gpt-6 / glm / kimi / step / mimo / claude / gemini / deepseek-v4-flash
-    for (const id of ["gpt-5.6-luna", "gpt-6-luna", "glm-5.3-flash", "glm-5.2", "glm-4.6v", "kimi-k3", "kimi-k2.6", "kimi-lastest", "step-3.7-flash", "MiMo-V2.5", "mimo-v2.6-pro", "grok-4.6", "claude-sonnet-5", "claude-opus-5", "gemini-3.7-flash", "gemini-3.1-pro-preview", "deepseek-v4-flash"]) {
+  it("codex 转换代理默认全转换:网关卡 /responses 对任何模型都不执行工具调用", () => {
+    // 2026-10-10 逐模型复测:claude/kimi/glm/deepseek/gpt 系在网关卡 /responses 上
+    // 带工具都拿不到 function call(nested 形回纯文本,扁平形 400/422),
+    // 所以默认对所有模型走 Responses→Chat 转换,透传名单为空。
+    expect(CODX_PROXY_CONVERT_PATTERN).toBe("*");
+    for (const id of ["gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol", "glm-5.3-flash", "kimi-k3",
+                      "qwen3.8-max", "hy3", "MiniMax-M3", "deepseek-v4-pro", "kimi-k2.8",
+                      "step-5-preview", "claude-opus-5.5", "grok-4.7", "Recommend"]) {
       expect(codexProxyNeeded([id])).toBe(true);
     }
-    // 透传(原生 responses 可用):qwen 系 / hy3 / MiniMax / deepseek-v4-pro / kimi-k2.7-code / kimi-k2.8 / step-5-preview / Recommend
-    for (const id of ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus", "qwen-lastest", "hy3", "MiniMax-M3", "MiniMax-lastest", "deepseek-v4-pro", "kimi-k2.7-code", "kimi-k2.8", "step-5-preview", "Recommend"]) {
-      expect(codexProxyNeeded([id])).toBe(false);
-    }
-    // deepseek-v4-flash 子串同时命中 vision-exp(其 chat 路径可用,统一走转换)
-    expect(codexProxyNeeded(["deepseek-v4-flash-vision-exp"])).toBe(true);
+    expect(codexProxyNeeded([])).toBe(false);
   });
 
   it("空文件创建 provider 段", () => {
@@ -362,28 +362,36 @@ describe("pi", () => {
 describe("网关兼容层", () => {
   const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-  it("gpt-6-luna:思考档一律 none 且保留 canonical 的 maxTokensField", () => {
+  it("gpt-6-luna:档位只落到该 id 接受的集合,不再一律关思考", () => {
     const [m] = buildResolvedModels(["gpt-6-luna"]);
-    // 该网关 chat 路由:省略 reasoning_effort 按非 none 处理 → 带 tools 必 400,
-    // 所以 supportsReasoningEffort 必须为 true(pi 才会真的发这个参数),且不能漏档。
+    // 该网关 chat 路由:带 tools 时必须显式发一个可接受的档位,所以
+    // supportsReasoningEffort 必须为 true(pi 才会真的发这个参数)。
     expect(m.compat.supportsReasoningEffort).toBe(true);
     expect(m.compat.maxTokensField).toBe("max_completion_tokens");
-    expect(m.reasoning).toBe(true); // 仍是推理模型(能力不变,只是不发 effort)
-    for (const lv of LEVELS) expect(m.thinkingLevelMap?.[lv]).toBe("none");
-    expect(Object.keys(m.thinkingLevelMap ?? {})).toHaveLength(LEVELS.length);
+    expect(m.reasoning).toBe(true);
+    // 该 id 只收 none/low/medium/high/xhigh;minimal 落成 low,不把被拒的值发出去。
+    expect(m.thinkingLevelMap?.off).toBe("none");
+    expect(m.thinkingLevelMap?.minimal).toBe("low");
+    expect(m.thinkingLevelMap?.low).toBe("low");
+    expect(m.thinkingLevelMap?.medium).toBe("medium");
+    expect(m.thinkingLevelMap?.high).toBe("high");
+    expect(m.thinkingLevelMap?.xhigh).toBe("xhigh");
+    // 2026-10-10 复测:tools×effort 互斥已不成立 → 不再强制关思考。
+    expect(gatewayThinkingDisabled("gpt-6-luna")).toBe(false);
   });
 
-  it("写进 pi models.json 的形状能让 pi 恒发 reasoning_effort=none", () => {
+  it("写进 pi models.json 的形状带上真实档位(luna)", () => {
     const [m] = buildResolvedModels(["gpt-6-luna"]);
     const r = patchPiModelsJson("", { providerName: "axon", baseUrl: "https://gw/v1", apiKey: "sk-x", models: [m] });
     const doc = JSON.parse(r.text) as { providers: Record<string, { models: Array<Record<string, never>> }> };
     const entry = doc.providers.axon.models[0];
     expect((entry.compat as { supportsReasoningEffort?: boolean }).supportsReasoningEffort).toBe(true);
-    expect((entry.thinkingLevelMap as Record<string, string>).max).toBe("none");
+    expect((entry.thinkingLevelMap as Record<string, string>).high).toBe("high");
     expect((entry.thinkingLevelMap as Record<string, string>).off).toBe("none");
+    expect((entry.thinkingLevelMap as Record<string, string>).minimal).toBe("low");
   });
 
-  it("写进 dsh settings.yaml 的形状能让 Off 档也显式发 reasoning_effort=none", () => {
+  it("写进 dsh settings.yaml 的形状:off 显式 none、其余档位按上游取值(luna)", () => {
     const [m] = buildResolvedModels(["gpt-6-luna"]);
     const r = patchDshProvider("", {
       providerName: "axon",
@@ -392,12 +400,10 @@ describe("网关兼容层", () => {
       baseUrl: "https://gw/v1",
       models: toDshEntries([m]),
     });
-    // dsh(pi-ai)只认「off 是字符串」才在 Off 档发参数:空值 = 选 Off 时什么都不发
-    // → gpt-6-luna 的 chat 路由把「省略」按非 none 处理 → 带工具 400。
+    // off 仍要显式发(该 id 支持关思考),其余档位照上游集合发,minimal 落 low。
     expect(r.text).toMatch(/^\s+off: none$/m);
-    // 其余档位同样一律 none,且不漏档(max 是 pi 的第 7 档,漏了就等于省略)
-    for (const lv of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
-      expect(r.text).toMatch(new RegExp(`^\\s+${lv}: none$`, "m"));
+    for (const [lv, val] of [["minimal", "low"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"]] as const) {
+      expect(r.text).toMatch(new RegExp(`^\\s+${lv}: ${val}$`, "m"));
     }
     // 普通模型(off 无映射 / 映射为 null)仍是官方空值形态:选 Off 时发送 nothing
     const [plain] = buildResolvedModels(["glm-5.3"]);
@@ -411,6 +417,39 @@ describe("网关兼容层", () => {
     expect(r2.text).toMatch(/^\s+off:$/m);
   });
 
+  it("gpt-6-sol / gpt-6.1-sol:恒发 low..max,绝不发 none(该族拒收 none)", () => {
+    for (const id of ["gpt-6-sol", "gpt-6.1-sol"]) {
+      const [m] = buildResolvedModels([id]);
+      // 带工具的回合必须显式发档位:省略在部分渠道 400,发 none 一律 400。
+      expect(m.compat.supportsReasoningEffort).toBe(true);
+      expect(m.compat.maxTokensField).toBe("max_completion_tokens");
+      expect(m.thinkingLevelMap?.off).toBe("low");
+      expect(m.thinkingLevelMap?.minimal).toBe("low");
+      expect(m.thinkingLevelMap?.low).toBe("low");
+      expect(m.thinkingLevelMap?.medium).toBe("medium");
+      expect(m.thinkingLevelMap?.high).toBe("high");
+      expect(m.thinkingLevelMap?.xhigh).toBe("xhigh");
+      expect(m.thinkingLevelMap?.max).toBe("max");
+      for (const lv of LEVELS) expect(m.thinkingLevelMap?.[lv]).not.toBe("none");
+      // 与 luna 相反:这些模型能思考,只是关不掉,所以不能标「无思考」。
+      expect(gatewayThinkingDisabled(id)).toBe(false);
+    }
+  });
+
+  it("写进 dsh:Sol 的 off 档也显式发档位(省略会让带工具的回合 400)", () => {
+    const [m] = buildResolvedModels(["gpt-6.1-sol"]);
+    const r = patchDshProvider("", {
+      providerName: "axon",
+      displayName: "Axon",
+      apiKeyEnv: "AXON_API_KEY",
+      baseUrl: "https://gw/v1",
+      models: toDshEntries([m]),
+    });
+    expect(r.text).toMatch(/^\s+off: low$/m);
+    expect(r.text).toMatch(/^\s+xhigh: xhigh$/m);
+    expect(r.text).toMatch(/^\s+max: max$/m);
+  });
+
   it("未命中的模型不被改写(gpt-5.6-luna / 未知模型保持 canonical 形状)", () => {
     const [five] = buildResolvedModels(["gpt-5.6-luna"]);
     expect(gatewayOverlayFor("gpt-5.6-luna")).toBeUndefined();
@@ -422,30 +461,36 @@ describe("网关兼容层", () => {
   });
 
   it("thinkingDisabled 标记与档位表一致(UI 标注/默认模型跳过的依据)", () => {
-    expect(gatewayThinkingDisabled("gpt-6-luna")).toBe(true);
-    expect(gatewayThinkingDisabled("gpt-5.6-luna")).toBe(false);
-    expect(gatewayThinkingDisabled("some-unknown-model")).toBe(false);
-    // 标了 thinkingDisabled 的条目,所有档位必须都映射到关思考的取值,
-    // 否则 UI 会标「无思考」而实际某档还在思考。
-    const o = gatewayOverlayFor("gpt-6-luna")!;
-    expect(o.thinkingDisabled).toBe(true);
-    for (const lv of LEVELS) expect(["none", "off", "disabled"]).toContain(o.thinkingLevelMap?.[lv]);
+    // 2026-10-10 起没有任何模型被强制关思考:luna 的 tools×effort 互斥已不成立,
+    // Sol 两个 id 是「关不掉思考」而不是「拿不到思考」,都不该标这个标记。
+    for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-luna", "some-unknown-model"]) {
+      expect(gatewayThinkingDisabled(id)).toBe(false);
+    }
+    // 不变量:任何标了 thinkingDisabled 的 overlay,所有档位都必须映射到关思考的取值,
+    // 否则 UI 会标「无思考」而实际某档还在思考。目前没有这样的条目,循环空转即通过。
+    for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"]) {
+      const o = gatewayOverlayFor(id);
+      if (o?.thinkingDisabled) {
+        for (const lv of LEVELS) expect(["none", "off", "disabled"]).toContain(o.thinkingLevelMap?.[lv]);
+      }
+    }
   });
 
-  it("自动默认模型跳过被强制关思考的模型(显式配置不动)", () => {
-    // 不带 tools 时也拿不到思考,当默认会静默降质 → 自动挑时跳过
-    expect(pickDefaultModel(["gpt-6-luna", "glm-5.3"], undefined)).toBe("glm-5.3");
-    expect(pickDefaultModel(["gpt-6-luna", "deepseek-v4-flash"], undefined)).toBe("deepseek-v4-flash");
-    // 显式配置的默认模型(用户选择)永远尊重,包括被关思考的模型
+  it("自动挑默认模型:显式配置永远优先,列表内才按规则挑", () => {
+    // 不再有「被强制关思考」的模型 → luna 不再被跳过(它本来就是可用模型)。
+    expect(pickDefaultModel(["gpt-6-luna", "glm-5.3"], undefined)).toBeTruthy();
+    // 显式配置的默认模型(用户选择)永远尊重。
     expect(pickDefaultModel(["gpt-6-luna", "glm-5.3"], "gpt-6-luna")).toBe("gpt-6-luna");
-    // 全是关思考模型时仍返回一个 id,不返回空串
+    // 列表非空时总要返回一个 id,不返回空串。
     expect(pickDefaultModel(["gpt-6-luna"], undefined)).toBe("gpt-6-luna");
   });
 
   it("每条 overlay 都带 reason(失效条件可追溯)", () => {
-    const o = gatewayOverlayFor("gpt-6-luna");
-    expect(o?.reason).toContain("reasoning_effort");
-    expect(o?.reason).toContain("失效条件");
+    for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"]) {
+      const o = gatewayOverlayFor(id);
+      expect(o?.reason).toContain("失效条件");
+      expect(o?.reason).toContain("2026-10-10");
+    }
   });
 });
 
@@ -613,23 +658,22 @@ describe("omp", () => {
     expect(r.text.slice(qwenIdx)).not.toContain("compat:");
   });
 
-  it("网关强制关思考的模型带 compat.extraBody(reasoning_effort=none)", () => {
+  it("没有模型被强制关思考时不写 compat.extraBody(该通路保留给未来的 overlay)", () => {
     const r = patchOmpModelsYml("", {
       providerName: "axon",
       baseUrl: "https://gateway.example/v1",
       apiKey: "sk-test",
-      models: buildResolvedModels(["gpt-6-luna", "glm-5.3"]),
+      models: buildResolvedModels(["gpt-6-luna", "gpt-6.1-sol", "glm-5.3"]),
     });
-    // gpt-6-luna:omp 的 extraBody 在思考策略之后合并进请求体 → 压过按档位生成的参数,
-    // 保证带工具的请求也显式发 none(省略该参数会被网关按非 none 处理 → 400)
-    const luna = r.text.slice(r.text.indexOf("gpt-6-luna"));
-    expect(luna).toContain("compat:");
-    expect(luna).toContain("extraBody:");
-    expect(luna).toContain("reasoning_effort: none");
-    expect(luna).toContain("maxTokensField: max_completion_tokens");
-    expect(luna).not.toContain("thinking:"); // 不写档位块:该模型在本网关上没有可用档位
-    // 未命中兼容层的模型不受影响(条目按 id 排序,glm-5.3 在前)
-    const glm = r.text.slice(r.text.indexOf("glm-5.3"), r.text.indexOf("gpt-6-luna"));
+    // 2026-10-10 起 gpt-6-luna 不再被强制关思考(互斥已不成立),Sol 是「关不掉」而非
+    // 「拿不到」→ 当前没有任何 overlay 置 thinkingDisabled,force-none 通路空转。
+    const luna = r.text.slice(r.text.indexOf("gpt-6-luna"), r.text.indexOf("glm-5.3"));
+    expect(luna).not.toContain("extraBody:");
+    expect(luna).not.toContain("reasoning_effort: none");
+    const sol = r.text.slice(r.text.indexOf("gpt-6.1-sol"));
+    expect(sol).not.toContain("extraBody:");
+    // 普通模型同样不受影响
+    const glm = r.text.slice(r.text.indexOf("glm-5.3"));
     expect(glm).not.toContain("compat:");
   });
 

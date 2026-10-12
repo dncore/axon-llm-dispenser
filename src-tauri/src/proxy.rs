@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -29,7 +30,14 @@ use serde_json::{Value, json};
 pub const DEFAULT_PORT: u16 = 17321;
 /// OpenAI-compatible function name 最大长度(chat 上游校验 ^[a-zA-Z0-9_-]+$,且有长度上限)。
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
-pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|kimi-lastest|step-3.7|MiMo|grok-4.6|claude-sonnet-5|claude-opus-5|gemini-3|deepseek-v4-flash";
+/// 走 Responses→Chat 转换的模型匹配串:`|` 分隔的大小写不敏感子串,**`*` = 全部转换**。
+///
+/// 默认全转换:网关的 `/api/v1/responses` 对**任何**模型都不执行工具调用(2026-10-10 复测:
+/// nested 工具形只回纯文本、扁平 Responses 形 400/422,claude/kimi/glm/deepseek/gpt 系一样),
+/// 而 Codex 每个回合都带工具 —— 透传等于把 Codex 打瘸。本项目自己做的 Responses→Chat 转换
+/// 才是可用路径,所以默认对全部模型转换,由 `/chat/completions` 承担实际推理。
+/// 想恢复「只转换指定族」的老行为,把本串改成 `gpt-5.6|gpt-6|…` 这样的子串列表即可。
+pub const DEFAULT_CONVERT_PATTERN: &str = "*";
 
 /// gpt-6 族在网关 chat 路由上的请求形状限制。①②③ 为 2026-09-29 活网关实测(迈金网关
 /// gpt-6-luna,owned_by 七牛;当时本机 key 额度用尽,改用开发机 inwin 上的凭据复验):
@@ -52,7 +60,120 @@ pub const DEFAULT_CONVERT_PATTERN: &str = "gpt-5.6|gpt-6|glm|kimi-k2.6|kimi-k3|k
 ///      转换路径打到的是 chat,所以 `response_format` 必须照常映射 —— 剥掉它是错的。
 /// 另一条形状约束(非本族专属,但转换路径踩得到):chat 路由的工具项必须是嵌套
 /// `{"type":"function","function":{...}}` 形,扁平 Responses 形直接 422 Field required。
+///
+/// **2026-10-10 复测:①②③ 只在部分上游渠道成立,且各 id 的档位集合不同**——按 id 处理,
+/// 见 `GPT6_CAPS`。当日实测(每个形状 4 次,带 function tool):
+///   - gpt-6-luna: tools + none/low/high/省略 全部 200 出 tool_calls;top_p 一半 200 一半 400。
+///   - gpt-6-sol / gpt-6.1-sol: tools + `reasoning_effort:"low"` 4/4 200 出 tool_calls;
+///     tools + "none" 4/4 400(「must be low, medium, high, xhigh, or max」);
+///     tools + 省略 3/4 400(gpt-6-sol);tools + temperature/top_p 4/4 400。
+///   - 上游自己列的档位集合:luna = none/low/medium/high/xhigh;sol 与 6.1-sol =
+///     low/medium/high/xhigh[/max]。
+/// 结论:带工具的回合必须显式发该 id 接受的档位(luna 继续发 none,sol 及其它未登记 id
+/// 发下限 low),Sol 在带工具时不能带采样参数。
 const GPT6_LIMITS_PATTERN: &str = "gpt-6";
+
+/// 网关「渠道未就绪」类错误 —— 请求形状没问题,只是这次落到了一条没配
+/// chat→responses 路由的渠道上。实测 2026-10-10/12:同一形状(gpt-6.1-sol + tools)
+/// 在一个窗口里怎么发都失败(窗口可长达小时级,一次实测 1h45m 未结束),
+/// 而同一时刻 gpt-6-luna / glm / claude / kimi 全部正常 —— 是这两个 id 的渠道问题。
+/// 首个请求没有产生任何内容,原样重发是安全的。
+///
+/// **判定必须锚定**:错误体是客户端可影响的(网关会把模型名、参数值回显进错误文案),
+/// 而命中会写进跨请求的全局状态(把模型标记为不可用 → 触发工具模拟/跳过重试),
+/// 所以这里先取出网关自己的那句话,再要求它以网关的模板开头;模型名槽位单独校验
+/// 字符集与长度。回显到别的字段、或把短语塞进模型名的伪造体一律不命中。
+const TRANSIENT_UPSTREAM_PREFIXES: [&str; 5] = [
+    "Unsupported value: 'reasoning_effort' does not support 'none' with this model",
+    "Model resources are currently busy",
+    "Insufficient quota available for instant inference",
+    "Unsupported value: 'none' is not supported with the '", // 后面接 <模型 id>' model
+    "GPT-6: ",                                               // 后面接 <模型 id> + 固定后缀
+];
+/// `GPT-6: <id> …` 两种后缀(实测原文)。
+/// 注意:前缀里的 `GPT-6: <id>` 之后由 split_once(' ') 吃掉一个空格,
+/// 所以这两个后缀**不带**前导空格。
+const GPT6_SUFFIXES: [&str; 2] = [
+    "tool calling requires /v1/responses or configured Chat-to-Responses routing",
+    "reasoning effort must be low, medium, high, xhigh, or max",
+];
+/// 渠道轮换类错误的重试次数与退避:正常路径零开销(2xx 根本不进重试分支),
+/// 失败路径最多多花 ~3.5s(1s + 2.5s)。窗口实测以小时计,退避太短等于白跑,
+/// 太长则让 Codex 的回合明显变慢 —— 取这个量级是折中。
+const TRANSIENT_RETRY_ATTEMPTS: u32 = 2;
+const TRANSIENT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// 只有这两种状态码会携带「渠道轮换」错误。**必须先判状态码再看 body** ——
+/// 2xx 的响应体可能是还没结束的 SSE 流,提前读一个字节就会破坏逐块下发。
+fn is_candidate_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::BAD_REQUEST || status == StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// 取出网关自己的那句错误消息:各挂载信封不同(detail.message / error.message,
+/// Anthropic 挂载还会把内部错误再包一层 JSON 字符串),所以有界递归。
+fn upstream_error_text(body: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(body).trim().to_string();
+    for _ in 0..3 {
+        if !text.starts_with('{') {
+            return text;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { return text };
+        let next = v
+            .pointer("/detail/message")
+            .or_else(|| v.pointer("/error/message"))
+            .or_else(|| v.pointer("/message"))
+            .and_then(|m| m.as_str())
+            .map(|m| m.trim().to_string());
+        match next {
+            Some(n) if !n.is_empty() => text = n,
+            _ => return text,
+        }
+    }
+    text
+}
+
+/// 模型名槽位:只允许 id 常见字符且限长,防止把短语塞进模型名凑出模板。
+fn valid_model_slot(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+fn is_transient_upstream_error(status: StatusCode, body: &[u8]) -> bool {
+    if !is_candidate_transient_status(status) {
+        return false;
+    }
+    let message = upstream_error_text(body);
+    if message.is_empty() {
+        return false;
+    }
+    for prefix in TRANSIENT_UPSTREAM_PREFIXES {
+        if !message.starts_with(prefix) {
+            continue;
+        }
+        let rest = &message[prefix.len()..];
+        match prefix {
+            // `Unsupported value: 'none' is not supported with the '<id>' model`
+            p if p.starts_with("Unsupported value: 'none'") => {
+                return match rest.split_once("\' model") {
+                    Some((id, _)) => valid_model_slot(id),
+                    None => false,
+                };
+            }
+            // `GPT-6: <id> <固定后缀>`
+            "GPT-6: " => {
+                let (id, tail) = match rest.split_once(' ') {
+                    Some(parts) => parts,
+                    None => return false,
+                };
+                return valid_model_slot(id) && GPT6_SUFFIXES.iter().any(|s| tail.starts_with(s));
+            }
+            // 其余为完整模板,不接任何客户端内容
+            _ => return true,
+        }
+    }
+    false
+}
 
 /// 流式请求的「上游响应头 / 首字节」deadline。实测该网关会挂住流式请求 30~60s 零字节
 /// (HTTP 状态都不回),而 client 总超时是 600s —— 等于永远等不到。取 60s:成功样本首字节
@@ -69,23 +190,443 @@ fn next_id(prefix: &str) -> String {
     format!("{prefix}_{ts}_{n}")
 }
 
+
+// ---------------------------------------------------------------------------
+// 渠道轮换失败记忆 + 工具调用模拟
+// ---------------------------------------------------------------------------
+//
+// 网关把 gpt-6-sol / gpt-6.1-sol 路由到一条没有配置 chat→responses 路由的渠道,
+// 窗口期可以长达小时级(2026-10-12 实测:一个窗口 09:13 起持续 1h45m 仍未结束),
+// 期间这两个 id 的**原生工具调用**怎么发都失败(非流式硬 400,流式静默丢工具),
+// 而同一时刻 gpt-6-luna / glm / claude / kimi 全部正常 —— 是这两个 id 的渠道问题。
+//
+// 上游不会改,所以这里自己把那层缺失的路由补上:
+//   1. 工具定义写进 system 提示词(附 JSON Schema + 严格回复协议);
+//   2. 工具历史重塑成纯文本(模型自己的调用按协议语法回放,工具结果变成
+//      "[tool result] <name> -> <content>" 的 user 消息);
+//   3. 模型按协议回的载荷解析回真正的 tool_calls,再交给既有的
+//      chat→responses 转换器(流式走合成 chat 分片,不重写事件序列)。
+//
+// 只在「该模型刚被渠道轮换失败标记为不可用」时接管 —— 原生路径健康时完全不介入。
+
+/// 允许模拟的模型(大小写不敏感子串匹配,与其它 pattern 一致)。
+const EMULATION_MODELS: &str = "gpt-6-sol|gpt-6.1-sol";
+/// 连续多少次渠道轮换失败后标记不可用。
+const HEALTH_THRESHOLD: u32 = 2;
+/// 标记持续时长;到期后进入探测期:只做一次不重试的原生尝试。
+const HEALTH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+/// 状态表上限:模型 id 来自请求,不设上限等于给了客户端一个内存增长点。
+const MAX_TRACKED_MODELS: usize = 512;
+const MAX_MODEL_ID_LEN: usize = 128;
+
+#[derive(Default)]
+pub struct ModelHealth {
+    failures: HashMap<String, u32>,
+    unhealthy: HashMap<String, std::time::Instant>,
+    probation: HashMap<String, bool>,
+}
+
+impl ModelHealth {
+    fn note_success(&mut self, model: &str) {
+        if model.is_empty() {
+            return;
+        }
+        self.failures.remove(model);
+        self.unhealthy.remove(model);
+        self.probation.remove(model);
+    }
+
+    /// 记一次渠道轮换失败;返回是否「本次把它标记为不可用」。
+    fn note_failure(&mut self, model: &str) -> bool {
+        if model.is_empty() || model.len() > MAX_MODEL_ID_LEN {
+            return false;
+        }
+        if !self.failures.contains_key(model) && self.failures.len() >= MAX_TRACKED_MODELS {
+            return false; // fail-closed:不记账只会少标记,不会误标记
+        }
+        let probing = self.probation.remove(model).unwrap_or(false);
+        let count = self.failures.entry(model.to_string()).or_insert(0);
+        *count += 1;
+        if !probing && *count < HEALTH_THRESHOLD {
+            return false;
+        }
+        let first = !self.unhealthy.contains_key(model);
+        self.unhealthy.insert(model.to_string(), std::time::Instant::now() + HEALTH_COOLDOWN);
+        first
+    }
+
+    /// 是否处于不可用窗口;冷却到期则转入探测期(只探一次)。
+    fn unavailable(&mut self, model: &str) -> bool {
+        if model.is_empty() {
+            return false;
+        }
+        let Some(until) = self.unhealthy.get(model).copied() else {
+            return false;
+        };
+        if std::time::Instant::now() >= until {
+            self.unhealthy.remove(model);
+            self.probation.insert(model.to_string(), true);
+            return false;
+        }
+        true
+    }
+
+    fn in_probation(&self, model: &str) -> bool {
+        !model.is_empty() && self.probation.get(model).copied().unwrap_or(false)
+    }
+}
+
+/// 形状分桶:渠道轮换失败只发生在「带工具」的形状上(缺的只有工具请求需要的
+/// 那层路由),所以无工具请求的成功不能清掉工具桶的标记 —— 2026-10-12 本机
+/// 部署实测:无工具成功清掉标记后,下一个工具请求又打满重试预算再吃 400。
+fn health_key(model: &str, has_tools: bool) -> String {
+    if model.is_empty() {
+        return String::new();
+    }
+    if has_tools {
+        format!("{model} [tools]")
+    } else {
+        model.to_string()
+    }
+}
+
+fn emulation_model(model: &str) -> bool {
+    should_convert(model, EMULATION_MODELS)
+}
+
+/// 工具定义搬进提示词、工具历史重塑为纯文本。什么都不做时返回 false。
+/// content 的实际文本:字符串原样返回,parts 数组拼接其中的 text part。
+/// Codex 的消息内容是 parts 数组 —— 只认字符串两边都出错:读会当空,写会
+/// 覆盖(见 append_content_text)。
+fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => {
+            let mut out = String::new();
+            for p in parts {
+                if p.get("type").and_then(|v| v.as_str()) != Some("text") {
+                    continue;
+                }
+                let Some(t) = p.get("text").and_then(|v| v.as_str()) else { continue };
+                if t.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(t);
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
+/// 把一段块追加到 content 实际采用的形态里:字符串接尾,parts 数组追加一个
+/// text part。2026-10-12 实测缺陷:Codex 的 system 消息是 parts,旧代码
+/// as_str() 得到空串后整个覆盖 content,把原始指令全部丢掉。
+fn append_content_text(content: &mut Value, text: &str) {
+    match content {
+        Value::Array(parts) => parts.push(json!({"type": "text", "text": text})),
+        Value::String(s) => {
+            *s = format!("{}\n\n{}", s.trim_end_matches('\n'), text);
+        }
+        _ => *content = Value::String(text.to_string()),
+    }
+}
+
+fn emulate_tool_protocol(chat: &mut Value) -> bool {
+    let Some(obj) = chat.as_object_mut() else { return false };
+    let Some(tools) = obj.get("tools").and_then(|t| t.as_array()).cloned() else { return false };
+    if tools.is_empty() {
+        return false;
+    }
+    let mut schemas = Vec::new();
+    for t in &tools {
+        let f = t.get("function").unwrap_or(t);
+        let mut entry = serde_json::Map::new();
+        if let Some(name) = f.get("name").and_then(|v| v.as_str()) {
+            entry.insert("name".into(), json!(name));
+        }
+        if let Some(d) = f.get("description").and_then(|v| v.as_str()) {
+            entry.insert("description".into(), json!(d));
+        }
+        if let Some(p) = f.get("parameters") {
+            entry.insert("parameters".into(), p.clone());
+        }
+        schemas.push(Value::Object(entry));
+    }
+    let protocol = format!(
+        "You have tools available. Call one by replying with ONLY this JSON, no prose and no code fences:\n\
+         {{\"tool_calls\":[{{\"name\":\"<tool name>\",\"arguments\":{{...}}}}]}}\n\
+         If no tool is needed, answer normally in text. Tool results arrive as user messages \
+         starting with [tool result]; use them, and call another tool only if you still need data.\n\
+         Available tools (JSON Schema):\n{}",
+        Value::Array(schemas)
+    );
+
+    // 工具历史重塑:tool 消息要带上它所回应的工具名,而名字只在前面那条 assistant 里。
+    let mut names: HashMap<String, String> = HashMap::new();
+    let mut reframed: Vec<Value> = Vec::new();
+    if let Some(messages) = obj.get("messages").and_then(|m| m.as_array()).cloned() {
+        for m in messages {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            match role {
+                "assistant" => {
+                    if let Some(calls) = m.get("tool_calls").and_then(|c| c.as_array()) {
+                        let mut out_calls = Vec::new();
+                        for c in calls {
+                            let name = c.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+                            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                                names.insert(id.to_string(), name.to_string());
+                            }
+                            let args = c
+                                .pointer("/function/arguments")
+                                .and_then(|v| v.as_str())
+                                .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                                .unwrap_or(Value::Null);
+                            out_calls.push(json!({"name": name, "arguments": args}));
+                        }
+                        let mut text = serde_json::to_string(&json!({"tool_calls": out_calls})).unwrap_or_default();
+                        let prior = content_text(m.get("content"));
+                        if !prior.is_empty() {
+                            text = format!("{prior}\n{text}");
+                        }
+                        reframed.push(json!({"role": "assistant", "content": text}));
+                        continue;
+                    }
+                }
+                "tool" => {
+                    let name = m
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|id| names.get(id).cloned())
+                        .unwrap_or_else(|| "tool".to_string());
+                    let content = content_text(m.get("content"));
+                    reframed.push(json!({
+                        "role": "user",
+                        "content": format!("[tool result] {name} -> {content}")
+                    }));
+                    continue;
+                }
+                _ => {}
+            }
+            reframed.push(m);
+        }
+    }
+
+    // 协议放最前:已有 system 就按内容实际形态追加,没有就新插一条。
+    let mut inserted = false;
+    for m in reframed.iter_mut() {
+        if m.get("role").and_then(|v| v.as_str()) == Some("system") {
+            match m.get_mut("content") {
+                Some(c) => append_content_text(c, &protocol),
+                None => m["content"] = json!(protocol),
+            }
+            inserted = true;
+            break;
+        }
+    }
+    if !inserted {
+        reframed.insert(0, json!({"role": "system", "content": protocol}));
+    }
+
+    obj.insert("messages".into(), Value::Array(reframed));
+    obj.remove("tools");
+    obj.remove("tool_choice");
+    true
+}
+
+/// 从模型回复里取出协议调用。允许前后夹带散文(模型常这么干)。
+fn parse_emulated_tool_call(content: &str) -> Option<(String, String)> {
+    let start = content.find("{\"tool_calls\"").or_else(|| {
+        content.find("tool_calls").and_then(|idx| content[..idx].rfind('{'))
+    })?;
+    // 用 Deserializer 只取第一个 JSON 值:模型常在 JSON 后面补一句解释或收尾的
+    // 代码围栏,from_str 遇到尾随文本会整体报错(Go 侧的 Decoder 行为一致)。
+    let mut de = serde_json::Deserializer::from_str(&content[start..]);
+    let parsed = Value::deserialize(&mut de).ok()?;
+    let first = parsed.get("tool_calls")?.as_array()?.first()?.clone();
+    let name = first.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let args = match first.get("arguments") {
+        Some(Value::Null) | None => "{}".to_string(),
+        Some(Value::String(s)) if s.trim().is_empty() => "{}".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => serde_json::to_string(other).ok()?,
+    };
+    if serde_json::from_str::<Value>(&args).is_err() {
+        return None;
+    }
+    Some((name, args))
+}
+
+/// 把解析出的调用写回 chat 响应,交给既有转换器。
+fn apply_emulated_tool_call(chat: &mut Value, call_id: &str, name: &str, arguments: &str) -> bool {
+    let Some(choice) = chat.get_mut("choices").and_then(|c| c.get_mut(0)) else { return false };
+    let Some(message) = choice.get_mut("message") else { return false };
+    message["content"] = json!("");
+    message["tool_calls"] = json!([{
+        "id": call_id, "type": "function",
+        "function": {"name": name, "arguments": arguments}
+    }]);
+    choice["finish_reason"] = json!("tool_calls");
+    true
+}
+
+/// 把完整 chat 回复渲染成 chat SSE 分片,喂给既有的 transform_chat_sse。
+fn synthesize_chat_sse(chat: &Value) -> String {
+    let mut out = String::new();
+    let base_id = chat.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-emu");
+    let model = chat.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let created = chat.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mut push = |delta: Value, finish: Value| {
+        let chunk = json!({
+            "id": base_id, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+        });
+        out.push_str("data: ");
+        out.push_str(&chunk.to_string());
+        out.push_str("\n\n");
+    };
+    let choice = chat.get("choices").and_then(|c| c.get(0));
+    let message = choice.and_then(|c| c.get("message"));
+    push(json!({"role": "assistant"}), Value::Null);
+    if let Some(content) = message.and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
+        if !content.is_empty() {
+            push(json!({"content": content}), Value::Null);
+        }
+    }
+    if let Some(calls) = message.and_then(|m| m.get("tool_calls")).and_then(|v| v.as_array()) {
+        for (i, c) in calls.iter().enumerate() {
+            push(json!({"tool_calls": [{
+                "index": i,
+                "id": c.get("id").cloned().unwrap_or(json!("")),
+                "type": "function",
+                "function": c.get("function").cloned().unwrap_or(json!({}))
+            }]}), Value::Null);
+        }
+    }
+    let finish = choice.and_then(|c| c.get("finish_reason")).and_then(|v| v.as_str()).unwrap_or("stop");
+    push(json!({}), json!(finish));
+    if let Some(usage) = chat.get("usage") {
+        let tail = json!({
+            "id": base_id, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [], "usage": usage
+        });
+        out.push_str("data: ");
+        out.push_str(&tail.to_string());
+        out.push_str("\n\n");
+    }
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+fn emulated_call_id() -> String {
+    next_id("call_emu")
+}
+
 // ---------------------------------------------------------------------------
 // 模型转换规则
 // ---------------------------------------------------------------------------
 
-/// 模型 id 是否需要走 Responses→Chat 转换(大小写不敏感子串匹配)。
+/// 模型 id 是否需要走 Responses→Chat 转换(大小写不敏感子串匹配;`*` 匹配全部)。
 pub fn should_convert(model: &str, pattern: &str) -> bool {
     let m = model.to_lowercase();
     pattern
         .split('|')
         .map(|p| p.trim().to_lowercase())
         .filter(|p| !p.is_empty())
-        .any(|p| m.contains(&p))
+        .any(|p| p == "*" || m.contains(&p))
 }
 
 /// 模型是否属于受上面四条限制的 gpt-6 族。
 fn gpt6_family(model: &str) -> bool {
     should_convert(model, GPT6_LIMITS_PATTERN)
+}
+
+/// 带工具时采样参数的处理策略。
+#[derive(Clone, Copy, PartialEq)]
+enum SamplingPolicy {
+    /// 带工具即剥(luna 只收 temperature 默认值,top_p 时好时坏)。
+    OnTools,
+    /// 无工具也剥(与 OnTools 同效,保留给未来的 id)。
+    Always,
+}
+
+/// 一个 gpt-6 id 在网关 chat 路由上的 effort 能力(2026-10-10 实测,见族说明)。
+struct Gpt6Caps {
+    /// 上游接受的 reasoning_effort 集合。
+    efforts: &'static [&'static str],
+    /// 带工具的回合回落到该档位。
+    tools_effort: &'static str,
+    /// 是否无视客户端档位、带工具时一律用 tools_effort(luna 跨渠道唯一稳定的形状)。
+    force_tools_effort: bool,
+    /// 采样参数策略。
+    sampling: SamplingPolicy,
+}
+
+const GPT6_EFFORTS_LUNA: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+const GPT6_EFFORTS_SOL: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// 只按精确 id 匹配:档位集合发错一个值,上游就是硬 400,比漏配更难排查。
+/// 未登记的 id(新成员、带日期后缀的别名)走保守默认:low 在两个已测 id 的集合里都存在。
+fn gpt6_caps(model: &str) -> Gpt6Caps {
+    match model.to_lowercase().as_str() {
+        "gpt-6-luna" => Gpt6Caps {
+            efforts: GPT6_EFFORTS_LUNA,
+            // 2026-10-10 复测:tools×effort 互斥已不成立,客户端给的低/中/高档位照发;
+            // 只有档位缺失或不被接受时才回落到 none(历史上唯一跨渠道稳定的形状)。
+            tools_effort:      "none",
+            force_tools_effort: false,
+            // luna 只接受 temperature 的默认值:不带工具、客户端又没给 effort 时,
+            // 带采样参数就是 400(2026-09-29 实测),所以对它一律剥。
+            sampling: SamplingPolicy::Always,
+        },
+        "gpt-6-sol" | "gpt-6.1-sol" => Gpt6Caps {
+            efforts: GPT6_EFFORTS_SOL,
+            tools_effort: "low",
+            force_tools_effort: false,
+            sampling: SamplingPolicy::OnTools,
+        },
+        _ => Gpt6Caps {
+            efforts: GPT6_EFFORTS_SOL,
+            tools_effort: "low",
+            force_tools_effort: false,
+            sampling: SamplingPolicy::OnTools,
+        },
+    }
+}
+
+impl Gpt6Caps {
+    /// 带不带工具时是否必须剥掉 temperature/top_p。
+    fn strips_sampling(&self, has_tools: bool) -> bool {
+        match self.sampling {
+            SamplingPolicy::OnTools => has_tools,
+            SamplingPolicy::Always => true,
+        }
+    }
+
+    /// 该请求最终要发的 reasoning_effort;None = 不发该参数。
+    fn effort_for(&self, requested: &str, has_tools: bool) -> Option<String> {
+        if has_tools {
+            // 带工具的回合必须显式发一个上游接受的档位:luna 省略会落进互斥 400,
+            // sol 拒收 none 且省略也不稳。
+            if self.force_tools_effort || !self.efforts.contains(&requested) {
+                return Some(self.tools_effort.to_string());
+            }
+            return Some(requested.to_string());
+        }
+        if requested.is_empty()
+            || matches!(requested, "none" | "off" | "disabled")
+            || !self.efforts.contains(&requested)
+        {
+            return None;
+        }
+        Some(requested.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,10 +1061,18 @@ pub fn responses_to_chat(body: &Value) -> Value {
     // 发送则 400;改用 omit(让上游走默认),安全且不崩。
     // 例外见下面 gpt6 分支:对 gpt-6 族「省略」恰恰是坏形状。
     let has_tools = out.contains_key("tools");
-    if has_tools && gpt6 {
-        // 该族在 chat 路由上 tools×reasoning 互斥,且「省略」按非 none 处理 → 显式发 none
-        // 是唯一可用形状。代价:Codex 侧这些模型不再思考(网关不支持,不是代理的选择)。
-        out.insert("reasoning_effort".into(), json!("none"));
+    let requested_effort = body
+        .get("reasoning")
+        .and_then(|v| v.get("effort"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if gpt6 {
+        // 按 id 决定档位(见 gpt6_caps):带工具的回合必须显式发该 id 接受的值,
+        // 客户端给"思考关闭"而该 id 没有 none 档时,落到该 id 的下限(sol = low)。
+        if let Some(effort) = gpt6_caps(model).effort_for(&requested_effort, has_tools) {
+            out.insert("reasoning_effort".into(), json!(effort));
+        }
     } else if let Some(effort) = body
         .get("reasoning")
         .and_then(|v| v.get("effort"))
@@ -536,10 +1085,10 @@ pub fn responses_to_chat(body: &Value) -> Value {
     }
 
     // parallel_tool_calls / user 同名透传(Codex 必发 parallel_tool_calls)。
-    // temperature / top_p:gpt-6 族不支持采样参数(见 GPT6_LIMITS_PATTERN ②),带上即 400
-    // → 该族剥掉;其余模型照旧透传。
+    // temperature / top_p:按 id 的策略剥(见 gpt6_caps)——Sol 只在带工具时拒收,
+    // luna 一律只认默认值;其余模型照旧透传。
     for k in ["temperature", "top_p", "stream", "parallel_tool_calls", "user"] {
-        if gpt6 && matches!(k, "temperature" | "top_p") {
+        if gpt6 && matches!(k, "temperature" | "top_p") && gpt6_caps(model).strips_sampling(has_tools) {
             continue;
         }
         if let Some(v) = body.get(k) {
@@ -1092,6 +1641,8 @@ pub struct ProxyState {
     /// ModelsResponse 反序列化范围内,会导致模型切换器只剩内置模型)。
     pub models_json_path: Option<String>,
     pub client: reqwest::Client,
+    /// 每个模型的渠道轮换失败记忆(见 ModelHealth)。
+    pub health: Arc<Mutex<ModelHealth>>,
 }
 
 pub fn build_app(upstream_base_url: String, convert_pattern: String, models_json_path: Option<String>) -> Router {
@@ -1100,7 +1651,13 @@ pub fn build_app(upstream_base_url: String, convert_pattern: String, models_json
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .unwrap_or_default();
-    let state = ProxyState { upstream_base_url, convert_pattern, models_json_path, client };
+    let state = ProxyState {
+        upstream_base_url,
+        convert_pattern,
+        models_json_path,
+        client,
+        health: Arc::new(Mutex::new(ModelHealth::default())),
+    };
     Router::new()
         .route("/healthz", get(handle_health))
         .route("/models", get(handle_models))
@@ -1194,6 +1751,114 @@ async fn post_upstream(
     req.send().await
 }
 
+/// 上游返回非 2xx 时的收尾:读错误体 → 渠道轮换重试 → 剥 effort 参数重试。
+///
+/// 返回 Ok((响应, 状态, content-type)) 表示上游最终给了 2xx(可能来自重试),
+/// 调用方照常走转换/透传;返回 Err(响应) 表示最终仍是错误,直接把该响应
+/// 回给客户端(错误体与状态码都是上游原文)。
+///
+/// 2xx 的响应体在这里**不会被读**:它可能是还没结束的 SSE 流。
+async fn settle_upstream_errors(
+    st: &ProxyState,
+    headers: &HeaderMap,
+    target: &str,
+    out_body: &Value,
+    convert: bool,
+    model: &str,
+    mut upstream: reqwest::Response,
+) -> Result<(reqwest::Response, StatusCode, String), Response> {
+    // 该模型正处于不可用窗口或探测期时,不花重试预算(探测期只做一次尝试)。
+    let can_retry = {
+        let mut health = st.health.lock().expect("health lock");
+        !health.unavailable(model) && !health.in_probation(model)
+    };
+    fn read_content_type(resp: &reqwest::Response) -> String {
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    let mut status = upstream.status();
+    // content-type 必须在读 body 之前取:读了 body 之后响应本身就被消耗掉了。
+    let mut content_type = read_content_type(&upstream);
+    if status.is_success() {
+        if !model.is_empty() {
+            st.health.lock().expect("health lock").note_success(model);
+        }
+        return Ok((upstream, status, content_type));
+    }
+    // 错误体很小,先读出来:重试判据与最终透传都用这一份,不会读两次。
+    let mut error_body = upstream.bytes().await.ok();
+
+    // ① 渠道轮换重试:同一请求体原样重发。只在文案命中时做,避免把客户端自身的
+    //    参数错误也重试一遍(那种情况重试只会同样失败,白等一个退避)。
+    let transient = is_candidate_transient_status(status)
+        && error_body
+            .as_deref()
+            .map(|b| is_transient_upstream_error(status, b))
+            .unwrap_or(false);
+    if transient && !model.is_empty() {
+        let mut health = st.health.lock().expect("health lock");
+        if health.note_failure(model) {
+            eprintln!("[proxy] model marked unavailable after repeated channel-rotation failures: model={model}");
+        }
+    }
+    if transient && can_retry {
+        for round in 1..=TRANSIENT_RETRY_ATTEMPTS {
+            // 1s,2.5s(round 为 1、2 时分别乘 1 与 2.5)
+            let wait = if round == 1 { TRANSIENT_RETRY_BACKOFF } else { TRANSIENT_RETRY_BACKOFF * 5 / 2 };
+            tokio::time::sleep(wait).await;
+            match post_upstream(st, headers, target, out_body).await {
+                Ok(r) => {
+                    status = r.status();
+                    content_type = read_content_type(&r);
+                    upstream = r;
+                    if status.is_success() {
+                        return Ok((upstream, status, content_type));
+                    }
+                    error_body = upstream.bytes().await.ok();
+                    let still_transient = error_body
+                        .as_deref()
+                        .map(|b| is_transient_upstream_error(status, b))
+                        .unwrap_or(false);
+                    if !still_transient {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    // ② 端点拒收 effort 档位(400/422,如严格 chat 端点对非推理模型拒收
+    //    reasoning_effort 参数本身)时,剥掉 effort 参数重试一次:首次请求已干净
+    //    失败(未生成任何内容),重试安全;再失败则原样透传。
+    if can_retry && (status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY) {
+        if let Some(retry_body) = strip_effort_param(out_body, convert) {
+            if let Ok(r2) = post_upstream(st, headers, target, &retry_body).await {
+                status = r2.status();
+                content_type = read_content_type(&r2);
+                upstream = r2;
+                if status.is_success() {
+                    return Ok((upstream, status, content_type));
+                }
+                error_body = upstream.bytes().await.ok();
+            }
+        }
+    }
+
+    Err(Response::builder()
+        .status(status)
+        .header(
+            header::CONTENT_TYPE,
+            if content_type.is_empty() { "application/json".to_string() } else { content_type },
+        )
+        .body(Body::from(error_body.unwrap_or_else(Bytes::new)))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()))
+}
+
 /// 端点拒收 effort 档位时的重试体:剥掉外发请求里的 effort 参数。
 /// convert 路径剥 chat 的顶层 reasoning_effort;透传路径剥 /responses 的
 /// reasoning.effort(reasoning 只剩空对象时连键一起删,部分严格端点拒收空对象)。
@@ -1202,8 +1867,8 @@ fn strip_effort_param(body: &Value, convert: bool) -> Option<Value> {
     let mut out = body.clone();
     let obj = out.as_object_mut()?;
     if convert {
-        // gpt-6 族:能带 tools 的请求只有 reasoning_effort="none" 一种形状
-        // (实测省略即 400)。剥掉它正好落回那个 400 形状,重试只是白跑一次上游,
+        // gpt-6 族:带 tools 的请求必须显式发一个上游接受的档位(见 gpt6_caps),
+        // 剥掉它正好落回「省略」那个 400 形状,重试只是白跑一次上游,
         // 所以这里不回 retry 体,让首个 400 的原始 body 直接透传给 Codex。
         if obj.contains_key("tools")
             && gpt6_family(body.get("model").and_then(|v| v.as_str()).unwrap_or(""))
@@ -1255,15 +1920,34 @@ async fn handle_responses(
         }
     }
 
-    let (target, out_body) = if convert {
+    let (target, mut out_body) = if convert {
         (format!("{}/chat/completions", st.upstream_base_url.trim_end_matches('/')), responses_to_chat(&body))
     } else {
         (format!("{}/responses", st.upstream_base_url.trim_end_matches('/')), body.clone())
     };
 
+    // 渠道轮换窗口:该模型的原生工具调用必失败(实测窗口可长达小时级)。把工具搬进
+    // 提示词、自己补上缺失的那层路由 —— 原生健康时完全不介入。
+    let has_tools = out_body.get("tools").is_some();
+    let mut emulating = false;
+    if convert && has_tools {
+        let marked = {
+            let mut health = st.health.lock().expect("health lock");
+            health.unavailable(&health_key(&model, true))
+        };
+        if marked && emulation_model(&model) && emulate_tool_protocol(&mut out_body) {
+            emulating = true;
+            out_body["stream"] = json!(false); // 协议回复要先完整拿到才能解析
+            if let Some(obj) = out_body.as_object_mut() {
+                obj.remove("stream_options");
+            }
+            eprintln!("[proxy] emulating tool calls in the prompt (upstream tool calling unavailable): model={model}");
+        }
+    }
+
     // 流式请求给上游「回响应头」设 deadline:网关挂起时(实测 30~60s 连状态码都不发)
     // 600s 总超时等于永久卡死。非流式不设 —— 大上下文模型的整段生成本来就可能几十秒。
-    let sent = if stream_req {
+    let sent = if stream_req && !emulating {
         match tokio::time::timeout(STREAM_FIRST_BYTE_TIMEOUT, post_upstream(&st, &headers, &target, &out_body)).await {
             Ok(r) => r,
             Err(_) => {
@@ -1276,46 +1960,57 @@ async fn handle_responses(
     } else {
         post_upstream(&st, &headers, &target, &out_body).await
     };
-    let mut upstream = match sent {
+    let upstream = match sent {
         Ok(r) => r,
         Err(e) => return json_err(502, format!("upstream connect failed: {e}")),
     };
-    let mut status = upstream.status();
-    let mut content_type = upstream
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
 
-    // 端点拒收 effort 档位(400/422,如严格 chat 端点对非推理模型拒收
-    // reasoning_effort 参数本身)时,剥掉 effort 参数重试一次:首次请求已干净
-    // 失败(未生成任何内容),重试安全;再失败则走下方原样透传。
-    if status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY {
-        if let Some(retry_body) = strip_effort_param(&out_body, convert) {
-            if let Ok(r2) = post_upstream(&st, &headers, &target, &retry_body).await {
-                upstream = r2;
-                status = upstream.status();
-                content_type = upstream
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
+    // 非 2xx 一律交给 settle_upstream_errors:它按需读错误体、做渠道轮换重试与
+    // 剥参数重试,返回最终可用的 2xx 响应,或直接给出要回给客户端的错误响应。
+    // 模拟接管的请求不做健康记账:它的成功是我们自己提示词的功劳,不是上游恢复了。
+    let health_model = if emulating { String::new() } else { health_key(&model, has_tools) };
+    let (upstream, _status, content_type) = match settle_upstream_errors(
+        &st, &headers, &target, &out_body, convert, &health_model, upstream,
+    )
+    .await
+    {
+        Ok(settled) => settled,
+        Err(resp) => return resp,
+    };
+
+    // 模拟接管的响应:解析协议回复 → 还原成真正的 tool_calls → 走既有转换器。
+    if emulating {
+        let bytes = match upstream.bytes().await {
+            Ok(b) => b,
+            Err(e) => return json_err(502, format!("upstream read failed: {e}")),
+        };
+        let mut chat: Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => return json_err(502, "upstream returned malformed JSON".to_string()),
+        };
+        let content = chat
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some((name, args)) = parse_emulated_tool_call(&content) {
+            let id = emulated_call_id();
+            if apply_emulated_tool_call(&mut chat, &id, &name, &args) {
+                eprintln!("[proxy] emulated tool call parsed: model={model} tool={name} call_id={id}");
             }
         }
-    }
-
-    if !status.is_success() {
-        // 非 2xx:原样透传错误(Codex 直接显示)
-        return match upstream.bytes().await {
-            Ok(b) => Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, if content_type.is_empty() { "application/json".to_string() } else { content_type.clone() })
-                .body(Body::from(b))
-                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()),
-            Err(e) => json_err(502, format!("upstream read failed: {e}")),
-        };
+        if stream_req {
+            let sse = synthesize_chat_sse(&chat);
+            let stream = futures_util::stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(sse))]);
+            let out = transform_chat_sse(stream, model.clone());
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(Body::from_stream(out.map(Ok::<Bytes, Box<dyn std::error::Error + Send + Sync>>)))
+                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
+        }
+        return Json(chat_to_responses_json(&chat, &model)).into_response();
     }
 
     // 转换路径:chat SSE → responses SSE
@@ -1782,13 +2477,16 @@ mod tests {
         assert!(should_convert("GPT-5.6-TERRA", "gpt-5.6"));
         assert!(!should_convert("deepseek-v4-flash", "gpt-5.6"));
         assert!(!should_convert("qwen3.8-max", "gpt-5.6"));
-        assert!(should_convert("gpt-6-luna", DEFAULT_CONVERT_PATTERN));
-        assert!(should_convert("GPT-6-LUNA", DEFAULT_CONVERT_PATTERN));
-        // kimi-k2.8 / step-5-preview 原生 /responses 可用,不进转换名单
-        assert!(!should_convert("kimi-k2.8", DEFAULT_CONVERT_PATTERN));
-        assert!(!should_convert("step-5-preview", DEFAULT_CONVERT_PATTERN));
-        // mimo-v2.6 命中既有的 MiMo 规则(大小写不敏感)
-        assert!(should_convert("mimo-v2.6-pro", DEFAULT_CONVERT_PATTERN));
+        // 默认全转换:网关卡 /responses 对任何模型都不执行工具调用。
+        assert_eq!(DEFAULT_CONVERT_PATTERN, "*");
+        for id in ["gpt-6-luna", "GPT-6-LUNA", "kimi-k2.8", "step-5-preview", "qwen3.8-max", "Recommend"] {
+            assert!(should_convert(id, DEFAULT_CONVERT_PATTERN), "{id} 应走转换");
+        }
+        // 收窄成子串列表时回到「只转换命中的族」的旧行为(大小写不敏感)。
+        let narrowed = "gpt-5.6|gpt-6|MiMo";
+        assert!(should_convert("mimo-v2.6-pro", narrowed));
+        assert!(should_convert("gpt-6-luna", narrowed));
+        assert!(!should_convert("kimi-k2.8", narrowed));
     }
 
     #[test]
@@ -2004,6 +2702,279 @@ mod tests {
         assert_eq!(tools.len(), 2);
     }
 
+
+    #[test]
+    fn emulation_rewrites_tools_into_the_prompt() {
+        let mut chat = json!({
+            "model": "gpt-6.1-sol",
+            "tools": [{"type": "function", "function": {"name": "get_time", "description": "time",
+                       "parameters": {"type": "object", "properties": {}}}}],
+            "messages": [
+                {"role": "user", "content": "Call get_time."},
+                {"role": "assistant", "content": null,
+                 "tool_calls": [{"id": "call_1", "type": "function",
+                                 "function": {"name": "get_time", "arguments": "{\"city\":\"Shanghai\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "09:55 CST"},
+                {"role": "user", "content": "Answer in one sentence."}
+            ]
+        });
+        assert!(emulate_tool_protocol(&mut chat));
+        assert!(chat.get("tools").is_none(), "tools 字段必须移除(上游不认)");
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        let sys = messages[0]["content"].as_str().unwrap();
+        for want in ["tool_calls", "get_time", "parameters", "[tool result]"] {
+            assert!(sys.contains(want), "协议缺 {want}: {sys}");
+        }
+        // assistant 的调用 → 协议文本;tool 结果 → 带工具名的 user 文本
+        assert!(messages[2]["content"].as_str().unwrap().contains("get_time"));
+        assert_eq!(messages[3]["role"], "user");
+        assert!(messages[3]["content"].as_str().unwrap().contains("09:55 CST"));
+        assert!(messages[3]["content"].as_str().unwrap().contains("get_time"));
+        // 没有 tools 时不动
+        let mut plain = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        assert!(!emulate_tool_protocol(&mut plain));
+    }
+
+    /// Codex 的消息内容是 parts 数组 —— 协议必须追加进 parts;旧代码拿
+    /// as_str() 得到空串后整体覆盖 content,把原指令全丢了(2026-10-12 实测)。
+    #[test]
+    fn emulation_appends_protocol_to_parts_content() {
+        let mut chat = json!({
+            "model": "gpt-6.1-sol",
+            "tools": [{"type": "function", "function": {"name": "exec_command", "description": "run a command",
+                       "parameters": {"type": "object", "properties": {}}}}],
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "You are Codex."},
+                                               {"type": "text", "text": "Sandbox: read-only."}]},
+                {"role": "user", "content": [{"type": "text", "text": "Run `date`."}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "On it."}],
+                 "tool_calls": [{"id": "call_1", "type": "function",
+                                 "function": {"name": "exec_command", "arguments": "{\"cmd\":\"date\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_1",
+                 "content": [{"type": "text", "text": "11:30 CST"}]}
+            ]
+        });
+        assert!(emulate_tool_protocol(&mut chat));
+        let messages = chat["messages"].as_array().unwrap();
+        // 原 parts 保留,协议作为追加的 text part
+        let sys = &messages[0]["content"];
+        let parts = sys.as_array().expect("parts 形态应保留");
+        assert!(parts.iter().any(|p| p["text"] == "You are Codex."), "原指令被覆盖: {sys}");
+        assert!(parts.iter().any(|p| p["text"] == "Sandbox: read-only."));
+        assert!(
+            parts.iter().any(|p| p["text"].as_str().unwrap_or("").contains("You have tools available")
+                && p["text"].as_str().unwrap_or("").contains("exec_command")),
+            "协议未进入 parts: {sys}"
+        );
+        // assistant 重放保留 parts 文本 + 调用 JSON
+        let a = messages[2]["content"].as_str().unwrap();
+        assert!(a.contains("On it.") && a.contains("exec_command"), "重放丢失内容: {a}");
+        // tool 结果(parts 形态)不丢
+        let t = messages[3]["content"].as_str().unwrap();
+        assert!(t.contains("11:30 CST") && t.contains("exec_command"), "工具结果丢失: {t}");
+    }
+
+    #[test]
+    fn emulated_reply_parses_and_becomes_a_real_tool_call() {
+        for (input, ok, args) in [
+            (r#"{"tool_calls":[{"name":"get_time","arguments":{"city":"Shanghai"}}]}"#, true, "{\"city\":\"Shanghai\"}"),
+            ("Sure!\n{\"tool_calls\":[{\"name\":\"get_time\",\"arguments\":{}}]}\n", true, "{}"),
+            ("```json\n{\"tool_calls\":[{\"name\":\"get_time\",\"arguments\":{\"a\":1}}]}\n```", true, "{\"a\":1}"),
+            ("It is 09:55 in Shanghai.", false, ""),
+            (r#"{"tool_calls":[{"name":"","arguments":{}}]}"#, false, ""),
+        ] {
+            match parse_emulated_tool_call(input) {
+                Some((name, got_args)) => {
+                    assert!(ok, "不该解析成功: {input}");
+                    assert_eq!(name, "get_time");
+                    assert_eq!(got_args, args, "参数不一致(input={input})");
+                }
+                None => assert!(!ok, "应解析成功: {input}"),
+            }
+        }
+
+        // 解析结果写回响应:内容清空、tool_calls 就位、finish_reason 跟上
+        let mut chat = json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "x"},
+                                           "finish_reason": "stop"}]});
+        assert!(apply_emulated_tool_call(&mut chat, "call_emu_1", "get_time", "{\"city\":\"Tokyo\"}"));
+        assert_eq!(chat["choices"][0]["message"]["content"], "");
+        assert_eq!(chat["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "get_time");
+        assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn health_marks_probes_and_recovers() {
+        // 形状分桶:不同形状是不同键;无工具桶的成功清不掉工具桶的标记
+        assert_ne!(health_key("gpt-6.1-sol", true), health_key("gpt-6.1-sol", false));
+        assert_eq!(health_key("", true), "");
+        let tool_key = health_key("gpt-6.1-sol", true);
+
+        let mut h = ModelHealth::default();
+        assert!(!h.unavailable("gpt-6.1-sol"));
+        assert!(!h.note_failure(&tool_key)); // 第 1 次:未到阈值
+        assert!(h.note_failure(&tool_key)); // 第 2 次:标记
+        assert!(h.unavailable(&tool_key));
+        h.note_success(&health_key("gpt-6.1-sol", false));
+        assert!(h.unavailable(&tool_key), "无工具成功不能清除工具桶标记");
+        h.note_success(&tool_key);
+        assert!(!h.unavailable(&tool_key), "成功后应清除标记");
+        // 客户端可控的 id 不能撑爆状态表
+        for i in 0..(MAX_TRACKED_MODELS + 20) {
+            h.note_failure(&format!("model-{i}"));
+        }
+        assert!(h.failures.len() <= MAX_TRACKED_MODELS);
+        assert!(!h.note_failure(&"m".repeat(MAX_MODEL_ID_LEN + 1)));
+    }
+
+    #[test]
+    fn transient_upstream_markers_match_only_channel_errors() {
+        // 真实的六条(2026-10-10/12 实测原文,都出现在消息开头)——必须命中
+        let real = [
+            r#"{"detail":{"message":"GPT-6: gpt-6.1-sol tool calling requires /v1/responses or configured Chat-to-Responses routing  (type: api_upstream_error) (request_id: x)"}}"#,
+            r#"{"detail":{"message":"GPT-6: gpt-6-sol reasoning effort must be low, medium, high, xhigh, or max  (type: api_upstream_error) (request_id: x)"}}"#,
+            r#"{"detail":{"message":"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low','medium'. (request_id: x)"}}"#,
+            r#"{"detail":{"message":"Unsupported value: 'none' is not supported with the 'gpt-6.1-sol-2026-09-29' model. Supported values are: 'low'. (request_id: x)"}}"#,
+            r#"{"detail":{"message":"Model resources are currently busy. Please try again later. (request_id: x)"}}"#,
+            r#"{"detail":{"message":"Insufficient quota available for instant inference. (type: deployment_disabled) (request_id: x)"}}"#,
+        ];
+        for body in real {
+            assert!(
+                is_transient_upstream_error(StatusCode::BAD_REQUEST, body.as_bytes())
+                    || is_transient_upstream_error(StatusCode::SERVICE_UNAVAILABLE, body.as_bytes()),
+                "应识别为渠道轮换: {body}"
+            );
+        }
+        // Anthropic 挂载会把内部错误再包一层 JSON 字符串
+        let wrapped = r#"{"type":"error","error":{"type":"api_error","message":"{\"detail\":{\"message\":\"GPT-6: gpt-6.1-sol tool calling requires /v1/responses or configured Chat-to-Responses routing\"}}"}}"#;
+        assert!(
+            is_transient_upstream_error(StatusCode::BAD_REQUEST, wrapped.as_bytes()),
+            "嵌套信封必须能取出网关消息"
+        );
+
+        // 伪造:把标记短语塞进客户端可控的位置 —— 一律不许命中
+        let forged = [
+            // 模型名里带短语,网关回显
+            r#"{"detail":{"message":"Invalid model 'x requires /v1/responses or configured Chat-to-Responses routing'."}}"#,
+            // 参数值里带短语
+            r#"{"detail":{"message":"Unsupported value: 'temperature' does not support 0.3 with this model. Note: reasoning effort must be low, medium, high, xhigh, or max"}}"#,
+            // 短语在别的字段
+            r#"{"detail":{"message":"Bad request","marker":"Model resources are currently busy"}}"#,
+            r#"{"error":{"message":"boom","hint":"Insufficient quota available for instant inference"}}"#,
+            // 正确文案后面接客户端文本
+            r#"{"detail":{"message":"Model resources are currently busy. Please try again later."}} trailing"#,
+            // 模型名槽位塞进超长/非法字符,凑不出模板
+            r#"{"detail":{"message":"GPT-6: a b c tool calling requires /v1/responses or configured Chat-to-Responses routing"}}"#,
+            // 普通客户端参数错误
+            r#"{"detail":{"message":"Invalid 'messages[0]': expected a string"}}"#,
+        ];
+        for body in forged {
+            assert!(
+                !is_transient_upstream_error(StatusCode::BAD_REQUEST, body.as_bytes()),
+                "伪造体不该判为渠道轮换: {body}"
+            );
+        }
+        // 状态码不对时看都不看 body:2xx 的 body 可能是未结束的 SSE 流
+        assert!(!is_transient_upstream_error(StatusCode::OK, real[0].as_bytes()));
+        assert!(!is_candidate_transient_status(StatusCode::OK));
+        assert!(!is_candidate_transient_status(StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    /// 网关渠道漂移:同一请求体第一次落到没配 chat→responses 路由的渠道,
+    /// 重发一次就成功 —— 代理必须把这次重试做掉,客户端不该看到这个 400。
+    async fn spawn_upstream(handler: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, handler).await;
+        });
+        format!("http://{addr}/api/v1")
+    }
+
+    async fn spawn_proxy(upstream_base: String) -> String {
+        let app = build_app(upstream_base, "*".to_string(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/api/v1")
+    }
+
+    fn chat_ok_body() -> Value {
+        json!({
+            "id": "chatcmpl-test", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+    }
+
+    #[tokio::test]
+    async fn transient_channel_error_is_retried_transparently() {
+        use std::sync::atomic::AtomicUsize;
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let upstream = Router::new().route(
+            "/api/v1/chat/completions",
+            post(move || {
+                let counter = counter.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"detail": {"message": "GPT-6: gpt-6.1-sol tool calling requires /v1/responses or configured Chat-to-Responses routing"}})),
+                        )
+                            .into_response()
+                    } else {
+                        (StatusCode::OK, Json(chat_ok_body())).into_response()
+                    }
+                }
+            }),
+        );
+        let proxy = spawn_proxy(spawn_upstream(upstream).await).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy}/responses"))
+            .json(&json!({"model": "gpt-6.1-sol", "input": "hi",
+                          "tools": [{"type": "function", "name": "f", "parameters": {"type": "object"}}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "重试后应把成功结果返回客户端");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "首个 400 应触发一次原样重试");
+    }
+
+    #[tokio::test]
+    async fn client_side_400_is_relayed_without_retry() {
+        use std::sync::atomic::AtomicUsize;
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let upstream = Router::new().route(
+            "/api/v1/chat/completions",
+            post(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail": {"message": "Invalid 'messages[0]': expected a string"}})),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let proxy = spawn_proxy(spawn_upstream(upstream).await).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy}/responses"))
+            .json(&json!({"model": "gpt-6.1-sol", "input": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "客户端参数错误不得重试");
+        let text = resp.text().await.unwrap();
+        assert!(text.contains("messages[0]"), "上游错误体必须原样透传: {text}");
+    }
+
     #[tokio::test]
     async fn chat_sse_transforms_to_responses_events() {
         let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
@@ -2164,8 +3135,8 @@ mod tests {
 
     #[test]
     fn gpt6_tools_force_reasoning_effort_none() {
-        // 该族在 chat 路由上 tools×reasoning 互斥,且「省略」按非 none 默认处理 →
-        // 带 tools(= Codex 的恒定形状)时只有显式 none 可用。
+        // 带 tools(= Codex 的恒定形状)时必须显式发一个该 id 接受的档位:
+        // 客户端给的值照发,缺失或不被接受才回落到 none(2026-10-10 复测:互斥已不成立)。
         // 工具用 Responses 扁平形(type/name/parameters),不是 chat 的嵌套 function 形。
         let with_tools = json!({
             "model": "gpt-6-luna",
@@ -2174,7 +3145,15 @@ mod tests {
             "reasoning": {"effort": "high"}
         });
         assert_eq!(responses_to_chat(&with_tools)["tools"][0]["function"]["name"], "dummy");
-        assert_eq!(responses_to_chat(&with_tools)["reasoning_effort"], "none");
+        assert_eq!(responses_to_chat(&with_tools)["reasoning_effort"], "high");
+        // 不被该 id 接受的档位(minimal)回落到 none,而不是发出去换 400
+        let minimal = json!({
+            "model": "gpt-6-luna",
+            "input": "hi",
+            "tools": [{"type": "function", "name": "dummy", "parameters": {"type": "object"}}],
+            "reasoning": {"effort": "minimal"}
+        });
+        assert_eq!(responses_to_chat(&minimal)["reasoning_effort"], "none");
 
         let no_effort = json!({
             "model": "gpt-6-luna",
@@ -2196,6 +3175,57 @@ mod tests {
         });
         assert_eq!(responses_to_chat(&gpt56)["tools"][0]["function"]["name"], "dummy");
         assert_eq!(responses_to_chat(&gpt56)["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn gpt6_sol_tool_turn_uses_its_own_effort_set() {
+        // Sol 与 luna 相反:拒收 "none"(400「must be low, medium, high, xhigh, or max」),
+        // 省略也不稳(2026-10-10 实测 4 次里 3 次 400),只有显式 low..max 稳定可用。
+        let tool = json!([{"type": "function", "name": "dummy", "parameters": {"type": "object"}}]);
+        let mk = |model: &str, effort: Option<&str>| -> Value {
+            let mut b = json!({"model": model, "input": "hi", "tools": tool.clone()});
+            if let Some(e) = effort {
+                b["reasoning"] = json!({"effort": e});
+            }
+            b
+        };
+        for model in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-unknown-alias"] {
+            // none / minimal 一律落到底限 low —— 发 none 必 400,该族没有关思考档。
+            assert_eq!(
+                responses_to_chat(&mk(model, Some("none")))["reasoning_effort"],
+                "low",
+                "{model}: none 必须换成该族的底限"
+            );
+            assert_eq!(responses_to_chat(&mk(model, Some("minimal")))["reasoning_effort"], "low");
+            // 省略也要显式补上。
+            assert_eq!(responses_to_chat(&mk(model, None))["reasoning_effort"], "low");
+            // 上游接受的档位原样保留。
+            assert_eq!(responses_to_chat(&mk(model, Some("high")))["reasoning_effort"], "high");
+            assert_eq!(responses_to_chat(&mk(model, Some("max")))["reasoning_effort"], "max");
+        }
+        // 不带工具时该族照常思考:合法档位透传,非法的省掉(而不是发出去换 400)。
+        let plain = json!({"model": "gpt-6.1-sol", "input": "hi", "reasoning": {"effort": "high"}});
+        assert_eq!(responses_to_chat(&plain)["reasoning_effort"], "high");
+        let plain_none = json!({"model": "gpt-6.1-sol", "input": "hi", "reasoning": {"effort": "none"}});
+        assert!(responses_to_chat(&plain_none).get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gpt6_sampling_stripped_only_where_the_upstream_refuses_it() {
+        let tool = json!([{"type": "function", "name": "dummy", "parameters": {"type": "object"}}]);
+        // Sol:带工具一律剥(4/4 400),不带工具保留(实测 200)。
+        let sol_tools = json!({"model": "gpt-6.1-sol", "input": "hi", "tools": tool.clone(),
+                               "temperature": 0.3, "top_p": 0.9});
+        let out = responses_to_chat(&sol_tools);
+        assert!(out.get("temperature").is_none() && out.get("top_p").is_none());
+        let sol_plain = json!({"model": "gpt-6.1-sol", "input": "hi", "temperature": 0.3});
+        assert_eq!(responses_to_chat(&sol_plain)["temperature"], 0.3);
+        // luna:只认 temperature 的默认值,两种形状都剥(沿用原行为)。
+        let luna_plain = json!({"model": "gpt-6-luna", "input": "hi", "temperature": 0.3});
+        assert!(responses_to_chat(&luna_plain).get("temperature").is_none());
+        // 其它模型不受影响。
+        let other = json!({"model": "glm-5.3", "input": "hi", "temperature": 0.3});
+        assert_eq!(responses_to_chat(&other)["temperature"], 0.3);
     }
 
     #[test]
