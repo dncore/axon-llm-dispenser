@@ -83,12 +83,13 @@ const GPT6_LIMITS_PATTERN: &str = "gpt-6";
 /// 而命中会写进跨请求的全局状态(把模型标记为不可用 → 触发工具模拟/跳过重试),
 /// 所以这里先取出网关自己的那句话,再要求它以网关的模板开头;模型名槽位单独校验
 /// 字符集与长度。回显到别的字段、或把短语塞进模型名的伪造体一律不命中。
-const TRANSIENT_UPSTREAM_PREFIXES: [&str; 5] = [
+const TRANSIENT_UPSTREAM_PREFIXES: [&str; 6] = [
     "Unsupported value: 'reasoning_effort' does not support 'none' with this model",
     "Model resources are currently busy",
     "Insufficient quota available for instant inference",
     "Unsupported value: 'none' is not supported with the '", // 后面接 <模型 id>' model
     "GPT-6: ",                                               // 后面接 <模型 id> + 固定后缀
+    "Provider returned ",                                    // 后面恰好接 3 位 4xx/5xx(流式 200 帧里的整句)
 ];
 /// `GPT-6: <id> …` 两种后缀(实测原文)。
 /// 注意:前缀里的 `GPT-6: <id>` 之后由 split_once(' ') 吃掉一个空格,
@@ -168,11 +169,88 @@ fn is_transient_upstream_error(status: StatusCode, body: &[u8]) -> bool {
                 };
                 return valid_model_slot(id) && GPT6_SUFFIXES.iter().any(|s| tail.starts_with(s));
             }
+            // `Provider returned 400` —— 网关流式响应的错误帧文案,除状态码外
+            // 无其它内容;多一个字都不认(整句锚定)。
+            "Provider returned " => {
+                let b = rest.as_bytes();
+                return b.len() == 3 && matches!(b[0], b'4' | b'5') && b.iter().all(u8::is_ascii_digit);
+            }
             // 其余为完整模板,不接任何客户端内容
             _ => return true,
         }
     }
     false
+}
+
+/// 在已缓冲字节里找 SSE 首帧的结束位置(空行),返回帧含结尾空行的字节数。
+fn sse_frame_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|p| p + 2)
+        .or_else(|| buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4))
+}
+
+/// 首帧是否是网关的「流式错误帧」。判定复用 is_transient_upstream_error 的
+/// 信封提取与锚定文案;400 只是模式开关(判据在文案上,与状态码无关)。
+fn is_transient_stream_error(frame: &[u8]) -> bool {
+    for line in frame.split(|b| *b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(rest) = line.strip_prefix(b"data:") else { continue };
+        if is_transient_upstream_error(StatusCode::BAD_REQUEST, rest) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 上游 200 + SSE:错误帧可能在响应头之后数秒才到(网关先等它自己上游超时,
+/// 实测 ~4.6s),而推理模型的首个真实 token 可能要等一分钟 —— 所以不等待、
+/// 不改字节,只在一个轻量适配器里观察首帧:判定落地即记账(错误帧→失败/标记,
+/// 真实帧或超长首帧→成功)。与 synapse 的 watchStreamVerdict 同款(2026-10-12:
+/// 该形态此前完全绕过重试/标记/模拟,pi 等一切流式客户端在窗口里只有 400)。
+fn watch_stream_verdict<S>(
+    inner: S,
+    health: Arc<Mutex<ModelHealth>>,
+    model: String,
+) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(inner), Vec::<u8>::new(), false, health, model),
+        |(mut inner, mut buf, mut done, health, model)| async move {
+            match futures_util::StreamExt::next(&mut inner).await {
+                Some(Ok(chunk)) => {
+                    if !done {
+                        if model.is_empty() {
+                            done = true;
+                        } else {
+                            buf.extend_from_slice(&chunk);
+                            let verdict = sse_frame_end(&buf)
+                                .map(|end| is_transient_stream_error(&buf[..end]))
+                                .or_else(|| (buf.len() > 4096).then_some(false));
+                            if let Some(bad) = verdict {
+                                done = true;
+                                buf.clear();
+                                if let Ok(mut h) = health.lock() {
+                                    if bad {
+                                        if h.note_failure(&model) {
+                                            eprintln!("[proxy] model marked unavailable after repeated channel-rotation failures (streamed frame): model={model}");
+                                        }
+                                    } else {
+                                        h.note_success(&model);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some((Ok(chunk), (inner, buf, done, health, model)))
+                }
+                Some(Err(e)) => Some((Err(e), (inner, buf, true, health, model))),
+                None => None,
+            }
+        },
+    )
 }
 
 /// 流式请求的「上游响应头 / 首字节」deadline。实测该网关会挂住流式请求 30~60s 零字节
@@ -1784,7 +1862,9 @@ async fn settle_upstream_errors(
     // content-type 必须在读 body 之前取:读了 body 之后响应本身就被消耗掉了。
     let mut content_type = read_content_type(&upstream);
     if status.is_success() {
-        if !model.is_empty() {
+        // SSE 的 2xx 不能立即记成功:错误帧可能数秒后才作为首帧到达,由
+        // watch_stream_verdict 在那一刻判定(过早记成功会把标记清掉)。
+        if !model.is_empty() && !content_type.contains("text/event-stream") {
             st.health.lock().expect("health lock").note_success(model);
         }
         return Ok((upstream, status, content_type));
@@ -2019,6 +2099,7 @@ async fn handle_responses(
             let s = upstream
                 .bytes_stream()
                 .map(|b| b.map_err(|e| reqwest::Error::without_url(e)));
+            let s = watch_stream_verdict(s, st.health.clone(), health_model.clone());
             let out = transform_chat_sse(s, model);
             return Response::builder()
                 .status(StatusCode::OK)
@@ -2057,7 +2138,9 @@ async fn handle_responses(
     if stream_req && content_type.contains("text/event-stream") {
         let s = upstream
             .bytes_stream()
-            .map(|b| b.map(|x| x).map_err(|e| axum::Error::new(e)));
+            .map(|b| b.map_err(|e| reqwest::Error::without_url(e)));
+        let s = watch_stream_verdict(s, st.health.clone(), health_model.clone())
+            .map(|b| b.map_err(|e| axum::Error::new(e)));
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/event-stream")
@@ -2837,6 +2920,8 @@ mod tests {
             r#"{"detail":{"message":"Unsupported value: 'none' is not supported with the 'gpt-6.1-sol-2026-09-29' model. Supported values are: 'low'. (request_id: x)"}}"#,
             r#"{"detail":{"message":"Model resources are currently busy. Please try again later. (request_id: x)"}}"#,
             r#"{"detail":{"message":"Insufficient quota available for instant inference. (type: deployment_disabled) (request_id: x)"}}"#,
+            // 流式 200 帧里的整句(网关先发 200 头、错误帧数秒后才到)
+            r#"{"error": {"message": "Provider returned 400", "type": "api_error", "http_status": 400}}"#,
         ];
         for body in real {
             assert!(
@@ -2867,6 +2952,9 @@ mod tests {
             r#"{"detail":{"message":"GPT-6: a b c tool calling requires /v1/responses or configured Chat-to-Responses routing"}}"#,
             // 普通客户端参数错误
             r#"{"detail":{"message":"Invalid 'messages[0]': expected a string"}}"#,
+            // Provider returned 整句之外加任何字都不认
+            r#"{"error": {"message": "Provider returned 400 with details"}}"#,
+            r#"{"error": {"message": "Provider returned 4000"}}"#,
         ];
         for body in forged {
             assert!(
@@ -2878,6 +2966,57 @@ mod tests {
         assert!(!is_transient_upstream_error(StatusCode::OK, real[0].as_bytes()));
         assert!(!is_candidate_transient_status(StatusCode::OK));
         assert!(!is_candidate_transient_status(StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    /// 流式 200 的错误帧:首帧判定异步落地(不等待、不改字节),跨分片也要认。
+    #[test]
+    fn streamed_error_frame_is_counted_and_passed_through() {
+        use futures_util::StreamExt;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // ① 错误帧(拆成两个分片到达)→ 记一次失败,字节原样。
+        let health = Arc::new(Mutex::new(ModelHealth::default()));
+        let chunks = vec![
+            Ok::<Bytes, reqwest::Error>(Bytes::from_static(
+                b"data: {\"error\": {\"message\": \"Provider returned 400\", \"type\": \"api_error\", ",
+            )),
+            Ok(Bytes::from_static(b"\"http_status\": 400}}\n\n")),
+        ];
+        let s = watch_stream_verdict(
+            futures_util::stream::iter(chunks),
+            health.clone(),
+            "gpt-6.1-sol".into(),
+        );
+        let out: Vec<_> = rt.block_on(s.collect());
+        assert_eq!(out.len(), 2, "字节必须原样透传");
+        assert!(out.iter().all(|c| c.is_ok()));
+        {
+            let mut h = health.lock().unwrap();
+            assert_eq!(h.failures.get("gpt-6.1-sol").copied().unwrap_or(0), 1);
+            assert!(!h.unavailable("gpt-6.1-sol")); // 阈值(2)内不标记
+        }
+
+        // ② 真实首帧 → 记成功(清掉既有标记)。
+        let mut h0 = ModelHealth::default();
+        h0.note_failure("gpt-6.1-sol");
+        h0.note_failure("gpt-6.1-sol");
+        let health2 = Arc::new(Mutex::new(h0));
+        assert!(health2.lock().unwrap().unavailable("gpt-6.1-sol"));
+        let clean = vec![
+            Ok::<Bytes, reqwest::Error>(Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl-1\",\"choices\":[]}\n\ndata: [DONE]\n\n",
+            )),
+        ];
+        let s2 = watch_stream_verdict(
+            futures_util::stream::iter(clean),
+            health2.clone(),
+            "gpt-6.1-sol".into(),
+        );
+        let _ = rt.block_on(s2.collect::<Vec<_>>());
+        assert!(
+            !health2.lock().unwrap().unavailable("gpt-6.1-sol"),
+            "真实首帧应记为成功并清除标记"
+        );
     }
 
     /// 网关渠道漂移:同一请求体第一次落到没配 chat→responses 路由的渠道,
