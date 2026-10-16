@@ -53,7 +53,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ 31842f55 · 143 models
+// canonical: gist b8931f4c @ b74d6798 · 144 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -187,6 +187,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "gemini-3.6-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "gemini-3.7-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "gemini-3.8-flash": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "gemini-4-argon": { contextWindow: 1048576, maxTokens: 65536, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   "grok-4.6": { name: "Grok 4.6 (xAI)", contextWindow: 500000, maxTokens: 500000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   "grok-4.7": { name: "Grok 4.7 (xAI)", contextWindow: 500000, maxTokens: 500000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   "hy3-preview": { contextWindow: 262144, maxTokens: 16384, reasoning: false },
