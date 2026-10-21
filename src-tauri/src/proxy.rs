@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -28,6 +28,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const DEFAULT_PORT: u16 = 17321;
+
+/// 客户端请求体上限。axum 的 `Json` 提取器内部走 `Bytes`,不显式设置时默认只有 2 MiB。
+/// Codex 每回合发送全量历史,1M 上下文模型(如 deepseek-v4.1-flash)的请求可达数 MiB,
+/// 带图片附件(base64)时更大 —— 用默认值会让本代理先于网关拒收,返回
+/// 413 `Failed to buffer the request body: length limit exceeded`。
+/// 与网关侧 `limits.max_body_bytes`(synapse 默认 64 MiB)对齐,代理不再是链路最紧的一环。
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// OpenAI-compatible function name 最大长度(chat 上游校验 ^[a-zA-Z0-9_-]+$,且有长度上限)。
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 /// 走 Responses→Chat 转换的模型匹配串:`|` 分隔的大小写不敏感子串,**`*` = 全部转换**。
@@ -1742,6 +1749,7 @@ pub fn build_app(upstream_base_url: String, convert_pattern: String, models_json
         .route("/api/v1/models", get(handle_models))
         .route("/responses", post(handle_responses))
         .route("/api/v1/responses", post(handle_responses))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
 
@@ -3112,6 +3120,33 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "客户端参数错误不得重试");
         let text = resp.text().await.unwrap();
         assert!(text.contains("messages[0]"), "上游错误体必须原样透传: {text}");
+    }
+
+    /// axum 的 `Json` 默认只收 2 MiB。Codex 在 1M 上下文模型上会把请求推到数 MiB,
+    /// 代理必须放行,否则客户端看到的是本代理的 413 而不是网关的错误。
+    #[tokio::test]
+    async fn long_context_request_is_not_rejected_by_body_limit() {
+        let upstream = Router::new().route(
+            "/api/v1/chat/completions",
+            post(|| async { (StatusCode::OK, Json(chat_ok_body())).into_response() }),
+        );
+        let proxy = spawn_proxy(spawn_upstream(upstream).await).await;
+        let resp = reqwest::Client::new()
+            .post(format!("{proxy}/responses"))
+            .json(&json!({
+                "model": "deepseek-v4.1-flash",
+                "input": "a".repeat(3 * 1024 * 1024),
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "3 MiB 请求体必须被代理接收(axum 默认 2 MiB 上限会在这里返回 413)"
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
