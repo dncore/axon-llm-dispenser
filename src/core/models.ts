@@ -53,7 +53,7 @@ export const DEFAULT_COMPAT: CompatConfig = {
 };
 
 // @model-meta:begin — 由 scripts/sync-model-meta.mjs 从 canonical gist 生成,勿手改
-// canonical: gist b8931f4c @ b74d6798 · 144 models
+// canonical: gist b8931f4c @ a9632411 · 145 models
 const KNOWN_MODELS: Record<string, ModelMeta> = {
   "deepseek-chat": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
   "deepseek-coder": { contextWindow: 128000, maxTokens: 8192, reasoning: false, compat: { requiresReasoningContentOnAssistantMessages: true }, deprecated: true },
@@ -141,6 +141,7 @@ const KNOWN_MODELS: Record<string, ModelMeta> = {
   "kimi-k2.8": { name: "Kimi K2.8 Preview", contextWindow: 1048576, maxTokens: 32768, reasoning: true, input: ["text", "image"], compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "kimi-lastest": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "kimi-k3": { name: "Kimi K3 (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 128000, reasoning: true, input: ["text", "image"], cost: { input: 21, output: 108, cacheRead: 2.1, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
+  "kimi-k3.1-pro": { name: "Kimi K3.1 Pro (Moonshot 旗舰)", contextWindow: 1048576, maxTokens: 131072, reasoning: true, input: ["text", "image"], cost: { input: 13, output: 68, cacheRead: 1.3, cacheWrite: 0 }, compat: { supportsReasoningEffort: true }, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" } },
   "abab6.5s-chat": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
   "abab7-chat-preview": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
   "minimax-m1": { contextWindow: 245760, maxTokens: 16384, reasoning: false },
