@@ -4,7 +4,7 @@
 
 <h1 align="center">Axon LLM dispenser</h1>
 
-<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix、Grok 等,持续扩展)</p>
+<p align="center">把<strong>你自有的 OpenAI 兼容网关</strong>(任意 <code>base_url</code> + <code>api_key</code>)一键配置到各 Agent 工具(Codex、Claude Code、dsh、Pi、omp、Reasonix、Grok、WorkBuddy、CodeBuddy、Hermes 等,持续扩展)</p>
 
 <p align="center"><em>关于命名：<strong>Axon（轴突）</strong>是神经元的一部分，由神经细胞的细胞本体向外延伸突起，是神经系统中主要的神经信号传递渠道。本项目作为 provider 鉴权分配器，行为非常接近轴突的生物学意义，因此命名 Axon。</em></p>
 
@@ -41,7 +41,7 @@
 - **过滤 Doubao 系模型**开关（默认开启），拉取与生成配置均不含
 - 单行移除、实时数量统计
 
-### 工具接入（8 个 Agent）
+### 工具接入（11 个 Agent）
 
 | 工具 | 写入位置 |
 |------|------|
@@ -53,8 +53,11 @@
 | **Oh My Pi (omp)** | `~/.omp/agent/models.yml`（`providers`）+ `config.yml`（`modelRoles.default`） |
 | **OpenCode** | `~/.config/opencode/opencode.json`（`provider` 块 + 默认 `model`）+ `~/.local/share/opencode/auth.json`（密钥，0600，官方 `opencode auth login` 同款格式） |
 | **Grok** | `~/.grok/config.toml` `[model_providers.<name>]`（api_key 明文、chat_completions）+ 每模型 `[model.<id>]` 块（含点号 ID 引号键，context_window 驱动自动压缩）+ `[models]` default；官方 grok 模型保留走官方通道（混合模式，无需 `grok logout`） |
+| **WorkBuddy** | `~/.workbuddy/models.json` 自定义模型条目（顶层裸数组）：`id`/`name`/`vendor`/`apiKey`（明文）/`maxInputTokens`/`maxOutputTokens`/`url`（完整 `/chat/completions`）/`supportsToolCall`/`supportsImages`/`supportsReasoning`，另写客户端支持的 `thinkingLevelMap` + `reasoning{supportedEfforts, canDisableThinking}`（缺这两项客户端会放开所有思考档位，网关侧易 400）；保存后 1 秒内热加载 |
+| **CodeBuddy** | `~/.codebuddy/models.json` 对象信封（`models` + `availableModels`），条目 schema 同上；`availableModels` 已存在且非空时自动追加本次模型 id（空/缺省 = 下拉显示全部）；项目级 `<workspace>/.codebuddy/models.json` 优先于用户级 |
+| **Hermes** | `~/.hermes/config.yaml` 的 `providers.<name>`（`base_url` + `api_key` 明文 + `transport: chat_completions`（已有 `api_mode` 则沿用）+ 每模型 `context_length`、`supports_vision`）+ `model.provider` / `model.default`；`auxiliary.*` 各槽位与 `fallback_providers` 不动 |
 
-每个 Agent 有**两个状态图标**（均可点击重检）：
+每个 Agent 有**两个状态图标**（均可点击重检；WorkBuddy / CodeBuddy 是桌面应用、没有 CLI，安装图标置灰不参与检测）：
 
 - 📦 **安装检测**：绿=已检测到 CLI，灰=未检测到（PATH + 各官方安装方式的常见目录，兼容 macOS/Windows/Linux）
 - 🎚 **配置一致性**：绿=写入的 provider 与当前网关 baseUrl/Key 一致，橙=不一致，灰=未配置；「配置」操作成功后自动重检
@@ -63,12 +66,13 @@
 
 ### 刷新模型（仅更新模型列表）
 
-除 Claude Code（无模型列表）外的接入工具（Codex / dsh / omp / Reasonix / OpenCode / Grok）各有一个「**刷新**」按钮，
+除 Claude Code（无模型列表）外的接入工具（Codex / dsh / omp / Reasonix / OpenCode / Grok / WorkBuddy / CodeBuddy / Hermes）各有一个「**刷新**」按钮，
 标题行还有一个「**刷新**」= 刷新全部模型列表（一次刷新所有已接入的 Agent，未接入的自动跳过，单个失败不中断）：
 
 - 只写**模型派生部分**，`base_url` / API Key / 默认模型 / provider 元数据一概不动：
   Codex 只写 `models.json`（不碰 config.toml、不重启转换代理）；dsh / omp 只改 `providers.<name>` 的 `models`；
-  Reasonix 只改 `models` + `model_overrides`；OpenCode 只改 `provider.<name>.models`；Grok 只改 `[model.<id>]` 块（default 失效时修正）
+  Reasonix 只改 `models` + `model_overrides`；OpenCode 只改 `provider.<name>.models`；Grok 只改 `[model.<id>]` 块（default 失效时修正）；
+  WorkBuddy / CodeBuddy 只合并模型条目（`url` / `apiKey` 沿用文件现值）；Hermes 只改 `providers.<name>.models`（`model.default` 失效时修正）
 - 模型来源 = 左侧**当前模型列表**（Doubao 过滤开关生效）；需要网关最新列表时先点模型卡片标题行的「刷新」拉取
 - 条目按 id 识别：新增写入、已有条目只更新管理字段、**网关已下架的条目移除**（非本工具写入的条目/模型块原样保留）
 - **内容无变化时不写盘、不产生备份**；写入前的确认框会列出具体变更
@@ -85,7 +89,7 @@
 - 所有写入为**合并式补丁**：只 upsert 本工具管理的键——块内你自己加的键、注释、模型条目内的自定义字段（如 per-model 参数）原样保留；
   其他 provider、顶层键、其他 `[model.*]` 块一概不动
 - 模型条目按 id 识别合并；归属本工具的条目在网关下架后会随同步移除，**非本工具写入的条目/模型块一律保留**
-  （Codex `models.json` 按 description 前缀识别归属，Grok 按 `model_provider` 识别，其余按模型列表归属）
+  （Codex `models.json` 按 description 前缀识别归属，Grok 按 `model_provider` 识别，WorkBuddy / CodeBuddy 按条目 `vendor` 识别归属——**同 id 的外部条目跳过不覆盖**，Hermes 按 `providers.<name>` 识别归属，其余按模型列表归属）
 - **归属与残留清理**：Codex 目录条目按 `<provider 名>: …` 前缀 + **本 app 家族署名尾**（`— openai-compatible gateway` / `— /responses OK` / `— /responses not selected`）判定归属。**三个条件同时满足**才清理：① 署名属本 app 家族 ② 该 provider 名既不是当前值、也不在 `knownProviders` 里（典型：那套配置已被删）③ 该模型已不在网关模型列表。同时移除 config.toml 里对应的 `[model_providers.<name>]` 残留段。用户手写、或没有本 app 署名的条目/段一概不动
 - 全量「配置」与「刷新」遵循同一套规则；密钥文件（`.env` / `auth.json` / `.credentials.yaml`）不备份、固定 0600
 

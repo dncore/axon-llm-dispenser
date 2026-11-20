@@ -3,13 +3,15 @@
 import * as bridge from "./bridge";
 import { AGENT_CLIS } from "./core/agents";
 import { buildResolvedModels, deriveKeyRef, gatewayOverlayFor, gatewayThinkingDisabled, isDeepseekModel, type ResolvedModel } from "./core/models";
-import { escapeRegExp, generateToken, timestamp } from "./core/util";
+import { escapeRegExp, generateToken, maskToken, timestamp } from "./core/util";
 import { BACKUP_KEEP_AUTO, pickStaleAutoBackups } from "./core/backup";
 import { patchCodexConfigToml, patchCodexCatalog, codexCatalogPlan, removeModelProviderSections, parseCodexStatus, planCodexListed, codexProxyBaseUrl, codexProxyNeeded, CODX_PROXY_CONVERT_PATTERN, CODX_PROXY_DEFAULT_PORT, CODX_MAX_LISTED_MODELS, type CodexListedPlan } from "./core/codex";
 import { patchReasonixProvider, patchReasonixModels, patchReasonixServeAuth, parseReasonixStatus } from "./core/reasonix";
 import { patchGrokConfigToml, patchGrokModels, parseGrokStatus } from "./core/grok";
 import { patchDshProvider, patchDshProviderModels, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml, parseDshStatus, type DshModelEntry } from "./core/dsh";
 import { patchOpenCodeConfig, patchOpenCodeModels, patchOpenCodeAuth, parseOpenCodeStatus } from "./core/opencode";
+import { chatCompletionsUrl, extractBuddyProvider, parseBuddyStatus, patchBuddyModelList, patchBuddyModels, type BuddyKind } from "./core/buddy";
+import { extractHermesProvider, parseHermesStatus, patchHermesConfig, patchHermesModelList } from "./core/hermes";
 import { patchOmpModelsYml, patchOmpModelsList, patchOmpConfigYml, parseOmpStatus, ompBaseUrl } from "./core/omp";
 import {
   compareAgentConfig,
@@ -120,6 +122,17 @@ export async function detectAgentConfig(tool: string, cfg: bridge.AppConfig): Pr
       const grokH = await bridge.grokHome();
       const configPath = await bridge.joinPath(grokH, "config.toml");
       found = extractGrokProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
+      break;
+    }
+    case "workbuddy":
+    case "codebuddy": {
+      const modelsPath = await buddyModelsPath(tool as BuddyKind);
+      found = extractBuddyProvider(await bridge.readFileOrEmpty(modelsPath), buddyVendor(cfg));
+      break;
+    }
+    case "hermes": {
+      const configPath = await bridge.joinPath(await bridge.hermesHome(), "config.yaml");
+      found = extractHermesProvider(await bridge.readFileOrEmpty(configPath), cfg.provider);
       break;
     }
     case "pi": {
@@ -807,6 +820,186 @@ export async function opencodeStatus(cfg: bridge.AppConfig): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// WorkBuddy / CodeBuddy(models.json)
+// ---------------------------------------------------------------------------
+
+/** 条目归属标记:客户端把 vendor 当「供应商」展示名,也是本工具改写/统计的唯一依据。 */
+function buddyVendor(cfg: bridge.AppConfig): string {
+  return cfg.displayName || cfg.provider;
+}
+
+/** models.json 路径:WorkBuddy → ~/.workbuddy,CodeBuddy → ~/.codebuddy(客户端 dataFolderName)。 */
+async function buddyModelsPath(kind: BuddyKind): Promise<string> {
+  const dir = kind === "workbuddy" ? ".workbuddy" : ".codebuddy";
+  return await bridge.joinPath(await bridge.homeDir(), dir, "models.json");
+}
+
+const BUDDY_LABEL: Record<BuddyKind, string> = { workbuddy: "WorkBuddy", codebuddy: "CodeBuddy" };
+
+export async function configureBuddy(kind: BuddyKind, cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const label = BUDDY_LABEL[kind];
+  const path = await buddyModelsPath(kind);
+  const resolved = buildResolvedModels(modelIds);
+  const original = await bridge.readFileOrEmpty(path);
+  const patched = patchBuddyModels(original, {
+    kind,
+    vendor: buddyVendor(cfg),
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    models: resolved,
+    path,
+  });
+  // 内容无变化则不写盘、不产生备份
+  const written = patched.text !== original ? await bridge.writeWithBackup(path, patched.text) : null;
+
+  const lines = [
+    `models.json: ${written ? written.path : "无变化,未写入"}`,
+    `  ${patched.changes.join(", ") || "无变化"}`,
+    `条目 url: ${chatCompletionsUrl(cfg.baseUrl)}(客户端要求完整 /chat/completions 地址)`,
+    `API Key 明文写入每条目(官方 schema 要求实际密钥值,不支持环境变量名)`,
+    `${label}:1 秒内热加载 models.json,无需重启`,
+  ];
+  if (kind === "codebuddy") {
+    lines.push("availableModels: 已存在且非空时自动追加本次模型 id(空/缺省 = 下拉显示全部)");
+  }
+  if (kind === "workbuddy") {
+    const legacy = await bridge.joinPath(await bridge.homeDir(), ".codebuddy", "models.json");
+    if (await bridge.exists(legacy)) {
+      lines.push(`注意: 旧路径 ${legacy} 也存在(WorkBuddy 会读它),本工具只写 ~/.workbuddy/models.json`);
+    }
+  }
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
+  return { changes: patched.changes, lines };
+}
+
+export async function buddyStatus(kind: BuddyKind, cfg: bridge.AppConfig): Promise<string[]> {
+  const label = BUDDY_LABEL[kind];
+  const path = await buddyModelsPath(kind);
+  const vendor = buddyVendor(cfg);
+  const s = parseBuddyStatus(await bridge.readFileOrEmpty(path), vendor);
+  const lines = [
+    `${label} 配置: ${path}`,
+    `models.json: ${s.exists ? `存在(顶层${s.shape === "array" ? "裸数组" : "对象信封"})` : "缺失(首次「配置」时创建)"}`,
+    `本工具条目(vendor=${vendor}): ${s.managed} 个`,
+    `  base: ${s.baseUrl ?? "(无)"}(条目内写完整 /chat/completions)`,
+    `  API Key: ${s.apiKeySet && s.apiKey ? `${maskToken(s.apiKey)}(明文存于条目)` : "(未写入)"}`,
+  ];
+  if (kind === "codebuddy") {
+    lines.push(`availableModels: ${s.availableModels === null ? "未设置(下拉显示全部模型)" : `${s.availableModels} 个 id(非空 = 只显示这些)`}`);
+  }
+  if (s.foreignSameId > 0) {
+    lines.push(`警告: ${s.foreignSameId} 个模型 id 被同 id 的外来条目占用,客户端可能用的是那一条`);
+  }
+  if (kind === "workbuddy") {
+    const legacy = await bridge.joinPath(await bridge.homeDir(), ".codebuddy", "models.json");
+    lines.push(`旧路径 ${legacy}: ${(await bridge.exists(legacy)) ? "存在(WorkBuddy 也会读,本工具不写)" : "不存在"}`);
+  }
+  lines.push("客户端只支持 OpenAI 兼容协议;如网关需要自定义路径,在客户端里另开「自定义协议」开关");
+  return lines;
+}
+
+/** 刷新:只合并模型条目,url / apiKey 沿用文件现值。 */
+export async function planRefreshBuddy(kind: BuddyKind, cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const label = BUDDY_LABEL[kind];
+  const path = await buddyModelsPath(kind);
+  const r = patchBuddyModelList(await bridge.readFileOrEmpty(path), {
+    kind,
+    vendor: buddyVendor(cfg),
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    models: buildResolvedModels(modelIds),
+    path,
+  });
+  if (r.managed === 0) return skipPlan(label, `models.json 无本工具条目(vendor=${buddyVendor(cfg)},先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(label);
+  return {
+    agent: label,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(path, r.text);
+      return [`models.json 已更新(${written.path})${backupSuffix(written)}`];
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Hermes(~/.hermes/config.yaml)
+// ---------------------------------------------------------------------------
+
+function toHermesModels(modelIds: string[]): { id: string; contextLength: number; supportsVision: boolean }[] {
+  return buildResolvedModels(modelIds).map((m) => ({
+    id: m.id,
+    contextLength: m.contextWindow,
+    supportsVision: m.input.includes("image"),
+  }));
+}
+
+export async function configureHermes(cfg: bridge.AppConfig, modelIds: string[]): Promise<FlowResult> {
+  const home = await bridge.hermesHome();
+  const configPath = await bridge.joinPath(home, "config.yaml");
+  const resolved = buildResolvedModels(modelIds);
+  const original = await bridge.readFileOrEmpty(configPath);
+  const patched = patchHermesConfig(original, {
+    providerName: cfg.provider,
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    defaultModel: pickDefaultModel(resolved.map((m) => m.id), cfg.defaultModel),
+    models: toHermesModels(modelIds),
+  });
+  // 内容无变化则不写盘、不产生备份
+  const written = patched.text !== original ? await bridge.writeWithBackup(configPath, patched.text) : null;
+
+  const lines = [
+    `config.yaml: ${written ? written.path : "无变化,未写入"}`,
+    `  ${patched.changes.join(", ") || "无变化"}`,
+    `providers.${cfg.provider}: base_url + api_key 明文 + transport=chat_completions`,
+    `model.provider/default 已指向本网关(新会话生效;当前会话内用 /model 切换)`,
+    `只改主模型槽位:auxiliary 各槽位与 fallback_providers 保持原样`,
+    ...patched.warnings,
+  ];
+  const backupNote = backupLine(written);
+  if (backupNote) lines.push(backupNote);
+  return { changes: patched.changes, lines };
+}
+
+export async function hermesStatus(cfg: bridge.AppConfig): Promise<string[]> {
+  const home = await bridge.hermesHome();
+  const configPath = await bridge.joinPath(home, "config.yaml");
+  const s = parseHermesStatus(await bridge.readFileOrEmpty(configPath), cfg.provider);
+  const cli = await detectAgentCli("hermes");
+  return [
+    `Hermes home: ${home}`,
+    `config.yaml: ${s.configExists ? "存在" : "缺失(首次「配置」时创建)"}`,
+    `providers.${cfg.provider}: ${s.providerConfigured ? `已配置(${s.modelCount} 个模型)` : "未配置"}`,
+    `  base_url: ${s.baseUrl ?? "(无)"}`,
+    `  api_key: ${s.apiKeySet ? "已写入(明文)" : s.credentialVia === "key_env" ? "由 key_env 提供(不在文件里)" : s.credentialVia === "key_cmd" ? "由 key_cmd 提供" : "(未写入)"}`,
+    `  传输: ${s.wireMode ?? "(未设置,默认 chat_completions)"}`,
+    `model.provider: ${s.defaultProvider ?? "(未设置)"}`,
+    `model.default: ${s.defaultModel ?? "(未设置)"}`,
+    `model.base_url: ${s.modelBaseUrl ? s.modelBaseUrl : "(空,由 provider 段提供端点)"}`,
+    `hermes CLI: ${cli ?? "未检测到(官方安装器装到 ~/.local/bin/hermes)"}`,
+  ];
+}
+
+/** 刷新:只合并 providers.<name>.models,base_url / api_key / model.* 不动。 */
+export async function planRefreshHermes(cfg: bridge.AppConfig, modelIds: string[]): Promise<ModelsRefreshPlan> {
+  const agent = "Hermes";
+  const configPath = await bridge.joinPath(await bridge.hermesHome(), "config.yaml");
+  const r = patchHermesModelList(await bridge.readFileOrEmpty(configPath), cfg.provider, toHermesModels(modelIds), cfg.defaultModel);
+  if (!r.providerFound) return skipPlan(agent, `config.yaml 无 providers.${cfg.provider}(先跑「配置」)`);
+  if (r.changes.length === 0) return noChangePlan(agent);
+  return {
+    agent,
+    changes: r.changes,
+    apply: async () => {
+      const written = await bridge.writeWithBackup(configPath, r.text);
+      return [`config.yaml 已更新(${written.path})${backupSuffix(written)}`];
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 备份还原(所有工具)
 // ---------------------------------------------------------------------------
 
@@ -836,6 +1029,18 @@ export async function getRestoreTargets(tool: string): Promise<RestoreTarget[]> 
         const grokH = await bridge.grokHome();
         return [{ id: "grok-config", label: "Grok config.toml", path: await bridge.joinPath(grokH, "config.toml") }];
       }
+    case "workbuddy":
+      return [{ id: "workbuddy-models", label: "WorkBuddy models.json", path: await buddyModelsPath("workbuddy") }];
+    case "codebuddy":
+      return [{ id: "codebuddy-models", label: "CodeBuddy models.json", path: await buddyModelsPath("codebuddy") }];
+    case "hermes":
+      return [
+        {
+          id: "hermes-config",
+          label: "Hermes config.yaml",
+          path: await bridge.joinPath(await bridge.hermesHome(), "config.yaml"),
+        },
+      ];
     case "claude":
       return [{ id: "claude-settings", label: "Claude settings.json", path: await bridge.joinPath(claudeH, "settings.json") }];
     case "pi":
@@ -1116,6 +1321,9 @@ export async function planRefreshAll(
     await planRefreshReasonix(cfg, modelIds),
     await planRefreshOpenCode(cfg, modelIds),
     await planRefreshGrok(cfg, modelIds),
+    await planRefreshBuddy("workbuddy", cfg, modelIds),
+    await planRefreshBuddy("codebuddy", cfg, modelIds),
+    await planRefreshHermes(cfg, modelIds),
   ];
 }
 

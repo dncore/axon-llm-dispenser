@@ -214,6 +214,22 @@ const AGENTS: &[AgentDef] = &[
             InstallMethodDef::fallback("winget-tui", "winget (TUI, 无 npm 时)", "winget install --id SST.opencode --accept-source-agreements --accept-package-agreements", None),
         ],
     },
+    AgentDef {
+        name: "hermes",
+        label: "Hermes",
+        // 官方自带 `hermes update`(git 检出场景走 git 快进)
+        native_update: &["update"],
+        version_args: &["--version"],
+        // 官方只发布安装器脚本(装到 ~/.local/bin);PyPI / brew 属于官方明确不支持的发行方式
+        npm_package: None,
+        winget_package: None,
+        install_methods: &[InstallMethodDef::m(
+            "curl",
+            "官方脚本 (curl)",
+            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            Some("iex (irm https://hermes-agent.nousresearch.com/install.ps1)"),
+        )],
+    },
 ];
 
 fn find_def(name: &str) -> Option<&'static AgentDef> {
@@ -1827,7 +1843,7 @@ mod tests {
     }
 
     /// 无 npm 发行渠道的 agent(官方安装器独占):latest 检查跳过,仅显示本地版本。
-    const NO_NPM_LATEST: &[&str] = &["grok"];
+    const NO_NPM_LATEST: &[&str] = &["grok", "hermes"];
 
     #[test]
     fn registry_has_install_methods_for_all_agents() {

@@ -131,6 +131,9 @@ function build(): void {
       toolCard("reasonix", "Reasonix", ["config", "refresh", "status", "token", "authoff", "restore"]),
       toolCard("opencode", "OpenCode", ["config", "refresh", "status", "restore"]),
       toolCard("grok", "Grok", ["config", "refresh", "status", "restore"]),
+      toolCard("workbuddy", "WorkBuddy", ["config", "refresh", "status", "restore"]),
+      toolCard("codebuddy", "CodeBuddy", ["config", "refresh", "status", "restore"]),
+      toolCard("hermes", "Hermes", ["config", "refresh", "status", "restore"]),
     ]),
     h("div", { class: "card-overlay" }, []),
   ]);
@@ -230,6 +233,14 @@ function stateIcon(name: string, id: string, cls: string): SVGSVGElement {
   const el = icon(name);
   el.id = id;
   el.classList.add("agent-state", cls);
+  return el;
+}
+
+/** 安装检测图标:CLI 工具参与 PATH/目录检测;桌面应用(WorkBuddy/CodeBuddy)只置灰提示。 */
+function installIcon(id: string): SVGSVGElement {
+  if (!DESKTOP_TOOLS.has(id)) return stateIcon("package", `agent-dot-${id}`, "checking");
+  const el = stateIcon("package", `agent-dot-${id}`, "desktop");
+  el.setAttribute("title", "桌面应用(无 CLI,不做安装检测)");
   return el;
 }
 
@@ -557,6 +568,9 @@ const ACTIONS: Record<string, { label: string; title: string }> = {
   authoff: { label: "关闭", title: "关闭鉴权" },
 };
 
+/** 桌面应用(无 CLI 可检测):不参与安装/升级检测,只做配置一致性检测。 */
+const DESKTOP_TOOLS = new Set(["workbuddy", "codebuddy"]);
+
 function toolCard(id: string, name: string, actions: string[], extra?: El | null): El {
   const buttons = actions.map((a) => {
     const act = ACTIONS[a];
@@ -569,7 +583,8 @@ function toolCard(id: string, name: string, actions: string[], extra?: El | null
   return h("div", { class: "tool" }, [
     h("div", { class: "tool-main" }, [
       h("div", { class: "tool-left" }, [
-        stateIcon("package", `agent-dot-${id}`, "checking"), // 安装状态:包裹盒
+        // 安装状态:包裹盒(桌面应用无 CLI,置灰且不参与检测)
+        installIcon(id),
         stateIcon("sliders", `agent-cfg-dot-${id}`, "checking"), // 配置一致性:滑杆
         h("span", { class: "tool-name" }, [name]),
         // Pi 扩展角标放名字之后,避免把 agent 名与其他行横向错位
@@ -893,9 +908,9 @@ async function detectAgentConfigOne(tool: string): Promise<void> {
   syncOnboarding();
 }
 
-/** 启动后异步检测各 agent 的配置一致性(方形徽标)。 */
+/** 启动后异步检测各 agent 的配置一致性(方形徽标)。桌面应用没有 CLI,但一样有配置徽标。 */
 async function detectAgentConfigs(): Promise<void> {
-  for (const tool of Object.keys(AGENT_CLIS)) {
+  for (const tool of [...Object.keys(AGENT_CLIS), ...DESKTOP_TOOLS]) {
     const dot = document.getElementById(`agent-cfg-dot-${tool}`);
     dot?.addEventListener("click", () => void detectAgentConfigOne(tool)); // 点击徽标强制重检
     void detectAgentConfigOne(tool);
@@ -1842,6 +1857,67 @@ function bind(): void {
 
   $("btn-grok-restore").addEventListener("click", () => openRestoreModal("grok"));
 
+  // WorkBuddy / CodeBuddy:models.json 自定义模型条目(vendor 作为归属标记)
+  const buddyConfig = (kind: "workbuddy" | "codebuddy", label: string) => () =>
+    confirmDialog(
+      `将更新 ${label} 的自定义模型配置:在 ~/.${kind}/models.json 写入 vendor 为本工具显示名的模型条目` +
+        `(完整 /chat/completions 地址 + 明文 API Key + 思考档位),其它条目原样保留;` +
+        `同 id 的外部条目会跳过(不覆盖你自己写的);文件被外部改动过时自动备份(.bak-*),确认?`,
+      () => {
+        void run(`${label} 配置`, async () => {
+          readFields();
+          if (!validateProvider()) return;
+          const ids = await ensureModels();
+          if (!ids) return;
+          const r = await flows.configureBuddy(kind, config, ids);
+          log(r.lines);
+          void detectAgentConfigOne(kind);
+        });
+      },
+    );
+
+  $("btn-workbuddy-config").addEventListener("click", buddyConfig("workbuddy", "WorkBuddy"));
+  $("btn-codebuddy-config").addEventListener("click", buddyConfig("codebuddy", "CodeBuddy"));
+  $("btn-workbuddy-status").addEventListener("click", () =>
+    run("WorkBuddy 状态", async () => {
+      readFields();
+      log(await flows.buddyStatus("workbuddy", config));
+    }),
+  );
+  $("btn-codebuddy-status").addEventListener("click", () =>
+    run("CodeBuddy 状态", async () => {
+      readFields();
+      log(await flows.buddyStatus("codebuddy", config));
+    }),
+  );
+  $("btn-workbuddy-restore").addEventListener("click", () => openRestoreModal("workbuddy"));
+  $("btn-codebuddy-restore").addEventListener("click", () => openRestoreModal("codebuddy"));
+
+  $("btn-hermes-config").addEventListener("click", () =>
+    confirmDialog(
+      "将更新 Hermes 的接入配置:写入 config.yaml 的 providers.<name>(base_url / api_key 明文 / chat_completions + 每模型 context_length、supports_vision)," +
+        "并把 model.provider / model.default 指向本网关;auxiliary 各槽位与 fallback_providers 不动;原文件自动备份(.bak-*),确认?",
+      () => {
+        void run("Hermes 配置", async () => {
+          readFields();
+          if (!validateProvider()) return;
+          const ids = await ensureModels();
+          if (!ids) return;
+          const r = await flows.configureHermes(config, ids);
+          log(r.lines);
+          void detectAgentConfigOne("hermes");
+        });
+      },
+    ),
+  );
+  $("btn-hermes-status").addEventListener("click", () =>
+    run("Hermes 状态", async () => {
+      readFields();
+      log(await flows.hermesStatus(config));
+    }),
+  );
+  $("btn-hermes-restore").addEventListener("click", () => openRestoreModal("hermes"));
+
   $("btn-claude-config").addEventListener("click", () => openClaudeConfigModal());
 
   $("btn-claude-status").addEventListener("click", () =>
@@ -1983,6 +2059,9 @@ function bind(): void {
   $("btn-reasonix-refresh").addEventListener("click", refreshOne("reasonix", "Reasonix", flows.planRefreshReasonix));
   $("btn-opencode-refresh").addEventListener("click", refreshOne("opencode", "OpenCode", flows.planRefreshOpenCode));
   $("btn-grok-refresh").addEventListener("click", refreshOne("grok", "Grok", flows.planRefreshGrok));
+  $("btn-workbuddy-refresh").addEventListener("click", refreshOne("workbuddy", "WorkBuddy", (cfg, ids) => flows.planRefreshBuddy("workbuddy", cfg, ids)));
+  $("btn-codebuddy-refresh").addEventListener("click", refreshOne("codebuddy", "CodeBuddy", (cfg, ids) => flows.planRefreshBuddy("codebuddy", cfg, ids)));
+  $("btn-hermes-refresh").addEventListener("click", refreshOne("hermes", "Hermes", flows.planRefreshHermes));
 
   // 全局:刷新全部已接入 agent 的模型列表(单点失败不中断)
   $("btn-refresh-all-models").addEventListener("click", () =>
@@ -2014,7 +2093,7 @@ function bind(): void {
       if (!ok) return;
       log(await flows.applyRefreshPlans(plans));
       await persistConfig().catch(() => {});
-      for (const a of ["codex", "dsh", "omp", "reasonix", "opencode", "grok"]) void detectAgentConfigOne(a);
+      for (const a of ["codex", "dsh", "omp", "reasonix", "opencode", "grok", "workbuddy", "codebuddy", "hermes"]) void detectAgentConfigOne(a);
     }),
   );
 }

@@ -74,4 +74,9 @@ export const AGENT_CLIS: Record<string, AgentCli> = {
     dirs: [...COMMON_BINS, "~/.grok/bin"],
     note: "官方安装: curl -fsSL https://x.ai/cli/install.sh | sh",
   },
+  hermes: {
+    bin: "hermes",
+    // 官方安装器装到 ~/.local/bin(已在 COMMON_BINS);源码/本地部署常放 ~/.hermes/bin
+    dirs: [...COMMON_BINS, "~/.hermes/bin"],
+  },
 };

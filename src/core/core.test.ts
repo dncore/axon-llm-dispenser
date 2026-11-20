@@ -4,6 +4,8 @@ import { patchCodexConfigToml, patchCodexCatalog, removeModelProviderSections, r
 import { fallbackAutostartChecked } from "./autostart";
 import { patchReasonixProvider, patchReasonixServeAuth } from "./reasonix";
 import { patchDshProvider, patchDshDefaultModel, removeDshOtherProviders, upsertDshCredentialYaml } from "./dsh";
+import { chatCompletionsUrl, deriveBuddyReasoning, parseBuddyStatus, patchBuddyModelList, patchBuddyModels } from "./buddy";
+import { parseHermesStatus, patchHermesConfig, patchHermesModelList } from "./hermes";
 
 describe("deriveKeyRef", () => {
   it("大写并去非法字符,追加 _API_KEY", () => {
@@ -1686,5 +1688,382 @@ describe("grok 块内合并 / 仅更新模型列表", () => {
     expect(r.text).toContain("user_retry = 5");
     expect(r.text).toContain("temperature = 0.3");
     expect(r.text).toContain("[model_providers.other]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WorkBuddy / CodeBuddy models.json
+// ---------------------------------------------------------------------------
+
+const BUDDY_BASE = {
+  vendor: "Axon",
+  baseUrl: "https://gw.example/api/v1",
+  apiKey: "sk-test",
+  path: "/tmp/models.json",
+};
+
+describe("deriveBuddyReasoning(客户端 deriveReasoningCapabilities 的等价实现)", () => {
+  it("off 显式为 null → 不能关思考;xhigh/max 需显式给值", () => {
+    const r = deriveBuddyReasoning({ off: null, minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max" }, true);
+    expect(r).toEqual({ supportedEfforts: ["minimal", "low", "medium", "high", "xhigh"], canDisableThinking: false });
+  });
+
+  it("表里没写 off → 视为可关思考(与客户端一致);非推理模型不写 reasoning", () => {
+    const r = deriveBuddyReasoning({ minimal: null, low: "low", medium: "high", high: "high", xhigh: "max" }, true);
+    expect(r?.canDisableThinking).toBe(true);
+    expect(r?.supportedEfforts).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(deriveBuddyReasoning(undefined, false)).toBeUndefined();
+  });
+});
+
+describe("WorkBuddy / CodeBuddy models.json", () => {
+  it("WorkBuddy 新文件写裸数组;条目含完整 /chat/completions、能力位与思考档位", () => {
+    const r = patchBuddyModels("", { ...BUDDY_BASE, kind: "workbuddy", models: buildResolvedModels(["glm-5.3", "gpt-4o"]) });
+    const arr = JSON.parse(r.text) as Array<Record<string, unknown>>;
+    expect(Array.isArray(arr)).toBe(true);
+    const glm = arr.find((e) => e.id === "glm-5.3")!;
+    expect(glm.url).toBe("https://gw.example/api/v1/chat/completions");
+    expect(glm.apiKey).toBe("sk-test");
+    expect(glm.vendor).toBe("Axon");
+    expect(glm.maxInputTokens).toBe(1048576);
+    expect(glm.maxOutputTokens).toBe(131072);
+    expect(glm.supportsToolCall).toBe(true);
+    expect(glm.supportsImages).toBe(false); // 表里无 image 输入
+    expect(glm.supportsReasoning).toBe(true);
+    expect((glm.thinkingLevelMap as Record<string, unknown>).off).toBe(null);
+    expect((glm.reasoning as Record<string, unknown>).canDisableThinking).toBe(false);
+    // 非推理模型不写 reasoning(客户端按「不支持推理」处理)
+    const gpt = arr.find((e) => e.id === "gpt-4o")!;
+    expect(gpt.reasoning).toBeUndefined();
+    expect(gpt.supportsReasoning).toBe(false);
+    expect(gpt.supportsImages).toBe(true); // gpt-4o 表里有 image 输入
+  });
+
+  it("CodeBuddy 新文件写对象信封;availableModels 缺省时不创建", () => {
+    const r = patchBuddyModels("", { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["kimi-k3"]) });
+    const doc = JSON.parse(r.text) as { models?: unknown[]; availableModels?: unknown };
+    expect(Array.isArray(doc.models)).toBe(true);
+    expect(doc.models).toHaveLength(1);
+    expect(doc.availableModels).toBeUndefined();
+  });
+
+  it("availableModels 已存在且非空时追加缺失 id,原顺序保留;为空则不动", () => {
+    const existing = JSON.stringify({ models: [], availableModels: ["gpt-4o", "kimi-k3"] }, null, 2);
+    const r = patchBuddyModels(existing, { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["kimi-k3", "glm-5.3"]) });
+    expect((JSON.parse(r.text) as { availableModels: string[] }).availableModels).toEqual(["gpt-4o", "kimi-k3", "glm-5.3"]);
+
+    const empty = JSON.stringify({ models: [], availableModels: [] }, null, 2);
+    const r2 = patchBuddyModels(empty, { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["kimi-k3"]) });
+    expect((JSON.parse(r2.text) as { availableModels: string[] }).availableModels).toEqual([]);
+  });
+
+  it("同 id 外来条目跳过并提示,不覆盖用户自己的条目", () => {
+    const existing = JSON.stringify([
+      { id: "kimi-k3", name: "我的 kimi", vendor: "自定义", url: "https://mine.example/v1/chat/completions", apiKey: "sk-mine" },
+    ], null, 2);
+    const r = patchBuddyModels(existing, { ...BUDDY_BASE, kind: "workbuddy", models: buildResolvedModels(["kimi-k3", "glm-5.3"]) });
+    const arr = JSON.parse(r.text) as Array<Record<string, unknown>>;
+    expect(arr.find((e) => e.id === "kimi-k3")!.apiKey).toBe("sk-mine");
+    expect(arr.filter((e) => e.id === "kimi-k3")).toHaveLength(1);
+    expect(arr.find((e) => e.id === "glm-5.3")!.apiKey).toBe("sk-test");
+    expect(r.skipped).toEqual(["kimi-k3"]);
+    expect(r.changes.join("")).toContain("跳过 1 个同 id 外来条目");
+  });
+
+  it("本工具条目按 id 合并、条目内用户键保留;下架条目移除;外来条目不动", () => {
+    const existing = JSON.stringify([
+      { id: "glm-5.3", name: "glm", vendor: "Axon", url: "https://old.example/chat/completions", apiKey: "sk-old", tags: ["custom"], disabled: false },
+      { id: "gone-model", vendor: "Axon", url: "https://old.example/chat/completions", apiKey: "sk-old" },
+      { id: "user-model", vendor: "自定义", url: "https://mine.example/v1/chat/completions", apiKey: "sk-mine" },
+    ], null, 2);
+    const r = patchBuddyModels(existing, { ...BUDDY_BASE, kind: "workbuddy", models: buildResolvedModels(["glm-5.3"]) });
+    const arr = JSON.parse(r.text) as Array<Record<string, unknown>>;
+    expect(arr.map((e) => e.id).sort()).toEqual(["glm-5.3", "user-model"]);
+    const glm = arr.find((e) => e.id === "glm-5.3")!;
+    expect(glm.apiKey).toBe("sk-test");
+    expect(glm.url).toBe("https://gw.example/api/v1/chat/completions");
+    expect(glm.tags).toEqual(["custom"]); // 条目内用户键保留
+    expect(glm.disabled).toBe(false);
+  });
+
+  it("保形:已经是被客户端改写成裸数组的文件,继续写裸数组(不擅自转信封)", () => {
+    const existing = JSON.stringify([{ id: "user-model", vendor: "自定义", url: "https://mine/v1/chat/completions", apiKey: "k" }], null, 2);
+    const r = patchBuddyModels(existing, { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["glm-5.3"]) });
+    expect(Array.isArray(JSON.parse(r.text))).toBe(true);
+  });
+
+  it("幂等:同样输入再跑一次文本不变", () => {
+    const first = patchBuddyModels("", { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["glm-5.3", "kimi-k3"]) });
+    const second = patchBuddyModels(first.text, { ...BUDDY_BASE, kind: "codebuddy", models: buildResolvedModels(["glm-5.3", "kimi-k3"]) });
+    expect(second.text).toBe(first.text);
+    expect(second.changes).toHaveLength(0);
+  });
+
+  it("刷新只合并模型字段:url / apiKey 沿用文件现值;未接入时 managed=0", () => {
+    const existing = JSON.stringify([
+      { id: "glm-5.3", vendor: "Axon", url: "https://kept.example/chat/completions", apiKey: "sk-kept", maxInputTokens: 1 },
+    ], null, 2);
+    const r = patchBuddyModelList(existing, { ...BUDDY_BASE, baseUrl: "https://ignored.example", apiKey: "sk-ignored", kind: "workbuddy", models: buildResolvedModels(["glm-5.3", "kimi-k3"]) });
+    const arr = JSON.parse(r.text) as Array<Record<string, unknown>>;
+    expect(arr).toHaveLength(2);
+    expect(arr.find((e) => e.id === "glm-5.3")!.url).toBe("https://kept.example/chat/completions");
+    expect(arr.find((e) => e.id === "kimi-k3")!.url).toBe("https://kept.example/chat/completions");
+    expect(arr.find((e) => e.id === "kimi-k3")!.apiKey).toBe("sk-kept");
+    expect(arr.find((e) => e.id === "glm-5.3")!.maxInputTokens).toBe(1048576);
+
+    const fresh = patchBuddyModelList("", { ...BUDDY_BASE, kind: "workbuddy", models: buildResolvedModels(["glm-5.3"]) });
+    expect(fresh.managed).toBe(0);
+    expect(fresh.text).toBe("");
+  });
+
+  it("状态解析:条目数 / base / 密钥 / availableModels / 同 id 冲突", () => {
+    const text = JSON.stringify({
+      models: [
+        { id: "glm-5.3", vendor: "Axon", url: "https://gw.example/api/v1/chat/completions", apiKey: "sk-test" },
+        { id: "glm-5.3", vendor: "自定义", url: "https://mine/v1/chat/completions", apiKey: "sk-mine" },
+      ],
+      availableModels: ["glm-5.3"],
+    }, null, 2);
+    const s = parseBuddyStatus(text, "Axon");
+    expect(s.shape).toBe("envelope");
+    expect(s.managed).toBe(1);
+    expect(s.baseUrl).toBe("https://gw.example/api/v1");
+    expect(s.apiKeySet).toBe(true);
+    expect(s.availableModels).toBe(1);
+    expect(s.foreignSameId).toBe(1);
+  });
+
+  it("非法 JSON 报明确错误(不静默覆盖)", () => {
+    expect(() => patchBuddyModels("{,}", { ...BUDDY_BASE, kind: "workbuddy", models: buildResolvedModels(["glm-5.3"]) })).toThrow(/不是合法 JSON/);
+  });
+
+  it("chatCompletionsUrl 容忍尾斜杠", () => {
+    expect(chatCompletionsUrl("https://gw.example/api/v1///")).toBe("https://gw.example/api/v1/chat/completions");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hermes config.yaml
+// ---------------------------------------------------------------------------
+
+const HERMES_MODELS = [
+  { id: "deepseek-v4.1-flash", contextLength: 1000000, supportsVision: true },
+  { id: "glm-5.3", contextLength: 1048576, supportsVision: false },
+];
+
+describe("Hermes config.yaml", () => {
+  it("空文件:创建 providers.<name>(base_url/api_key/chat_completions/models)与 model 块", () => {
+    const r = patchHermesConfig("", {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      defaultModel: "glm-5.3",
+      models: HERMES_MODELS,
+    });
+    expect(r.text).toContain("providers:\n  axon:");
+    expect(r.text).toContain("    base_url: https://gw.example/api/v1");
+    expect(r.text).toContain("    api_key: sk-test");
+    expect(r.text).toContain("    transport: chat_completions");
+    expect(r.text).toContain("      glm-5.3:\n        context_length: 1048576\n        supports_vision: false");
+    expect(r.text).toContain("model:\n  provider: axon\n  default: glm-5.3");
+  });
+
+  it("已有其它 provider 与用户键:只改本 provider,其余原样保留", () => {
+    const existing = [
+      "providers:",
+      "  other:",
+      "    base_url: https://other.example/v1",
+      "    key_env: OTHER_KEY",
+      "    models:",
+      "      m1:",
+      "        context_length: 1000",
+      "  axon:",
+      "    base_url: https://old.example/v1",
+      "    api_key: sk-old",
+      "    transport: chat_completions",
+      "    extra_body:",
+      "      enable_thinking: true",
+      "    models:",
+      "      old-model:",
+      "        context_length: 1",
+      "",
+    ].join("\n");
+    const r = patchHermesConfig(existing, {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      defaultModel: "glm-5.3",
+      models: HERMES_MODELS,
+    });
+    expect(r.text).toContain("  other:\n    base_url: https://other.example/v1");
+    expect(r.text).toContain("    base_url: https://gw.example/api/v1");
+    expect(r.text).toContain("    api_key: sk-test");
+    expect(r.text).toContain("    extra_body:\n      enable_thinking: true"); // 用户键保留
+    expect(r.text).not.toContain("old-model"); // 下架条目移除
+    expect(r.text).toContain("      glm-5.3:");
+  });
+
+  it("已有 api_mode 时沿用该键名(不新增 transport)", () => {
+    const existing = ["providers:", "  axon:", "    api_mode: chat_completions", "    models:", "      old:", ""].join("\n");
+    const r = patchHermesConfig(existing, {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      models: HERMES_MODELS,
+    });
+    expect(r.text).toContain("    api_mode: chat_completions");
+    expect(r.text).not.toContain("transport:");
+    expect(r.text.match(/api_mode:/g)).toHaveLength(1);
+  });
+
+  it("key_env 存在时提示其优先级高于 api_key", () => {
+    const existing = ["providers:", "  axon:", "    key_env: AXON_KEY", "    models:", "      old:", ""].join("\n");
+    const r = patchHermesConfig(existing, {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      models: HERMES_MODELS,
+    });
+    expect(r.warnings.join("")).toContain("key_env");
+    expect(r.text).toContain("    key_env: AXON_KEY");
+  });
+
+  it("model.base_url 存在时清空(端点由 provider 段提供);model 其它键保留", () => {
+    const existing = ["model:", "  provider: custom", "  default: old", "  base_url: https://old.example/v1", "  context_length: 32000", ""].join("\n");
+    const r = patchHermesConfig(existing, {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      defaultModel: "glm-5.3",
+      models: HERMES_MODELS,
+    });
+    expect(r.text).toContain("  provider: axon");
+    expect(r.text).toContain("  default: glm-5.3");
+    expect(r.text).toContain("  base_url: ''");
+    expect(r.text).toContain("  context_length: 32000");
+  });
+
+  it("models 条目里的用户键保留(只覆盖 context_length / supports_vision)", () => {
+    const existing = [
+      "providers:",
+      "  axon:",
+      "    base_url: https://old.example/v1",
+      "    models:",
+      "      glm-5.3:",
+      "        context_length: 1",
+      "        supports_vision: true",
+      "        my_note: keep-me",
+      "",
+    ].join("\n");
+    const r = patchHermesConfig(existing, {
+      providerName: "axon",
+      baseUrl: "https://gw.example/api/v1",
+      apiKey: "sk-test",
+      models: [{ id: "glm-5.3", contextLength: 1048576, supportsVision: false }],
+    });
+    expect(r.text).toContain("        context_length: 1048576");
+    expect(r.text).toContain("        supports_vision: false");
+    expect(r.text).toContain("        my_note: keep-me");
+  });
+
+  it("幂等:同样输入再跑一次文本不变", () => {
+    const input = { providerName: "axon", baseUrl: "https://gw.example/api/v1", apiKey: "sk-test", defaultModel: "glm-5.3", models: HERMES_MODELS };
+    const first = patchHermesConfig("", input);
+    const second = patchHermesConfig(first.text, input);
+    expect(second.text).toBe(first.text);
+    expect(second.changes).toHaveLength(0);
+  });
+
+  it("仅刷新模型:base_url / api_key / model.* 不动;model.default 下架时修正", () => {
+    const existing = [
+      "providers:",
+      "  axon:",
+      "    base_url: https://kept.example/v1",
+      "    api_key: sk-kept",
+      "    transport: chat_completions",
+      "    models:",
+      "      gone-model:",
+      "        context_length: 1",
+      "model:",
+      "  provider: axon",
+      "  default: gone-model",
+      "",
+    ].join("\n");
+    const r = patchHermesModelList(existing, "axon", HERMES_MODELS);
+    expect(r.providerFound).toBe(true);
+    expect(r.text).toContain("    base_url: https://kept.example/v1");
+    expect(r.text).toContain("    api_key: sk-kept");
+    expect(r.text).not.toContain("gone-model:");
+    expect(r.text).toContain("      glm-5.3:");
+    expect(r.text).toContain("  default: deepseek-v4.1-flash"); // 排序后第一个
+  });
+
+  it("仅刷新模型:未接入时 providerFound=false 且文本不变", () => {
+    const r = patchHermesModelList("providers:\n  other:\n    base_url: https://x/v1\n", "axon", HERMES_MODELS);
+    expect(r.providerFound).toBe(false);
+    expect(r.text).toBe("providers:\n  other:\n    base_url: https://x/v1\n");
+  });
+
+  it("状态解析:provider / 模型数 / model 块 / 凭据来源", () => {
+    const text = [
+      "providers:",
+      "  axon:",
+      "    base_url: https://gw.example/api/v1",
+      "    api_key: sk-test",
+      "    api_mode: chat_completions",
+      "    models:",
+      "      glm-5.3:",
+      "        context_length: 1048576",
+      "      kimi-k3:",
+      "        context_length: 1048576",
+      "model:",
+      "  provider: axon",
+      "  default: glm-5.3",
+      "  base_url: ''",
+      "",
+    ].join("\n");
+    const s = parseHermesStatus(text, "axon");
+    expect(s.providerConfigured).toBe(true);
+    expect(s.baseUrl).toBe("https://gw.example/api/v1");
+    expect(s.apiKeySet).toBe(true);
+    expect(s.credentialVia).toBe("api_key");
+    expect(s.wireMode).toBe("chat_completions");
+    expect(s.modelCount).toBe(2);
+    expect(s.defaultProvider).toBe("axon");
+    expect(s.defaultModel).toBe("glm-5.3");
+    expect(s.modelBaseUrl).toBe("");
+  });
+});
+
+describe("Hermes 空值内联写法(全新安装的官方哨兵)", () => {
+  const input = {
+    providerName: "axon",
+    baseUrl: "https://gw.example/api/v1",
+    apiKey: "sk-test",
+    defaultModel: "glm-5.3",
+    models: [{ id: "glm-5.3", contextLength: 1048576, supportsVision: false }],
+  };
+
+  it('model: "" 哨兵 → 展开成块写法,不报错', () => {
+    const r = patchHermesConfig(['model: ""', "agent:", "  max_turns: 150", ""].join("\n"), input);
+    expect(r.text).toContain("model:\n  provider: axon");
+    expect(r.text).toContain("agent:\n  max_turns: 150");
+    expect(r.text).not.toContain('model: ""');
+  });
+
+  it("providers: {} → 展开并写入本 provider", () => {
+    const r = patchHermesConfig(["providers: {}", "model:", "  provider: custom", ""].join("\n"), input);
+    expect(r.text).toContain("providers:\n  axon:");
+    expect(r.text).toContain("  provider: axon");
+  });
+
+  it("models: {} → 展开并写入模型条目", () => {
+    const existing = ["providers:", "  axon:", "    base_url: https://old/v1", "    models: {}", ""].join("\n");
+    const r = patchHermesConfig(existing, input);
+    expect(r.text).toContain("    models:\n      glm-5.3:");
+  });
+
+  it("真有内容的内联写法仍然报错(不猜着改)", () => {
+    expect(() => patchHermesConfig(["providers: { a: 1 }", ""].join("\n"), input)).toThrow(/内联写法/);
   });
 });

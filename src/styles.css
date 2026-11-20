@@ -388,6 +388,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .agent-state.checking { color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
 .agent-state.installed, .agent-state.ok { color: var(--ok); }
 .agent-state.stale { color: #d97706; }
+.agent-state.desktop { cursor: default; opacity: .45; } /* 桌面应用:无 CLI 安装检测 */
 .agent-state.other { color: #7c3aed; } /* 已接入本 app 的另一个 Provider(非当前) */
 .agent-state.update-available { color: #d97706; } /* 可升级:橙色↑ */
 .agent-state.updating { color: var(--accent); animation: agent-pulse 1s ease-in-out infinite; } /* 升级/安装中 */
