@@ -1005,7 +1005,7 @@ export async function planRefreshDsh(cfg: bridge.AppConfig, modelIds: string[]):
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(settingsPath, r.text);
-      return [`settings.yaml 已更新(${written.path})` + + backupSuffix(written)];
+      return [`settings.yaml 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
@@ -1026,7 +1026,7 @@ export async function planRefreshOmp(cfg: bridge.AppConfig, modelIds: string[]):
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(modelsPath, r.text);
-      return [`models.yml 已更新(${written.path})` + + backupSuffix(written)];
+      return [`models.yml 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
@@ -1051,7 +1051,7 @@ export async function planRefreshReasonix(cfg: bridge.AppConfig, modelIds: strin
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`config.toml 已更新(${written.path})` + + backupSuffix(written)];
+      return [`config.toml 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
@@ -1072,7 +1072,7 @@ export async function planRefreshOpenCode(cfg: bridge.AppConfig, modelIds: strin
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`opencode.json 已更新(${written.path})` + + backupSuffix(written)];
+      return [`opencode.json 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
@@ -1096,7 +1096,7 @@ export async function planRefreshGrok(cfg: bridge.AppConfig, modelIds: string[])
     changes: r.changes,
     apply: async () => {
       const written = await bridge.writeWithBackup(configPath, r.text);
-      return [`config.toml 已更新(${written.path})` + + backupSuffix(written)];
+      return [`config.toml 已更新(${written.path})` + backupSuffix(written)];
     },
   };
 }
