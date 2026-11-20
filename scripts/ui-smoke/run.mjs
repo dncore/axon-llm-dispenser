@@ -7,14 +7,35 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir, cp, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..");
 const DIST = join(ROOT, "dist");
+
+/**
+ * Playwright 自带的 Chromium(开发机常见,免系统安装)。
+ * headless shell 排前面:容器/无显示环境下完整版 chrome 常卡死在 headless 初始化
+ * (进程起来、DevTools 端口在听,但不发起任何导航),headless shell 稳定。
+ */
+function playwrightChromeCandidates() {
+  const base = join(homedir(), ".cache", "ms-playwright");
+  if (!existsSync(base)) return [];
+  const shells = [];
+  const full = [];
+  for (const dir of readdirSync(base).sort()) {
+    if (dir.startsWith("chromium_headless_shell-")) {
+      shells.push(join(base, dir, "chrome-headless-shell-linux64", "chrome-headless-shell"));
+    } else if (dir.startsWith("chromium-")) {
+      full.push(join(base, dir, "chrome-linux64", "chrome"));
+    }
+  }
+  // headless shell 永远排在完整版 chrome 之前(见上方注释)
+  return [...shells, ...full].filter((p) => existsSync(p));
+}
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_BIN,
@@ -25,6 +46,7 @@ const CHROME_CANDIDATES = [
   "/usr/bin/chromium-browser",
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  ...playwrightChromeCandidates(),
 ].filter(Boolean);
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml" };
@@ -86,14 +108,46 @@ function serve(webRoot, port) {
   return new Promise((res) => server.listen(port, "127.0.0.1", () => res(server)));
 }
 
+/** 启动浏览器并连上 CDP;失败(导航不就绪)时杀掉进程并抛错,由调用方换 profile 重试。 */
+async function launchAndConnect(chromeBin, pageUrl, profileArgs) {
+  const cdpPort = await freePort();
+  const proc = spawn(chromeBin, [
+    "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--window-size=1280,800",
+    ...profileArgs,
+    `--remote-debugging-port=${cdpPort}`, pageUrl,
+  ], { stdio: "ignore" });
+  try {
+    const cdp = await connectCdp(cdpPort, pageUrl);
+    return { proc, cdp };
+  } catch (e) {
+    proc.kill("SIGKILL");
+    throw e;
+  }
+}
+
 async function connectCdp(cdpPort, pageUrl) {
   for (let i = 0; i < 100; i++) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
-      const page = list.find((t) => t.type === "page" && (t.url || "").includes(pageUrl));
-      if (page?.webSocketDebuggerUrl) return await wsConnect(page.webSocketDebuggerUrl);
-    } catch {
-      // Chrome 还没起来
+      // 不按 URL 过滤:chrome-headless-shell 不认命令行位置参数 URL(永远 about:blank),
+      // 统一由 CDP 导航,这样任何 Chromium 变体都能用。
+      const page = list.find((t) => t.type === "page");
+      if (page?.webSocketDebuggerUrl) {
+        const cdp = await wsConnect(page.webSocketDebuggerUrl);
+        // 已经由命令行位置参数加载好时不重复导航:对同 URL 再发 Page.navigate
+        // 在 chrome-headless-shell 上会永久不返回。需要导航时也不等它返回,
+        // 直接以「#app 就绪」为成功条件。
+        if (!(page.url || "").startsWith(pageUrl)) {
+          void cdp.send("Page.enable", {}).catch(() => {});
+          void cdp.send("Page.navigate", { url: pageUrl }).catch(() => {});
+        }
+        const ready = await cdp.waitFor(`document.readyState === 'complete' && !!document.getElementById('app')`, 20000);
+        if (!ready) throw new Error(`页面未在 20 秒内就绪: ${pageUrl}`);
+        return cdp;
+      }
+    } catch (e) {
+      // Chrome 还没起来(或本次尝试的导航还没完成):继续等
+      if (e instanceof Error && e.message.includes("页面未在")) throw e;
     }
     await sleep(100);
   }
@@ -115,10 +169,18 @@ async function wsConnect(wsUrl) {
       pending.delete(msg.id);
     }
   });
+  // 单次 CDP 调用超时:浏览器卡死(容器里完整版 chrome 会)时尽快报错,而不是永久挂住
   const send = (method, params) =>
-    new Promise((res) => {
+    new Promise((res, rej) => {
       const i = ++id;
-      pending.set(i, res);
+      const timer = setTimeout(() => {
+        pending.delete(i);
+        rej(new Error(`CDP ${method} 超时(15 秒)`));
+      }, 15000);
+      pending.set(i, (m) => {
+        clearTimeout(timer);
+        res(m);
+      });
       ws.send(JSON.stringify({ id: i, method, params }));
     });
   const evaluate = async (expression) => {
@@ -206,8 +268,10 @@ async function runScenarios(cdp) {
   }))()`);
   check(
     "布局:工具行动作按钮不折行、不溢出卡片",
-    layout.length === 8 && layout.every((r) => r.sameLine && r.overflow <= 0),
-    layout.map((r) => `${r.name} actW=${r.actW} gap=${r.slack} vw=${r.vw}`).join(" | "),
+    // 真正的断言是每一行:动作按钮与工具名同排、右边界不越过卡片。
+    // 行数不写死(工具数会增长),只要渲染出了工具行就逐行校验。
+    layout.length > 0 && layout.every((r) => r.sameLine && r.overflow <= 0),
+    `${layout.length} 行: ` + layout.map((r) => `${r.name} actW=${r.actW} gap=${r.slack} vw=${r.vw}`).join(" | "),
   );
 
   // 「配置」超上限 → 自动弹选择框
@@ -392,16 +456,21 @@ try {
   if (!existsSync(join(DIST, "index.html"))) throw new Error("dist/ 不存在,先跑 npm run build");
   const chromeBin = findChrome();
   const webPort = await freePort();
-  const cdpPort = await freePort();
   const webRoot = await prepareWebRoot(tmp);
   server = await serve(webRoot, webPort);
   const pageUrl = `http://127.0.0.1:${webPort}/index.html`;
-  chrome = spawn(chromeBin, [
-    "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--window-size=1280,800",
-    `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${join(tmp, "chrome-profile")}`, pageUrl,
-  ], { stdio: "ignore" });
 
-  const cdp = await connectCdp(cdpPort, `127.0.0.1:${webPort}`);
+  let launched;
+  try {
+    launched = await launchAndConnect(chromeBin, pageUrl, [`--user-data-dir=${join(tmp, "chrome-profile")}`]);
+  } catch (e) {
+    // 某些环境(容器/受限内核)下带自定义 --user-data-dir 的 Chrome 能起来、DevTools 也在听,
+    // 但永远不发起导航;此时用浏览器默认 profile 再试一次(默认 profile 已验证可用)。
+    console.error(`[smoke] 独立 profile 无法导航(${e instanceof Error ? e.message : e}),改用默认 profile 重试`);
+    launched = await launchAndConnect(chromeBin, pageUrl, []);
+  }
+  chrome = launched.proc;
+  const cdp = launched.cdp;
   await runScenarios(cdp);
   cdp.close();
 } catch (e) {
